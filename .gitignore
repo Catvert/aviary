@@ -14,3 +14,9 @@
 
 # Release tarballs assembled by packaging/install.sh consumers.
 /aviary-*.tar.gz
+
+# Working notes kept outside the published tree: the roadmap and the design
+# write-ups that go with it are drafts about work not done yet, revised far
+# more often than the code they describe. `CLAUDE.md` documents what exists.
+/TODO.md
+/docs/

@@ -140,6 +140,13 @@ UI. The short version:
 - **All user-visible strings go through `tr!`** (`assets/i18n/{fr,en}.json`);
   both catalogs must stay key- and placeholder-compatible.
 
+## Contributing
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) covers the build, the four checks CI runs,
+and the handful of rules that are not obvious from the sources — the UI does no
+I/O, backends stay behind `providers::Session`, user-visible strings go through
+`tr!` with both catalogs updated, and `patches/` is not a place to develop.
+
 ## License
 
 Apache-2.0 — see [`LICENSE`](LICENSE). Bundled fonts, dictionaries, icons and

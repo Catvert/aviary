@@ -28,7 +28,6 @@ rust-embed = "8"
 # BoxFuture for implementing gpui's HttpClient trait (intercepts inline
 # aviary-cid/... images; see ui/inline_images.rs).
 futures = "0.3"
-jiff = { version = "0.2", default-features = false, features = ["std"] }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 html-to-markdown-rs = "3.3"
 # Used by `app::html_render` for the rich HTML viewer (alternative to the
@@ -80,7 +79,6 @@ cursor-icon = "1"
 # pulled in by blitz-dom through parley, must compile against the matching
 # dlopen API or its linked fontconfig imports fail (feature unification).
 fontique = { version = "0.10", default-features = false, features = ["fontconfig-dlopen"] }
-rfd = "0.17"
 reqwest = { version = "0.13", default-features = false, features = ["json", "form", "query", "stream", "rustls"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net", "io-util", "fs", "process"] }
 serde = { version = "1", features = ["derive"] }

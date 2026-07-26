@@ -67,10 +67,15 @@ const NOTO_COLOR_EMOJI_FONT: &[u8] = include_bytes!("../../assets/fonts/NotoColo
 
 /// Assets embedded in the binary and served to gpui through `AssetSource`.
 /// gpui-component resolves its icons under `icons/*.svg`.
+///
+/// Fonts are deliberately *not* embedded here: nothing ever asks the asset
+/// source for one — gpui gets them from the `include_bytes!` constants above
+/// and Fontique from the same constants (`blitz_body::paint`) — so listing
+/// them would put every `.ttf` in the binary a second time, Noto Color Emoji's
+/// 10 MB included.
 #[derive(RustEmbed)]
 #[folder = "assets"]
 #[include = "icons/**/*.svg"]
-#[include = "fonts/**/*.ttf"]
 struct Assets;
 
 impl gpui::AssetSource for Assets {
