@@ -1,0 +1,208 @@
+[package]
+name = "aviary"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop email, calendar and kanban client for Microsoft 365, Gmail and IMAP/SMTP, built on gpui"
+repository = "https://github.com/Catvert/aviary"
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["email", "imap", "gmail", "calendar", "gpui"]
+categories = ["email", "gui"]
+# The Blitz/Stylo graph and the `const` blocks in this crate need a recent
+# toolchain; CI and shell.nix both provide it.
+rust-version = "1.97"
+# Never published to crates.io: the `[patch.crates-io]` block below pins four
+# vendored crates, and cargo refuses to publish a crate whose dependencies are
+# patched. Distribution is by source and by the binaries the release workflow
+# attaches to a tag.
+publish = false
+
+[dependencies]
+# UI: gpui (Zed's framework) and gpui-component (inputs, dock, virtualized
+# lists, menus, notifications, Markdown/HTML rendering, and themes).
+# gpui-component 0.5 is aligned with gpui 0.2.2 (crates.io).
+gpui = "0.2.2"
+gpui-component = "0.5"
+# Embedded assets (Lucide SVG icons and fonts) served to gpui via AssetSource.
+rust-embed = "8"
+# BoxFuture for implementing gpui's HttpClient trait (intercepts inline
+# aviary-cid/... images; see ui/inline_images.rs).
+futures = "0.3"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+html-to-markdown-rs = "3.3"
+# Used by `app::html_render` for the rich HTML viewer (alternative to the
+# markdown converter). `scraper` is built on `html5ever`; we lean on its
+# `Html`/`ElementRef` walker rather than implementing a TreeSink ourselves.
+# `default-features = false` strips the `getopts`/`main` features intended
+# for the binary entry point — we only need the parsing API.
+scraper = { version = "0.27", default-features = false, features = ["errors"] }
+base64 = "0.22"
+regex = "1"
+# Pure-Rust Hunspell-compatible engine used by the offline FR/EN spelling
+# checker. Dictionaries are embedded under assets/spellcheck/.
+spellbook = "0.4.2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# Reader faithful mode: Blitz HTML/CSS engine (Stylo + Taffy + parley),
+# rasterized on the CPU by vello_cpu into an image displayed by gpui (see
+# ui/blitz_body.rs). Without `accessibility`, which is unnecessary for
+# offscreen rendering. Floats preserve email table grids, complex scripts add
+# dictionary line breaking, and incremental layout keeps pointer interaction
+# from relaying out a whole newsletter. Versions aligned with the Blitz
+# 0.3.0-beta.1 workspace.
+blitz-dom = { version = "0.3.0-beta.1", default-features = false, features = [
+    "svg",
+    "woff",
+    "system-fonts",
+    "floats",
+    "complex-scripts",
+    "incremental",
+] }
+blitz-html = "0.3.0-beta.1"
+blitz-paint = "0.3.0-beta.1"
+blitz-traits = "0.3.0-beta.1"
+anyrender = "0.11"
+# `multithreading`: parallel vello_cpu rasterization (rayon, already in the
+# dependency graph through Stylo), speeding up full renders of large emails.
+anyrender_vello_cpu = { version = "0.14", features = ["multithreading"] }
+# anyrender_vello_cpu disables vello_cpu's default features and does not expose
+# its `png` switch. Re-enable it in the unified feature graph so Glifo can decode
+# the PNG strikes stored in Noto Color Emoji's CBDT table.
+vello_cpu = { version = "0.0.9", default-features = false, features = ["png"] }
+peniko = "0.6"
+smallvec = "1"
+# Constructs Blitz UiEvents for faithful-mode selection and link interaction.
+# Versions are aligned with blitz-traits/blitz-dom.
+atomic_refcell = "0.1"
+keyboard-types = "0.7"
+cursor-icon = "1"
+# gpui enables `yeslogic-fontconfig-sys/dlopen` (through font-kit); fontique,
+# pulled in by blitz-dom through parley, must compile against the matching
+# dlopen API or its linked fontconfig imports fail (feature unification).
+fontique = { version = "0.10", default-features = false, features = ["fontconfig-dlopen"] }
+rfd = "0.17"
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "query", "stream", "rustls"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net", "io-util", "fs", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+directories = "6"
+rusqlite = { version = "0.40", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde", "clock", "unstable-locales"] }
+# Pure-Rust RFC 5545 parser/expander. Unlike the lighter `icalendar` parser,
+# calcard expands recurring events and resolves IANA/common Outlook time zones;
+# `runtime::ical` complements it for arbitrary embedded VTIMEZONE transitions.
+calcard = { version = "0.3.6", default-features = false }
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
+open = "5"
+log = "0.4"
+env_logger = "0.11"
+notify-rust = "4"
+sha2 = "0.11"
+hex = "0.4"
+getrandom = "0.4"
+urlencoding = "2"
+# Builds the local "download all" archive in the message viewer. Only the
+# pure-Rust DEFLATE backend is enabled; the crate's other archive codecs and
+# encryption support are unnecessary here.
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# i18n shared by the gpui UI, runtime, and providers.
+rust-i18n = "4"
+sys-locale = "0.3"
+
+# IMAP/SMTP provider. We use the sync `imap` crate (more battle-tested,
+# clean STARTTLS and TLS support) wrapped in `spawn_blocking` from the
+# runtime — IMAP is network-bound and one-shot per call (connect → login →
+# op → logout), so the spawn_blocking overhead is invisible. lettre is the
+# SMTP client. mail-parser parses RFC822 bytes returned by FETCH.
+# keyring stores the IMAP/SMTP password in the OS credential store
+# (Keychain / Credential Manager / Secret Service).
+imap = { version = "3.0.0-alpha.15", default-features = false, features = ["rustls-tls"] }
+rustls-connector = { version = "0.23", default-features = false, features = ["webpki-root-certs"] }
+mail-parser = "0.11"
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder", "hostname", "pool", "webpki-roots"] }
+# Keyring 4's `v1` compatibility layer selects Keychain on macOS, Credential
+# Manager on Windows and freedesktop Secret Service on Linux. Its Linux store
+# uses pure-Rust transport encryption and does not fall back to the
+# session-scoped kernel keyring.
+keyring = "4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# `default-features = false` strips ksni's `tokio` default, which would
+# enable `zbus/tokio` globally. With Cargo's feature unification that
+# forces accesskit, atspi and notify-rust into tokio mode too — and they
+# panic from threads without a tokio runtime entered. `async-io` keeps
+# zbus on its standalone executor (the historical default).
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+# `mallopt`: the reader rasterizes mail bodies into multi-megabyte buffers, and
+# glibc's adaptive mmap threshold turns those into arena memory it never returns
+# to the kernel. See `tune_allocator` in `main.rs`.
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+# Keep application code pleasant to debug while avoiding the very slow
+# opt-level 0 paths in layout, text shaping, image decoding, and painting.
+opt-level = 1
+# At opt-level > 0 rustc otherwise performs local ThinLTO across the crate's
+# codegen units, even though Cargo's regular `lto = false` default is in use.
+# Aviary is a large binary crate, so that extra optimization dominates
+# incremental rebuilds while bringing little value to a development build.
+lto = "off"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# Faithful HTML rendering is CPU-bound. These crates make up its hot path, so
+# debug builds use their optimized code while retaining debuginfo for Aviary.
+[profile.dev.package.blitz-dom]
+opt-level = 3
+
+[profile.dev.package.blitz-html]
+opt-level = 3
+
+[profile.dev.package.blitz-paint]
+opt-level = 3
+
+[profile.dev.package.blitz-traits]
+opt-level = 3
+
+[profile.dev.package.anyrender_vello_cpu]
+opt-level = 3
+
+[profile.dev.package.vello_cpu]
+opt-level = 3
+
+[profile.dev.package.stylo]
+opt-level = 3
+
+[profile.dev.package.stylo_taffy]
+opt-level = 3
+
+[profile.dev.package.taffy]
+opt-level = 3
+
+[profile.dev.package.parley]
+opt-level = 3
+
+# gpui and image decoding are shared by every view, including Blitz tiles.
+[profile.dev.package.gpui]
+opt-level = 3
+
+[profile.dev.package.gpui-component]
+opt-level = 3
+
+[profile.dev.package.image]
+opt-level = 3
+
+# These are minimal, buildable crate sources rather than Git clones. The exact
+# upstream versions and six modified source files are listed in patches/README.md.
+[patch.crates-io]
+blitz-dom = { path = "patches/blitz-dom" }
+blitz-paint = { path = "patches/blitz-paint" }
+cosmic-text = { path = "patches/cosmic-text" }
+stylo_derive = { path = "patches/stylo_derive" }

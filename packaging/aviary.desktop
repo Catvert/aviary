@@ -1,0 +1,26 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Aviary
+GenericName=Email Client
+GenericName[fr]=Client de messagerie
+Comment=Email, calendar and kanban for Microsoft 365, Gmail and IMAP
+Comment[fr]=Courrier, calendrier et kanban pour Microsoft 365, Gmail et IMAP
+Exec=aviary
+Icon=aviary
+Terminal=false
+# One main category only. Adding Office (for the calendar) makes menus list
+# Aviary twice, and desktop-file-validate warns about it.
+Categories=Network;Email;
+Keywords=email;mail;imap;gmail;calendar;kanban;
+Keywords[fr]=courriel;courrier;mail;imap;gmail;calendrier;kanban;
+# Deliberately not registering `MimeType=x-scheme-handler/mailto;`: the binary
+# takes no arguments today, so claiming the handler would let the desktop offer
+# Aviary as the default mail client and then open it on an empty inbox instead
+# of a pre-filled composer. Add it together with `%u` and argument parsing.
+# Wayland matches a window to this file through its app_id, which ui/mod.rs
+# sets to "aviary" in WindowOptions. Both must stay equal or the launcher shows
+# a generic icon in the dock. Renaming this file to a reverse-DNS id (needed
+# for Flathub) means changing that app_id in the same commit.
+StartupWMClass=aviary
+StartupNotify=true

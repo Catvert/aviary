@@ -1,0 +1,38 @@
+Aviary
+Copyright 2026 Arno Dupont
+
+This product includes software developed as part of the Aviary project,
+licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The following third-party material is redistributed within this repository and
+in the binaries built from it, under its own terms.
+
+Fonts (assets/fonts/)
+  Inter                — SIL Open Font License 1.1 (Inter-OFL.txt)
+  JetBrains Mono       — SIL Open Font License 1.1 (JetBrainsMono-OFL.txt)
+  Noto Emoji           — SIL Open Font License 1.1 (NotoEmoji-OFL.txt)
+  Noto Color Emoji     — SIL Open Font License 1.1 (NotoEmoji-OFL.txt)
+
+Icons (assets/icons/)
+  Lucide               — ISC License. https://lucide.dev
+                         `aviary.svg` is this project's own mark, not Lucide's.
+
+Spelling dictionaries (assets/spellcheck/)
+  French, Grammalecte "classique" 7.5     — MPL-2.0 (fr.LICENSE)
+  English, SCOWL en_US 2020.12.07         — permissive, see en.LICENSE
+  Both vendored from github.com/wooorm/dictionaries; see the directory README.
+
+Vendored crates (patches/)
+  Minimal buildable copies of published crates, pinned through
+  [patch.crates-io] with small local modifications documented in
+  patches/README.md. They keep their upstream licenses:
+
+  blitz-dom, blitz-paint  — Apache-2.0 OR MIT
+  cosmic-text             — Apache-2.0 OR MIT (LICENSE-APACHE, LICENSE-MIT)
+  stylo_derive            — MPL-2.0
+
+Aviary links against gpui (Apache-2.0), gpui-component (Apache-2.0) and the
+Stylo/Blitz rendering stack (MPL-2.0 and Apache-2.0 OR MIT). The MPL-2.0
+components are used as unmodified separate files except for the documented
+changes in patches/, whose modified sources are distributed in this repository
+as that license requires.

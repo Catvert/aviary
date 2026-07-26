@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt · clippy · tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The build needs Vulkan, Wayland/X11, fontconfig and dbus headers.
+      # shell.nix already declares them, so the CI uses the same definition as
+      # a developer machine instead of a second, drifting list of apt packages.
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      # Keyed on Cargo.lock: the dependency graph is large and includes Stylo.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nix-shell
+
+      - name: rustfmt
+        run: nix-shell --quiet --run "cargo fmt --check"
+
+      - name: clippy
+        run: nix-shell --quiet --run "cargo clippy --all-targets -- -D warnings"
+
+      - name: tests
+        run: nix-shell --quiet --run "cargo test"
+
+  i18n:
+    name: catalogs stay aligned
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cheap and independent of the Rust build, so a missing translation is
+      # reported in seconds rather than after a full compile.
+      - name: fr and en expose the same keys
+        run: |
+          python3 - <<'PY'
+          import json, sys
+
+          def keys(node, prefix=""):
+              found = set()
+              for key, value in node.items():
+                  path = f"{prefix}.{key}" if prefix else key
+                  found |= keys(value, path) if isinstance(value, dict) else {path}
+              return found
+
+          fr = keys(json.load(open("assets/i18n/fr.json")))
+          en = keys(json.load(open("assets/i18n/en.json")))
+          missing_en, missing_fr = sorted(fr - en), sorted(en - fr)
+          for key in missing_en:
+              print(f"missing in en.json: {key}")
+          for key in missing_fr:
+              print(f"missing in fr.json: {key}")
+          print(f"{len(fr & en)} shared keys")
+          sys.exit(1 if missing_en or missing_fr else 0)
+          PY

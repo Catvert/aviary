@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (must already exist)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Linux x86_64 tarball
+    # Deliberately *not* built through nix-shell, unlike ci.yml. A binary linked
+    # against nixpkgs' glibc carries an ELF interpreter under /nix/store and will
+    # not start on an ordinary distribution — exactly the user a downloadable
+    # tarball is for. Building on the oldest supported runner links against its
+    # glibc instead, which newer systems stay compatible with. Nix users are
+    # better served by `nix profile install`, which this release does not need to
+    # produce anything for.
+    #
+    # The cost is a second dependency list that can drift from shell.nix. When
+    # this build breaks and CI stays green, that drift is the first thing to
+    # check.
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            pkg-config clang cmake \
+            libwayland-dev libxkbcommon-dev libgl-dev \
+            libfontconfig-1-dev libfreetype-dev \
+            libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxcb1-dev \
+            libvulkan-dev libssl-dev libdbus-1-dev libzstd-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        env:
+          # Absent on forks and on any run without repository secrets: the
+          # constant then stays empty and the app asks for the user's own Google
+          # registration in Preferences → Accounts. Never echo this value.
+          AVIARY_GOOGLE_CLIENT_SECRET: ${{ secrets.AVIARY_GOOGLE_CLIENT_SECRET }}
+        run: cargo build --release --locked
+
+      - name: Assemble the tarball
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          staging="aviary-${version}-x86_64-linux"
+          mkdir -p "$staging"
+          cp target/release/aviary "$staging/"
+          cp README.md LICENSE NOTICE "$staging/"
+          cp packaging/aviary.desktop packaging/aviary.svg "$staging/"
+          cp packaging/install.sh "$staging/"
+          tar czf "$staging.tar.gz" "$staging"
+          sha256sum "$staging.tar.gz" > "$staging.tar.gz.sha256"
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            aviary-*.tar.gz
+            aviary-*.tar.gz.sha256
+          generate_release_notes: true
+          body: |
+            Linux x86_64 build. Unpack and run `./install.sh` to place the
+            binary, desktop entry and icon under `~/.local`, or run `./aviary`
+            directly.
+
+            Requires the usual desktop runtime libraries (Vulkan loader,
+            Wayland or X11, fontconfig, freetype, D-Bus). Nix users can instead
+            run `nix profile install github:Catvert/aviary`.

@@ -1,0 +1,16 @@
+/target
+*.swp
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# `nix build` output symlink.
+/result
+/result-*
+
+# Per-developer worktree tooling (github.com/…/wt), not part of the project.
+/wt.toml
+
+# Release tarballs assembled by packaging/install.sh consumers.
+/aviary-*.tar.gz
