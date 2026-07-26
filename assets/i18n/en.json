@@ -713,6 +713,7 @@
   "settings-ui-scale": "UI scale",
   "settings-body-font-size": "Body font size",
   "settings-force-light-email-preview": "Always use a light background for Faithful email previews",
+  "settings-start-maximized": "Open the window maximized at startup",
   "settings-keyboard-standard": "Keyboard shortcuts",
   "settings-keyboard-vim": "Vim navigation",
   "settings-keyboard-vim-enable": "Enable Vim shortcuts",

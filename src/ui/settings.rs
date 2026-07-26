@@ -643,6 +643,18 @@ pub struct GlobalSettings {
     /// the application theme is dark.
     #[serde(default)]
     pub force_light_email_preview: bool,
+    /// Opens the main window maximized.
+    ///
+    /// Normally a window manager's own rule would decide this, but under
+    /// Wayland gpui sends the initial `wl_surface.commit` *before*
+    /// `xdg_toplevel.set_app_id`: the compositor has to answer that commit
+    /// with a size while the window still has no app id, so any rule matching
+    /// on it — niri's `open-maximized`, and equally a Sway or Hyprland rule —
+    /// is evaluated against nothing and never fires. Asking for the maximized
+    /// state ourselves goes through `set_maximized` instead, which no rule
+    /// matching has to succeed for.
+    #[serde(default)]
+    pub start_maximized: bool,
     /// Splits quoted history in an email body into collapsible sub-blocks.
     /// Quoted fragments are collapsed on first display.
     pub collapse_quoted_messages: bool,
@@ -911,6 +923,7 @@ impl Default for GlobalSettings {
             force_uniform_font_size: false,
             reply_all_primary: false,
             force_light_email_preview: false,
+            start_maximized: false,
             collapse_quoted_messages: true,
             group_by_conversation: default_group_by_conversation(),
             notifications_enabled: true,
@@ -1498,6 +1511,24 @@ mod tests {
 
         assert!(!loaded.global.force_light_email_preview);
         assert!(!loaded.global.mail_body_options().force_light_theme);
+    }
+
+    /// Off by default: the window manager places windows, and a client that
+    /// maximizes itself uninvited fights whatever the user already configured.
+    /// The setting exists for the case where that rule cannot fire — see the
+    /// field's documentation.
+    #[test]
+    fn existing_settings_may_lack_start_maximized() {
+        assert!(!GlobalSettings::default().start_maximized);
+
+        let mut json = serde_json::to_value(Settings::default()).expect("serialization");
+        json.as_object_mut()
+            .expect("settings object")
+            .remove("start_maximized");
+
+        let loaded: Settings = serde_json::from_value(json).expect("deserialization");
+
+        assert!(!loaded.global.start_maximized);
     }
 
     #[test]

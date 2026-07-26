@@ -174,10 +174,17 @@ pub fn run(
         theme::apply(&settings.global, None, cx);
 
         let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
+        // `Maximized` still carries these bounds: they become the restore size
+        // once the user unmaximizes.
+        let window_bounds = if settings.global.start_maximized {
+            WindowBounds::Maximized(bounds)
+        } else {
+            WindowBounds::Windowed(bounds)
+        };
         cx.activate(true);
         cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_bounds: Some(window_bounds),
                 titlebar: Some(gpui_component::TitleBar::title_bar_options()),
                 app_id: Some("aviary".into()),
                 ..Default::default()

@@ -717,6 +717,7 @@
   "settings-ui-scale": "Échelle de l'interface",
   "settings-body-font-size": "Taille de la police du corps",
   "settings-force-light-email-preview": "Toujours utiliser un fond clair pour les aperçus d’e-mails en mode Fidèle",
+  "settings-start-maximized": "Ouvrir la fenêtre maximisée au démarrage",
   "settings-keyboard-standard": "Raccourcis clavier",
   "settings-keyboard-vim": "Navigation Vim",
   "settings-keyboard-vim-enable": "Activer les raccourcis Vim",

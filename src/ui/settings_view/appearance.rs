@@ -433,6 +433,16 @@ impl AviaryApp {
                     })),
             )
             .child(
+                Switch::new("start-maximized")
+                    .checked(g.start_maximized)
+                    .label(tr!("settings-start-maximized"))
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.settings.global.start_maximized = *checked;
+                        this.settings.save();
+                        cx.notify();
+                    })),
+            )
+            .child(
                 Switch::new("collapse-quoted-messages")
                     .checked(g.collapse_quoted_messages)
                     .label(tr!("settings-collapse-quoted-messages"))
