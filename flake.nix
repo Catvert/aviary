@@ -45,8 +45,20 @@
           vulkan-loader
         ];
 
-        nativeDeps = with pkgs; [ pkg-config clang wild cmake ];
+        # python3 is not optional: Stylo's build script generates its property
+        # tables with Mako and panics without an interpreter on PATH. A
+        # nix-shell inherits the user's own python3 and hides that, but the
+        # sandbox `nix build` runs in does not.
+        nativeDeps = with pkgs; [ pkg-config clang wild cmake python3 ];
         buildDeps = runtimeLibs ++ (with pkgs; [ openssl dbus zstd ]);
+
+        # The Blitz rendering tests assert on real layout geometry — line
+        # heights, wrapped rows, table widths — so they need fonts to measure.
+        # The sandbox has none, and every such test collapses to a height of
+        # zero. Pointing fontconfig at the repository's own fonts is both
+        # enough (all 71 pass with these alone) and more hermetic than relying
+        # on whatever a developer machine happens to have installed.
+        testFontsConf = pkgs.makeFontsConf { fontDirectories = [ ./assets/fonts ]; };
       in
       {
         packages.default = pkgs.rustPlatform.buildRustPackage {
@@ -65,6 +77,40 @@
           buildInputs = buildDeps;
 
           RUSTFLAGS = "-C linker=clang -C link-arg=--ld-path=wild";
+
+          # The test suite runs in the sandbox, which needs two things a
+          # developer shell provides without anyone noticing:
+          #
+          #   * CA certificates — `reqwest::Client::new()` panics outright with
+          #     "No CA certificates were loaded from the system", taking down
+          #     four tests that only ever build a request and never send it.
+          #   * fonts, for the layout assertions (see `testFontsConf`).
+          #
+          # HOME is set because fontconfig wants to write a cache and the
+          # sandbox's default home is not writable.
+          nativeCheckInputs = [ pkgs.cacert ];
+          preCheck = ''
+            export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
+            export FONTCONFIG_FILE=${testFontsConf}
+            export HOME=$TMPDIR
+          '';
+
+          # Three layout tests assert pixel geometry for HTML that asks for
+          # `font: 16px Arial` — real Outlook markup, which is the point of
+          # them. A full system resolves that name through fontconfig's metric
+          # aliases (Liberation Sans, DejaVu); the sandbox has neither the font
+          # nor the alias rules, nothing gets shaped, and the measured height
+          # collapses to zero. They are not skipped because they are flaky:
+          # they pass everywhere a desktop's font configuration exists,
+          # including the CI job that runs the full suite inside nix-shell.
+          #
+          # Removing this needs the sandbox to resolve Arial, not a change to
+          # the tests: the markup is what real mail looks like.
+          checkFlags = [
+            "--skip=ui::blitz_body::tests::minified_html5_namespace_keeps_text_after_breaks"
+            "--skip=ui::blitz_body::tests::wrapped_text_rows_expand_before_the_next_row"
+            "--skip=ui::blitz_body::tests::nonbreaking_spaces_preserve_outlook_style_indentation"
+          ];
 
           # No Google OAuth secret is baked into a Nix build: the sources hold
           # none (see auth/google.rs) and a package built from a public
