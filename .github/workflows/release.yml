@@ -83,3 +83,94 @@ jobs:
             Requires the usual desktop runtime libraries (Vulkan loader,
             Wayland or X11, fontconfig, freetype, D-Bus). Nix users can instead
             run `nix profile install github:Catvert/aviary`.
+
+  # Both of these are unsigned and produced without a machine to test them on;
+  # they are attached so the platforms can be exercised at all. `if: false` is
+  # deliberately absent — instead the job may fail without failing the release,
+  # since Linux is what a tag promises today.
+  macos:
+    name: macOS ${{ matrix.arch }} bundle
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+          - arch: x86_64
+            runner: macos-13
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        env:
+          AVIARY_GOOGLE_CLIENT_SECRET: ${{ secrets.AVIARY_GOOGLE_CLIENT_SECRET }}
+        run: cargo build --release --locked
+
+      # The bundle is what gives Aviary a bundle identifier (no identifier, no
+      # notifications) and registers it as a `mailto:` handler.
+      - name: Assemble Aviary.app
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          packaging/macos/bundle.sh target/macos
+          staging="aviary-${version}-${{ matrix.arch }}-macos"
+          mkdir -p "$staging"
+          cp -R target/macos/Aviary.app "$staging/"
+          cp README.md LICENSE NOTICE "$staging/"
+          zip -qry "$staging.zip" "$staging"
+          shasum -a 256 "$staging.zip" > "$staging.zip.sha256"
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            aviary-*.zip
+            aviary-*.zip.sha256
+
+  windows:
+    name: Windows x86_64 archive
+    continue-on-error: true
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        env:
+          AVIARY_GOOGLE_CLIENT_SECRET: ${{ secrets.AVIARY_GOOGLE_CLIENT_SECRET }}
+        run: cargo build --release --locked
+
+      - name: Assemble the archive
+        shell: pwsh
+        run: |
+          $version = "${env:GITHUB_REF_NAME}" -replace '^v', ''
+          $staging = "aviary-$version-x86_64-windows"
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Copy-Item target/release/aviary.exe $staging/
+          Copy-Item README.md, LICENSE, NOTICE $staging/
+          Copy-Item packaging/windows/register-mailto.ps1 $staging/
+          Compress-Archive -Path $staging -DestinationPath "$staging.zip"
+          (Get-FileHash "$staging.zip" -Algorithm SHA256).Hash | Out-File "$staging.zip.sha256"
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            aviary-*.zip
+            aviary-*.zip.sha256

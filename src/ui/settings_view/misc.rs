@@ -218,16 +218,21 @@ impl AviaryApp {
                                 cx.notify();
                             })),
                     )
-                    .child(
-                        Switch::new("tray")
-                            .checked(g.tray_enabled)
-                            .label(tr!("settings-tray-restart-label"))
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.settings.global.tray_enabled = *checked;
-                                this.settings.save();
-                                cx.notify();
-                            })),
-                    ),
+                    // The tray is a freedesktop StatusNotifierItem (`ksni`).
+                    // Offering the switch where nothing implements it would be
+                    // a setting that silently does nothing.
+                    .when(cfg!(target_os = "linux"), |section| {
+                        section.child(
+                            Switch::new("tray")
+                                .checked(g.tray_enabled)
+                                .label(tr!("settings-tray-restart-label"))
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.settings.global.tray_enabled = *checked;
+                                    this.settings.save();
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             )
             .child(
                 self.section(&tr!("settings-action-delay-heading"), cx)

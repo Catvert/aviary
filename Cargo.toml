@@ -138,6 +138,13 @@ ksni = { version = "0.3", default-features = false, features = ["blocking", "asy
 # to the kernel. See `tune_allocator` in `main.rs`.
 libc = "0.2"
 
+[target."cfg(windows)".dependencies]
+# Named pipe for the single-instance channel: `std` has no portable local
+# socket, and `std::os::unix::net` obviously does not exist here. Only the
+# blocking API is used, so the async default features are stripped.
+# See `single_instance.rs`.
+interprocess = { version = "2", default-features = false }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

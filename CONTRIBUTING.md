@@ -37,6 +37,28 @@ Run `just fmt && just clippy && just test` before opening the pull request; the
 i18n check is a Python snippet in `.github/workflows/ci.yml` you can read in
 ten seconds.
 
+## Working on another platform
+
+macOS and Windows build with a stock toolchain and no system libraries to
+provide — `nix-shell` is a Linux convenience, and the `just` recipes fall back
+to plain cargo when it is absent. Two advisory CI jobs (`portability`) run
+`cargo check --all-targets` and `cargo test` on `windows-latest` and
+`macos-latest`; they are allowed to fail, but breaking them knowingly is not
+the idea.
+
+Two rules keep the ports alive:
+
+- **Every Unix API goes behind `#[cfg(unix)]` with a `#[cfg(not(unix))]`
+  counterpart**, or inside a `#[cfg(unix)] { … }` block when it only adds an
+  option to a builder. The `0600` file helpers are the pattern to copy.
+- **Key bindings use `secondary-…`, never `ctrl-…`** — gpui maps that to Cmd on
+  macOS.
+
+`CLAUDE.md` has the platform table: what is missing where (tray, allocator
+tuning, Windows ACLs) and why. `packaging/macos/bundle.sh` assembles the
+`.app`, which is what macOS requires before it will post a notification or hand
+over a `mailto:` link.
+
 ## Rules that are not obvious from the code
 
 - **The UI never does I/O.** Adding an async operation means adding a `Cmd`

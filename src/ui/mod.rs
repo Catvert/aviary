@@ -127,13 +127,38 @@ fn install_fonts(cx: &mut App) {
 /// a `mailto:` URL clicked on the desktop, or a plain "come to the front". It
 /// already holds this process's own launch request (see `single_instance`), so
 /// the first one is served exactly like the ones that arrive later.
-pub fn run(external_requests: tokio::sync::mpsc::UnboundedReceiver<ExternalRequest>) {
+///
+/// `request_sender` feeds that same channel from inside the app. macOS needs
+/// it: the Finder does not put a `mailto:` on the command line, it sends an
+/// Apple Event to the running application, which gpui surfaces as
+/// `on_open_urls`. Everywhere else the callback simply never fires.
+pub fn run(
+    external_requests: tokio::sync::mpsc::UnboundedReceiver<ExternalRequest>,
+    request_sender: tokio::sync::mpsc::UnboundedSender<ExternalRequest>,
+) {
     let mut settings = Settings::load();
     install_i18n(settings.global.language);
     settings.global.ai.ensure_prompt_defaults();
     settings.save();
 
-    Application::new().with_assets(Assets).run(move |cx| {
+    let application = Application::new().with_assets(Assets);
+
+    // A URL handed over by the desktop goes through the same parser as one read
+    // from `argv`, with the same refusals (no `attach`, no unknown headers): it
+    // comes from a web page or a mail, never from the user. The handler must be
+    // registered before `run`, since the launch event can arrive immediately.
+    application.on_open_urls(move |urls| {
+        for url in urls {
+            match crate::mailto::parse(&url) {
+                Some(request) => {
+                    let _ = request_sender.send(ExternalRequest::Compose(request));
+                }
+                None => log::warn!("ignoring an unsupported URL from the desktop"),
+            }
+        }
+    });
+
+    application.run(move |cx| {
         // Intercept inline `aviary-cid/...` images (see inline_images).
         let default_client = cx.http_client();
         cx.set_http_client(std::sync::Arc::new(inline_images::CidHttpClient::new(

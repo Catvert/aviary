@@ -6,24 +6,35 @@
 //! expect a second writer; two instances would race on all four and the user
 //! would watch tabs and drafts vanish as one overwrote the other's snapshot.
 //!
-//! So the first instance binds a Unix socket and becomes the primary. Later
+//! So the first instance starts a local server and becomes the primary. Later
 //! ones connect, hand over what they were asked to do, and exit without ever
 //! opening a window. The primary receives those requests on a channel and
 //! serves them in the window that is already on screen — which is also what the
 //! user wants from a mail client: the composer opens where their mailbox
 //! already is.
 //!
-//! Unix-only, like the desktop entry that makes it necessary.
+//! The transport differs per platform, the wire format does not: one JSON
+//! object per line, so `read_request` and `write_request` are shared.
+//!
+//! - **Unix** — a socket in `XDG_RUNTIME_DIR`, which is per-user and cleared at
+//!   logout, exactly the lifetime this wants.
+//! - **Windows** — a named pipe, through `interprocess`. `std` has no portable
+//!   local socket, and the pipe is what the platform offers; it also disappears
+//!   with the process, so there is no stale file to reason about.
+//! - **Anywhere else** — no guarantee, and startup continues: this is a
+//!   convenience, never a reason to refuse to launch.
+//!
+//! On macOS the desktop does *not* pass `mailto:` on the command line — the
+//! Finder sends an Apple Event, which gpui surfaces through `on_open_urls`
+//! (see `ui::run`). Both paths feed the same channel.
 
 use crate::mailto::MailtoRequest;
 use serde::{Deserialize, Serialize};
-#[cfg(unix)]
 use std::io::{BufRead, BufReader, Read, Write};
-#[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
+use tokio::sync::mpsc;
+
 #[cfg(unix)]
 use std::path::PathBuf;
-use tokio::sync::mpsc;
 
 /// Something a second invocation asked the running instance to do.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,141 +59,247 @@ impl ExternalRequest {
 }
 
 /// What `acquire` decided this process is.
-#[cfg(unix)]
 pub enum Acquisition {
     /// This process owns the session. It must keep `_listener` alive for as
     /// long as it runs, and drain `requests`.
     Primary {
         requests: mpsc::UnboundedReceiver<ExternalRequest>,
-        _listener: SocketGuard,
+        /// The sending half, for request sources that live inside the process
+        /// rather than in another one — macOS delivers `mailto:` as an Apple
+        /// Event to the running app, not on the command line (see `ui::run`).
+        sender: mpsc::UnboundedSender<ExternalRequest>,
+        _listener: SessionGuard,
     },
     /// Another instance is running and has been told what to do. Exit quietly.
     HandedOver,
 }
 
-/// Removes the socket file when the primary shuts down cleanly. A crash leaves
-/// it behind, which is why connecting is what proves an instance is alive —
-/// never the file's existence.
-#[cfg(unix)]
-pub struct SocketGuard(PathBuf);
-
-#[cfg(unix)]
-impl Drop for SocketGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
+/// Cleans up whatever the platform leaves behind when the primary shuts down.
+///
+/// On Unix that is the socket file: a crash leaves it there, which is why
+/// *connecting* is what proves an instance is alive — never the file's
+/// existence. A named pipe needs no such care.
+#[derive(Default)]
+pub struct SessionGuard {
+    #[cfg(unix)]
+    socket: Option<PathBuf>,
 }
 
 #[cfg(unix)]
-fn socket_path() -> PathBuf {
-    // XDG_RUNTIME_DIR is already per-user and cleared at logout, which is
-    // exactly the lifetime this socket wants.
-    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return PathBuf::from(dir).join("aviary.sock");
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        if let Some(path) = &self.socket {
+            let _ = std::fs::remove_file(path);
+        }
     }
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
-    std::env::temp_dir().join(format!("aviary-{user}.sock"))
+}
+
+/// One JSON object per line, and a cap so a stray process cannot make the
+/// primary allocate without bound.
+const MAX_REQUEST_BYTES: u64 = 64 * 1024;
+
+/// Returns true when the request was handed over in full. A half-written line
+/// would be discarded by the reader anyway, so any failure means "not
+/// delivered" and the caller falls through to starting normally rather than
+/// exiting having done nothing.
+fn write_request(mut sink: impl Write, request: &ExternalRequest) -> bool {
+    let Ok(payload) = serde_json::to_string(request) else {
+        return false;
+    };
+    sink.write_all(payload.as_bytes()).is_ok()
+        && sink.write_all(b"\n").is_ok()
+        && sink.flush().is_ok()
+}
+
+fn read_request(source: impl Read) -> anyhow::Result<ExternalRequest> {
+    let mut line = String::new();
+    BufReader::new(source.take(MAX_REQUEST_BYTES)).read_line(&mut line)?;
+    Ok(serde_json::from_str(&line)?)
+}
+
+/// Feeds every well-formed request into the UI's channel until the listener
+/// dies or the UI is gone. Shared by both transports, which differ only in the
+/// type of stream they yield.
+fn serve_incoming<S: Read>(
+    incoming: impl Iterator<Item = std::io::Result<S>>,
+    tx: mpsc::UnboundedSender<ExternalRequest>,
+) {
+    for stream in incoming {
+        let Ok(stream) = stream else { continue };
+        match read_request(stream) {
+            Ok(request) => {
+                if tx.send(request).is_err() {
+                    break; // The UI is gone; so is our reason to listen.
+                }
+            }
+            Err(error) => log::warn!("malformed single-instance request: {error:#}"),
+        }
+    }
+}
+
+/// The primary's own launch request travels the same channel as the ones that
+/// arrive later, so the UI has a single code path to serve.
+fn primary(
+    request: ExternalRequest,
+    guard: SessionGuard,
+) -> (mpsc::UnboundedSender<ExternalRequest>, Acquisition) {
+    let (tx, requests) = mpsc::unbounded_channel();
+    let _ = tx.send(request);
+    (
+        tx.clone(),
+        Acquisition::Primary {
+            requests,
+            sender: tx,
+            _listener: guard,
+        },
+    )
+}
+
+/// Startup continues without the guarantee. `mailto:` may then open a second
+/// process, but refusing to launch would be worse.
+fn ungoverned(request: ExternalRequest, error: impl std::fmt::Display) -> Acquisition {
+    log::warn!("single-instance channel unavailable ({error}); continuing without it");
+    primary(request, SessionGuard::default()).1
+}
+
+// ---------------------------------------------------------------------------
+// Unix
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+mod platform {
+    use super::*;
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    fn socket_path() -> PathBuf {
+        // XDG_RUNTIME_DIR is already per-user and cleared at logout, which is
+        // exactly the lifetime this socket wants. macOS does not set it, so the
+        // fallback is the one that runs there.
+        if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+            return PathBuf::from(dir).join("aviary.sock");
+        }
+        let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
+        std::env::temp_dir().join(format!("aviary-{user}.sock"))
+    }
+
+    pub(super) fn acquire(request: ExternalRequest) -> Acquisition {
+        acquire_at(socket_path(), request)
+    }
+
+    /// The socket path is a parameter so the handover can be exercised end to
+    /// end in a test directory instead of the session's real runtime dir.
+    pub(super) fn acquire_at(path: PathBuf, request: ExternalRequest) -> Acquisition {
+        if send_to_running_instance(&path, &request) {
+            log::info!("another Aviary instance is running; handed the request over");
+            return Acquisition::HandedOver;
+        }
+
+        // Nobody answered. Either no instance is running, or one died without
+        // cleaning up; removing the stale file is safe because a live instance
+        // would have accepted the connection above.
+        let _ = std::fs::remove_file(&path);
+
+        let listener = match UnixListener::bind(&path) {
+            Ok(listener) => listener,
+            Err(error) => {
+                // Losing the bind race against a sibling process started at the
+                // same moment is the one case worth retrying: that sibling is
+                // now the primary and can take the request.
+                if send_to_running_instance(&path, &request) {
+                    return Acquisition::HandedOver;
+                }
+                // Anything else — a read-only runtime dir, a path collision —
+                // must not stop Aviary from starting.
+                return ungoverned(request, format_args!("{error:#}"));
+            }
+        };
+
+        let guard = SessionGuard { socket: Some(path) };
+        let (tx, acquisition) = primary(request, guard);
+
+        std::thread::Builder::new()
+            .name("aviary-single-instance".into())
+            .spawn(move || serve_incoming(listener.incoming(), tx))
+            .expect("failed to spawn the single-instance listener");
+
+        acquisition
+    }
+
+    /// Returns true when a live instance accepted the request.
+    fn send_to_running_instance(path: &PathBuf, request: &ExternalRequest) -> bool {
+        let Ok(stream) = UnixStream::connect(path) else {
+            return false;
+        };
+        write_request(stream, request)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+mod platform {
+    use super::*;
+    use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions, Stream};
+
+    /// The pipe lives in the machine-wide namespace, so the user name keeps two
+    /// sessions on the same host (a terminal server, a fast-user switch) from
+    /// claiming each other's instance.
+    fn pipe_name() -> std::io::Result<interprocess::local_socket::Name<'static>> {
+        let user = std::env::var("USERNAME").unwrap_or_else(|_| "unknown".into());
+        format!("aviary-{user}.sock").to_ns_name::<GenericNamespaced>()
+    }
+
+    pub(super) fn acquire(request: ExternalRequest) -> Acquisition {
+        let name = match pipe_name() {
+            Ok(name) => name,
+            Err(error) => return ungoverned(request, error),
+        };
+
+        if let Ok(stream) = Stream::connect(name.clone()) {
+            if write_request(stream, &request) {
+                log::info!("another Aviary instance is running; handed the request over");
+                return Acquisition::HandedOver;
+            }
+        }
+
+        // A pipe with no server behind it cannot be connected to, so unlike the
+        // Unix socket there is no stale name to clear away first.
+        let listener = match ListenerOptions::new().name(name).create_sync() {
+            Ok(listener) => listener,
+            Err(error) => return ungoverned(request, error),
+        };
+
+        let (tx, acquisition) = primary(request, SessionGuard::default());
+
+        std::thread::Builder::new()
+            .name("aviary-single-instance".into())
+            .spawn(move || serve_incoming(listener.incoming(), tx))
+            .expect("failed to spawn the single-instance listener");
+
+        acquisition
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Anywhere else
+// ---------------------------------------------------------------------------
+
+#[cfg(not(any(unix, windows)))]
+mod platform {
+    use super::*;
+
+    pub(super) fn acquire(request: ExternalRequest) -> Acquisition {
+        ungoverned(request, "no local socket transport on this platform")
+    }
 }
 
 /// Claims the session, or hands `request` to whoever already holds it.
 ///
 /// The caller must act on the return value before opening any window.
-#[cfg(unix)]
 pub fn acquire(request: ExternalRequest) -> Acquisition {
-    acquire_at(socket_path(), request)
-}
-
-/// The socket path is a parameter so the handover can be exercised end to end
-/// in a test directory instead of the session's real runtime dir.
-#[cfg(unix)]
-fn acquire_at(path: PathBuf, request: ExternalRequest) -> Acquisition {
-    if send_to_running_instance(&path, &request) {
-        log::info!("another Aviary instance is running; handed the request over");
-        return Acquisition::HandedOver;
-    }
-
-    // Nobody answered. Either no instance is running, or one died without
-    // cleaning up; removing the stale file is safe because a live instance
-    // would have accepted the connection above.
-    let _ = std::fs::remove_file(&path);
-
-    let listener = match UnixListener::bind(&path) {
-        Ok(listener) => listener,
-        Err(error) => {
-            // Losing the bind race against a sibling process started at the
-            // same moment is the one case worth retrying: that sibling is now
-            // the primary and can take the request.
-            if send_to_running_instance(&path, &request) {
-                return Acquisition::HandedOver;
-            }
-            // Anything else — a read-only runtime dir, a path collision — must
-            // not stop Aviary from starting. The single-instance guarantee is
-            // lost, so `mailto:` may open a second process, but refusing to
-            // launch would be worse.
-            log::warn!("single-instance socket unavailable ({error:#}); continuing without it");
-            let (tx, requests) = mpsc::unbounded_channel();
-            let _ = tx.send(request);
-            return Acquisition::Primary {
-                requests,
-                _listener: SocketGuard(PathBuf::new()),
-            };
-        }
-    };
-
-    let (tx, requests) = mpsc::unbounded_channel();
-    // The request this process was itself launched with travels the same
-    // channel as later ones, so the UI has a single code path to serve.
-    let _ = tx.send(request);
-
-    std::thread::Builder::new()
-        .name("aviary-single-instance".into())
-        .spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { continue };
-                match read_request(stream) {
-                    Ok(request) => {
-                        if tx.send(request).is_err() {
-                            break; // The UI is gone; so is our reason to listen.
-                        }
-                    }
-                    Err(error) => log::warn!("malformed single-instance request: {error:#}"),
-                }
-            }
-        })
-        .expect("failed to spawn the single-instance listener");
-
-    Acquisition::Primary {
-        requests,
-        _listener: SocketGuard(path),
-    }
-}
-
-/// Returns true when a live instance accepted the request.
-#[cfg(unix)]
-fn send_to_running_instance(path: &PathBuf, request: &ExternalRequest) -> bool {
-    let Ok(mut stream) = UnixStream::connect(path) else {
-        return false;
-    };
-    let Ok(payload) = serde_json::to_string(request) else {
-        return false;
-    };
-    // A half-written line would be discarded by the reader anyway; treat any
-    // write failure as "not delivered" so this process falls through to
-    // starting normally rather than exiting having done nothing.
-    stream.write_all(payload.as_bytes()).is_ok()
-        && stream.write_all(b"\n").is_ok()
-        && stream.flush().is_ok()
-}
-
-#[cfg(unix)]
-fn read_request(stream: UnixStream) -> anyhow::Result<ExternalRequest> {
-    // One JSON object per line, and a cap so a stray process cannot make the
-    // primary allocate without bound.
-    const MAX_REQUEST_BYTES: u64 = 64 * 1024;
-
-    let mut line = String::new();
-    BufReader::new(stream.take(MAX_REQUEST_BYTES)).read_line(&mut line)?;
-    Ok(serde_json::from_str(&line)?)
+    platform::acquire(request)
 }
 
 #[cfg(test)]
@@ -225,6 +342,27 @@ mod tests {
         assert_eq!(mailto.body, "Bonjour,\nÀ demain");
     }
 
+    /// Both transports carry the same bytes, so the framing is worth testing
+    /// once on whichever platform runs the suite.
+    #[test]
+    fn a_written_request_reads_back_identically() {
+        let mut wire = Vec::new();
+        assert!(write_request(
+            &mut wire,
+            &ExternalRequest::Compose(MailtoRequest {
+                to: "contact@example.com".into(),
+                ..Default::default()
+            })
+        ));
+
+        let ExternalRequest::Compose(mailto) =
+            read_request(wire.as_slice()).expect("a well-formed request")
+        else {
+            panic!("expected a compose request");
+        };
+        assert_eq!(mailto.to, "contact@example.com");
+    }
+
     #[cfg(unix)]
     fn scratch_socket(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("aviary-test-{name}.sock"));
@@ -242,7 +380,8 @@ mod tests {
         let Acquisition::Primary {
             mut requests,
             _listener,
-        } = acquire_at(path.clone(), ExternalRequest::Activate)
+            ..
+        } = platform::acquire_at(path.clone(), ExternalRequest::Activate)
         else {
             panic!("the first acquisition owns the session");
         };
@@ -253,7 +392,7 @@ mod tests {
             Some(ExternalRequest::Activate)
         ));
 
-        let second = acquire_at(
+        let second = platform::acquire_at(
             path.clone(),
             ExternalRequest::Compose(MailtoRequest {
                 to: "contact@example.com".into(),
@@ -282,7 +421,7 @@ mod tests {
         let path = scratch_socket("stale");
         std::fs::write(&path, b"not a socket").expect("writable temp dir");
 
-        let acquisition = acquire_at(path.clone(), ExternalRequest::Activate);
+        let acquisition = platform::acquire_at(path.clone(), ExternalRequest::Activate);
         assert!(
             matches!(acquisition, Acquisition::Primary { .. }),
             "a leftover file must not stop the session from being claimed"

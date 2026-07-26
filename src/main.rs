@@ -147,24 +147,18 @@ fn main() {
     // every click; all but the first must hand their URL to the instance
     // already running and leave, rather than become a second writer of the
     // session file and the two SQLite databases.
-    #[cfg(unix)]
-    let (external_requests, _socket_guard) =
+    let (external_requests, request_sender, _socket_guard) =
         match single_instance::acquire(single_instance::ExternalRequest::from_args()) {
             single_instance::Acquisition::HandedOver => return,
             // The guard is bound here, not inside the match arm, so the socket
             // file is unlinked when `main` returns rather than immediately.
             single_instance::Acquisition::Primary {
                 requests,
+                sender,
                 _listener,
-            } => (requests, _listener),
+            } => (requests, sender, _listener),
         };
-    #[cfg(not(unix))]
-    let external_requests = {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        drop(tx);
-        rx
-    };
 
     log::info!("starting Aviary");
-    ui::run(external_requests);
+    ui::run(external_requests, request_sender);
 }

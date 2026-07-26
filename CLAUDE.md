@@ -179,7 +179,17 @@ Two independent layers, both optional and both surfaced in **Préférences → C
 
 Issues come back as `ProofreadingIssue` ranges and are painted as highlight runs by `BlockInput`, with the fix menu on right click.
 
-### Linux-only bits
+### Plateformes
+
+Linux est la cible de développement et de release ; **macOS et Windows compilent et tournent**, avec les écarts ci-dessous. Deux jobs CI (`portability`) font `cargo check --all-targets` + `cargo test` sur `windows-latest` et `macos-latest` : ils sont en `continue-on-error`, parce qu'un portage cassé ne doit pas bloquer une PR qui ne touche que le chemin Linux — mais leur croix est la liste de ce qu'il reste à faire. Ne pas les rendre bloquants avant que la plateforme soit réellement soutenue.
+
+Règles à respecter en écrivant du code : **toute API Unix vit derrière `#[cfg(unix)]` avec un pendant `#[cfg(not(unix))]`** (les permissions `0600` de `settings.rs`, `mail_cache.rs`, `operation_store.rs`, `ical.rs`, `spellcheck.rs`, `auth/mod.rs`, `attachments.rs` suivent toutes ce motif), ou dans un bloc `#[cfg(unix)] { … }` interne quand il s'agit d'ajouter une option à un builder. Les raccourcis s'écrivent `secondary-…` et jamais `ctrl-…`, ce que gpui traduit en Cmd sur macOS.
+
+Ce qui manque, et pourquoi : **pas de tray** hors Linux (`ksni` implémente le `StatusNotifierItem` freedesktop ; la case correspondante est masquée dans les Préférences par un `.when(cfg!(target_os = "linux"), …)` plutôt que d'offrir un réglage sans effet), **pas de `tune_allocator`** hors glibc (le seuil mmap est un comportement glibc ; la croissance de RSS des tuiles Blitz est à mesurer ailleurs avant de conclure), **rapport mémoire partiel** (`memory.rs` lit `/proc/self/status`), et **pas d'ACL restrictive sur Windows** : les fichiers de jetons héritent de l'ACL du dossier de configuration, ce qui exclut les autres utilisateurs mais pas ce qui tourne sous le même compte — les mots de passe IMAP/SMTP, eux, sont dans le magasin d'identifiants sur les trois plateformes.
+
+Le packaging vit dans `packaging/` : `aviary.desktop` + `install.sh` (Linux), `macos/{Info.plist,bundle.sh}` et `windows/register-mailto.ps1`. Le bundle macOS n'est pas cosmétique — **sans identifiant de bundle, macOS refuse de poster une notification**, et sans `CFBundleURLTypes` le système ne confie jamais de `mailto:` à Aviary. Les binaires publiés pour ces deux plateformes ne sont **pas signés**.
+
+### Tray (Linux)
 
 `tray.rs` (system tray via `ksni`) is gated by `#[cfg(target_os = "linux")]`. The tray runs on its own thread and feeds `TrayAction`s back through an mpsc channel drained by a gpui foreground task (`AviaryApp::handle_tray`). Notifications (`notify.rs`, via `notify-rust`) work everywhere.
 
@@ -188,6 +198,10 @@ Issues come back as `ProofreadingIssue` ranges and are painted as highlight runs
 ### Instance unique et `mailto:` (`src/single_instance.rs`, `src/mailto.rs`)
 
 `packaging/aviary.desktop` déclare `MimeType=x-scheme-handler/mailto;` et `Exec=aviary %u`, donc **le bureau lance un nouveau processus à chaque clic** sur un lien de courriel. Aviary tient un `session.json`, un `settings.json` et deux bases SQLite qu'aucun second écrivain n'est prévu : `main()` réclame donc la session **avant d'ouvrir quoi que ce soit**, par un socket Unix dans `XDG_RUNTIME_DIR` (repli `temp_dir`). Le premier processus le lie et devient le primaire ; les suivants s'y connectent, transmettent une ligne JSON et sortent sans jamais ouvrir de fenêtre.
+
+**Le transport dépend de la plateforme, pas le format** : une ligne JSON par requête, donc `read_request`/`write_request`/`serve_incoming` sont partagés et seul le module `platform` change. Windows utilise un **tube nommé** (`interprocess`, déclaré en `[target.'cfg(windows)'.dependencies]`) : `std` n'expose pas de socket local portable, et le tube disparaît avec le processus — il n'y a donc pas de fichier périmé à raisonner, contrairement à Unix. Le nom porte celui de l'utilisateur, l'espace de noms des tubes étant commun à la machine. Une plateforme sans transport démarre quand même, sans la garantie (`ungoverned`).
+
+**macOS ne passe pas le `mailto:` sur la ligne de commande** : le Finder envoie un Apple Event à l'application déjà lancée, que gpui expose par `Application::on_open_urls` — enregistré dans `ui::run` **avant** `run()`, l'événement de lancement pouvant arriver immédiatement. Le handler pousse dans le même canal que le socket, via le `sender` que `Acquisition::Primary` renvoie à `main`. C'est aussi pourquoi `CFBundleURLTypes` doit être dans `Info.plist` : sans bundle, rien n'arrive.
 
 **La présence du fichier ne prouve rien** — un plantage le laisse derrière —, c'est la *connexion* qui prouve qu'une instance vit : `acquire` tente `connect` d'abord, et n'efface le fichier qu'après un refus. Un `bind` perdu de justesse contre un processus frère est retenté une fois en `connect` ; tout autre échec (dossier en lecture seule) est journalisé et le démarrage continue sans la garantie, parce que refuser de démarrer serait pire. `acquire_at` prend le chemin en paramètre pour que le passage de relais soit testé de bout en bout hors du runtime dir réel.
 

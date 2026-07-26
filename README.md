@@ -3,7 +3,8 @@
 Desktop email, calendar and kanban client for **Microsoft 365**, **Gmail** and
 **IMAP/SMTP**, written in Rust on [gpui](https://www.gpui.rs/) (Zed's UI
 framework) with [gpui-component](https://github.com/longbridge/gpui-component)
-widgets. Linux is the primary target.
+widgets. Linux is the primary target; macOS and Windows build and run, with the
+gaps listed under [Platforms](#platforms).
 
 - **Mail** — unified or per-account inbox, virtualized message list, folder
   tree, tags, search, conversation threading, sender history.
@@ -19,6 +20,26 @@ widgets. Linux is the primary target.
 - **Contacts**, offline mail cache (SQLite), durable outbox, French/English UI,
   optional offline spell checking and LanguageTool integration.
 
+## Platforms
+
+| | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| Mail, calendar, kanban, reader, composer | yes | yes | yes |
+| Single instance (no two writers on the session and databases) | Unix socket | Unix socket | named pipe |
+| `mailto:` handler | `.desktop` entry | `Info.plist`, delivered as an Apple Event | `register-mailto.ps1` |
+| Notifications | yes | needs the `.app` bundle | yes |
+| System tray | yes | — | — |
+| Credentials at rest | `0600` + OS keyring | `0600` + Keychain | per-user ACL + Credential Manager |
+| Released binaries | tarball | unsigned `.app` zip | unsigned zip |
+
+Linux is what every release is tested on. The other two are built by CI and
+attached to releases, but unsigned: macOS refuses an unsigned bundle downloaded
+from the internet until you clear its quarantine attribute
+(`xattr -d com.apple.quarantine Aviary.app`), and Windows SmartScreen warns
+before running the executable. The gaps above are tracked, not hidden — the
+tray in particular is a freedesktop `StatusNotifierItem`, so its switch does
+not appear in Preferences where nothing implements it.
+
 ## Installing
 
 Linux x86_64 builds are attached to each [release](https://github.com/Catvert/aviary/releases):
@@ -26,6 +47,20 @@ unpack the tarball and run `./install.sh`, which places the binary, desktop
 entry and icon under `~/.local` (set `PREFIX=` for somewhere else). The usual
 desktop runtime libraries are expected to be present — Vulkan loader,
 Wayland or X11, fontconfig, freetype, D-Bus.
+
+On **macOS**, unpack the zip and drag `Aviary.app` into `/Applications`. The
+bundle is what gives Aviary a bundle identifier — without one macOS refuses to
+post notifications — and what registers it for `mailto:` links.
+
+On **Windows**, unpack the zip anywhere and run `aviary.exe`. To be offered as
+the mail client for `mailto:` links, run the bundled script once:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File register-mailto.ps1
+```
+
+It writes under `HKCU` only (no administrator rights), and `-Unregister`
+undoes it. A Vulkan-capable GPU driver is required, as on Linux.
 
 With Nix, the flake builds and wraps all of that itself:
 
@@ -54,6 +89,11 @@ just logout     # wipe pending and per-account credentials, forcing re-auth
 Running `cargo` directly works only if the libraries from `shell.nix` are
 already in scope (`nix-shell` first, or an equivalent setup on another distro).
 Built with Rust 1.97.
+
+On macOS and Windows there is nothing to provide: `cargo build` works with a
+stock toolchain, and the `just` recipes fall back to plain cargo when
+`nix-shell` is absent. `just bundle-macos` assembles `Aviary.app` around the
+release binary.
 
 `clippy` must stay clean with `-D warnings`; that and `just test` are the gate
 for any change.

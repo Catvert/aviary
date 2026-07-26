@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Bundle description for Aviary.app. `bundle.sh` substitutes @VERSION@.
+
+  Two entries here are not decoration:
+
+  * CFBundleIdentifier — macOS refuses to post a notification on behalf of a
+    process that has no bundle identifier, which is why a bare `cargo run`
+    binary shows none. It matches the reverse-DNS qualifier Aviary already uses
+    for its configuration directory (`directories::ProjectDirs`).
+  * CFBundleURLTypes — registers Aviary as a handler for `mailto:`. The Finder
+    then delivers a clicked link as an Apple Event, which gpui surfaces through
+    `on_open_urls` (see `ui::run`), not on the command line.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Aviary</string>
+    <key>CFBundleDisplayName</key>
+    <string>Aviary</string>
+    <key>CFBundleIdentifier</key>
+    <string>be.acetics.aviary</string>
+    <key>CFBundleExecutable</key>
+    <string>aviary</string>
+    <key>CFBundleIconFile</key>
+    <string>aviary.icns</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@VERSION@</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- A mail client is a foreground application with a Dock icon. -->
+    <key>LSUIElement</key>
+    <false/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>Mail address</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>mailto</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

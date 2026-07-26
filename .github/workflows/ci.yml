@@ -37,6 +37,41 @@ jobs:
       - name: tests
         run: nix-shell --quiet --run "cargo test"
 
+  # Linux is the platform Aviary is developed and released on; these two say
+  # whether the other targets still build. They are advisory on purpose
+  # (`continue-on-error`): a red cross here is a porting task, not a reason to
+  # block a pull request that only touches the Linux path. Promote a job to
+  # required once its platform is actually supported.
+  portability:
+    name: ${{ matrix.name }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: builds on Windows
+          - os: macos-latest
+            name: builds on macOS
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      # `check`, not `build`: the point is to catch platform-specific code that
+      # no longer compiles, which type checking already does, without paying for
+      # a full link of the Blitz/Stylo graph on every push.
+      - name: cargo check
+        run: cargo check --all-targets
+
+      - name: tests
+        run: cargo test
+
   i18n:
     name: catalogs stay aligned
     runs-on: ubuntu-latest

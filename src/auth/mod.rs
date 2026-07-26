@@ -175,6 +175,15 @@ fn write_private_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 
     let mut options = std::fs::OpenOptions::new();
     options.create_new(true).write(true);
+    // The mode is set at creation, never by a follow-up `chmod`: a refresh
+    // token must not exist under the umask default even for an instant.
+    //
+    // Windows has no equivalent here. The file inherits the ACL of the
+    // per-user configuration directory, which keeps other *users* out but is
+    // weaker than `0600` against anything running as this user. Tightening it
+    // would mean building a DACL by hand; the tokens that matter most are the
+    // IMAP/SMTP passwords, and those live in the OS credential store rather
+    // than on disk on every platform.
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
