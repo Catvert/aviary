@@ -6,6 +6,22 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
+  # Binary cache, so `nix run github:Catvert/aviary` does not mean compiling
+  # Stylo, Blitz and the whole Rust graph first — an hour on a laptop. CI
+  # pushes what it builds from main here.
+  #
+  # `extra-`, never the bare setting: replacing `substituters` would drop
+  # cache.nixos.org and make every dependency build from source. Nix also asks
+  # the user before honouring these on an untrusted flake — answering no simply
+  # means building locally, and `cachix use catvert` sets it permanently for
+  # those who prefer that.
+  nixConfig = {
+    extra-substituters = [ "https://catvert.cachix.org" ];
+    extra-trusted-public-keys = [
+      "catvert.cachix.org-1:R5plivdLnx2WtmZkBryZwUF51Uvl6TJldhFGYOcyPXg="
+    ];
+  };
+
   outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let

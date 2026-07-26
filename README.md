@@ -69,6 +69,21 @@ nix run github:Catvert/aviary          # try it
 nix profile install github:Catvert/aviary
 ```
 
+Both pull from a [Cachix](https://cachix.org) binary cache, so the Stylo/Blitz
+graph is downloaded rather than compiled — the difference between a minute and
+the better part of an hour. The flake declares it, and Nix will ask once
+whether to trust the setting; answering no just builds locally. To accept it
+without being asked, either pass `--accept-flake-config` or configure it
+permanently:
+
+```sh
+cachix use catvert
+```
+
+The cache holds what CI builds from `main`. It never contains a release
+binary: those are built outside Nix, and are the only ones carrying a bundled
+Google OAuth registration.
+
 ## Building
 
 The build needs system libraries (Vulkan, Wayland/X11, fontconfig, freetype,
