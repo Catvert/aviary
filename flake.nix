@@ -37,11 +37,15 @@
           libGL
           fontconfig
           freetype
-          xorg.libX11
-          xorg.libXcursor
-          xorg.libXi
-          xorg.libXrandr
-          xorg.libxcb
+          # Flat names, not the `xorg.*` set: nixpkgs deprecated the latter and
+          # emits a rename warning for each attribute, which a consumer sees on
+          # every evaluation of its own configuration. shell.nix already used
+          # these.
+          libx11
+          libxcursor
+          libxi
+          libxrandr
+          libxcb
           vulkan-loader
         ];
 
