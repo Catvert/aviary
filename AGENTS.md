@@ -128,6 +128,16 @@ Mirror `providers/graph/` 1:1 in API surface but map each protocol's idioms to A
 
 `ksni` is declared with `default-features = false, features = ["blocking", "async-io"]`. **Do not** re-enable the `tokio` feature: it would set `zbus/tokio` and — via Cargo feature unification — flip every other zbus consumer into tokio mode, which panics from threads without a runtime entered. The spawn pattern is `use ksni::blocking::TrayMethods; tray.spawn()`.
 
+### Single instance and `mailto:` (`src/single_instance.rs`, `src/mailto.rs`)
+
+The desktop entry registers `x-scheme-handler/mailto` with `Exec=aviary %u`, so **every click on a mail link starts a new process**. Aviary owns a `session.json`, a `settings.json` and two SQLite databases that expect a single writer, so `main()` claims the session through a Unix socket in `XDG_RUNTIME_DIR` **before opening anything**. The first process binds and becomes the primary; later ones connect, send one JSON line and exit without opening a window.
+
+The file's existence proves nothing — a crash leaves it behind — so *connecting* is what proves an instance is alive: `acquire` tries `connect` first and only unlinks after a refusal. A lost `bind` race retries `connect` once; any other failure is logged and startup continues without the guarantee, since refusing to launch would be worse. `acquire_at` takes the path as a parameter so the handover is tested end to end.
+
+The primary's own launch request goes through the same channel as later ones, giving the UI a single path to serve (`AviaryApp::handle_external_request`, pumped like the tray). Every request calls `window.activate_window()`, or a tray-minimized window would swallow the mailto while staying hidden.
+
+`mailto.rs` is the RFC 6068 parser shared with `mailto:` anchors clicked in a message body (`blitz_body/element.rs::mailto_compose_init`, replacing `mailto_recipients`, which read recipients only — so a link carrying `?subject=` opened an empty message). Two deliberate restrictions, because the URL comes from a web page or an email rather than the user: **`attach` and unknown headers are ignored** (honouring it would let a page name a local file and have it mailed out) and **control characters are stripped** (`%0A` in a subject is the classic header injection). `+` is not decoded as a space — RFC 6068 percent-encodes, it is not form encoding, and `user+tag@example.com` is far too common to mangle. A `mailto:` is never handed back to the system opener, even an empty one: Aviary may be the registered handler, so delegating would ask the desktop to relaunch us.
+
 ### gpui / gpui-component — pièges connus
 
 - gpui renders through **blade (Vulkan)** on Linux: `shell.nix` must keep `vulkan-loader` in `LD_LIBRARY_PATH` (plus wayland/x11/fontconfig/freetype).

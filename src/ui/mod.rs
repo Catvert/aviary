@@ -38,9 +38,12 @@ mod spellcheck;
 mod state;
 mod tag_menu;
 mod theme;
-mod util;
+// `crate::mailto` reuses the address parsing here rather than growing a second,
+// subtly different one.
+pub(crate) mod util;
 mod viewer;
 
+use crate::single_instance::ExternalRequest;
 use gpui::{px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
 use gpui_component::Root;
 use rust_embed::RustEmbed;
@@ -115,7 +118,11 @@ fn install_fonts(cx: &mut App) {
     }
 }
 
-pub fn run() {
+/// `external_requests` carries what other invocations of the binary asked for —
+/// a `mailto:` URL clicked on the desktop, or a plain "come to the front". It
+/// already holds this process's own launch request (see `single_instance`), so
+/// the first one is served exactly like the ones that arrive later.
+pub fn run(external_requests: tokio::sync::mpsc::UnboundedReceiver<ExternalRequest>) {
     let mut settings = Settings::load();
     install_i18n(settings.global.language);
     settings.global.ai.ensure_prompt_defaults();
@@ -146,7 +153,8 @@ pub fn run() {
                 ..Default::default()
             },
             |window, cx| {
-                let main = cx.new(|cx| app::AviaryApp::new(settings.clone(), window, cx));
+                let main = cx
+                    .new(|cx| app::AviaryApp::new(settings.clone(), external_requests, window, cx));
                 let root = cx.new(|cx| Root::new(main.clone(), window, cx));
                 let notification_source = root.read(cx).notification.clone();
                 main.update(cx, |app, cx| {

@@ -94,12 +94,14 @@ mod auth;
 mod blocks;
 mod dictionaries;
 mod logging;
+mod mailto;
 mod model;
 mod notify;
 mod proofreading;
 mod providers;
 mod runtime;
 mod search_query;
+mod single_instance;
 #[cfg(target_os = "linux")]
 mod tray;
 mod ui;
@@ -139,6 +141,30 @@ fn tune_allocator() {}
 fn main() {
     tune_allocator();
     logging::init();
+
+    // Claim the session before anything is opened or written. Aviary is the
+    // registered `mailto:` handler, so the desktop starts a fresh process on
+    // every click; all but the first must hand their URL to the instance
+    // already running and leave, rather than become a second writer of the
+    // session file and the two SQLite databases.
+    #[cfg(unix)]
+    let (external_requests, _socket_guard) =
+        match single_instance::acquire(single_instance::ExternalRequest::from_args()) {
+            single_instance::Acquisition::HandedOver => return,
+            // The guard is bound here, not inside the match arm, so the socket
+            // file is unlinked when `main` returns rather than immediately.
+            single_instance::Acquisition::Primary {
+                requests,
+                _listener,
+            } => (requests, _listener),
+        };
+    #[cfg(not(unix))]
+    let external_requests = {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(tx);
+        rx
+    };
+
     log::info!("starting Aviary");
-    ui::run();
+    ui::run(external_requests);
 }

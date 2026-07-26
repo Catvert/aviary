@@ -800,6 +800,45 @@ impl AviaryApp {
         }
     }
 
+    /// Serves what another invocation of the binary was asked to do — this
+    /// process's own launch arguments included, since they travel the same
+    /// channel.
+    ///
+    /// A `mailto:` opens a composer in the reader pane, like every other "new
+    /// message" path: the user clicked a link expecting to write, and the
+    /// mailbox they write from is the one already on screen.
+    pub(super) fn handle_external_request(
+        &mut self,
+        request: crate::single_instance::ExternalRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::single_instance::ExternalRequest;
+
+        // Whatever the request, the user acted on the desktop and expects to
+        // see Aviary. A tray-minimized window would otherwise take the mailto
+        // and stay hidden.
+        window.activate_window();
+
+        match request {
+            // Nothing more to do: a second launch with no argument means
+            // "bring the running instance up", which the activation above did.
+            ExternalRequest::Activate => {}
+            ExternalRequest::Compose(mailto) => {
+                let init = crate::ui::compose::ComposeInit {
+                    to: mailto.to,
+                    cc: mailto.cc,
+                    bcc: mailto.bcc,
+                    subject: mailto.subject,
+                    body_md: mailto.body,
+                    ..crate::ui::compose::ComposeInit::blank()
+                };
+                self.open_inline_compose(init, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
     #[cfg(target_os = "linux")]
     pub(super) fn handle_tray(
         &mut self,

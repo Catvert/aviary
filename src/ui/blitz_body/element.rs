@@ -533,7 +533,7 @@ pub(super) fn activate_link(raw: &str, window: &mut Window, cx: &mut App) {
     let Some(url) = safe_link(raw) else {
         return;
     };
-    let Some(recipients) = mailto_recipients(&url) else {
+    let Some(init) = mailto_compose_init(&url) else {
         open_link(&url);
         return;
     };
@@ -543,31 +543,30 @@ pub(super) fn activate_link(raw: &str, window: &mut Window, cx: &mut App) {
         .and_then(|app| app.upgrade());
     if let Some(app) = app {
         app.update(cx, |this, cx| {
-            this.open_inline_compose(
-                crate::ui::compose::ComposeInit::with_to(recipients.clone()),
-                window,
-                cx,
-            );
+            this.open_inline_compose(init.clone(), window, cx);
         });
     } else {
         open_link(&url);
     }
 }
 
-pub(super) fn mailto_recipients(raw: &str) -> Option<String> {
-    let url = reqwest::Url::parse(raw).ok()?;
-    if url.scheme() != "mailto" {
-        return None;
-    }
-    let decoded = urlencoding::decode(url.path()).ok()?;
-    let recipients = crate::ui::util::parse_bare_addresses(&decoded)
-        .into_iter()
-        .filter(|address| {
-            address.contains('@') && !address.is_empty() && !address.chars().any(char::is_control)
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    (!recipients.is_empty()).then_some(recipients)
+/// Turns a `mailto:` anchor into the composer it should open, or `None` when
+/// the link is not a `mailto:` at all.
+///
+/// A `mailto:` is never handed to the system opener, even one that names no
+/// valid address: Aviary may itself be the registered handler, so delegating
+/// would ask the desktop to launch us again — and the honest answer to a
+/// malformed mail link is an empty composer, not a round trip.
+pub(super) fn mailto_compose_init(raw: &str) -> Option<crate::ui::compose::ComposeInit> {
+    let mailto = crate::mailto::parse(raw)?;
+    Some(crate::ui::compose::ComposeInit {
+        to: mailto.to,
+        cc: mailto.cc,
+        bcc: mailto.bcc,
+        subject: mailto.subject,
+        body_md: mailto.body,
+        ..crate::ui::compose::ComposeInit::blank()
+    })
 }
 
 pub(super) fn dispatch_pending_mailto(key: &str, window: &mut Window, cx: &mut App) {

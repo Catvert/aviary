@@ -1711,22 +1711,28 @@ fn link_context_target_rejects_unsafe_schemes() {
 }
 
 #[test]
-fn mailto_prefills_only_valid_recipients() {
-    assert_eq!(
-        mailto_recipients("mailto:contact-a%40example.test?subject=Hello"),
-        Some("contact-a@example.test".to_string())
-    );
-    assert_eq!(
-        mailto_recipients(
-            "mailto:contact-a%40example.test,contact-b%40example.invalid?body=Ignored"
-        ),
-        Some("contact-a@example.test, contact-b@example.invalid".to_string())
-    );
-    assert_eq!(mailto_recipients("mailto:not-an-address"), None);
-    assert_eq!(
-        mailto_recipients("https://example.test/contact-a@example.test"),
-        None
-    );
+fn mailto_prefills_the_whole_composer() {
+    let init = mailto_compose_init("mailto:contact-a%40example.test?subject=Hello&body=Bonjour")
+        .expect("a mailto link");
+    assert_eq!(init.to, "contact-a@example.test");
+    // The subject and body used to be dropped here, which made a link built to
+    // open a pre-filled message open an empty one instead.
+    assert_eq!(init.subject, "Hello");
+    assert_eq!(init.body_md, "Bonjour");
+
+    let init = mailto_compose_init(
+        "mailto:contact-a%40example.test,contact-b%40example.invalid?cc=contact-c%40example.test",
+    )
+    .expect("a mailto link");
+    assert_eq!(init.to, "contact-a@example.test, contact-b@example.invalid");
+    assert_eq!(init.cc, "contact-c@example.test");
+
+    // Still a mail link, so it opens a composer rather than being handed back
+    // to the desktop — with nothing filled in, since nothing was addressable.
+    let init = mailto_compose_init("mailto:not-an-address").expect("a mailto link");
+    assert!(init.to.is_empty());
+
+    assert!(mailto_compose_init("https://example.test/contact-a@example.test").is_none());
 }
 
 #[test]

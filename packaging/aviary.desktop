@@ -6,7 +6,11 @@ GenericName=Email Client
 GenericName[fr]=Client de messagerie
 Comment=Email, calendar and kanban for Microsoft 365, Gmail and IMAP
 Comment[fr]=Courrier, calendrier et kanban pour Microsoft 365, Gmail et IMAP
-Exec=aviary
+# %u passes the clicked mailto: URL. A second launch does not open a second
+# window: src/single_instance.rs hands the URL to the running instance over a
+# Unix socket and exits, which also protects the session file and the two
+# SQLite databases from a concurrent writer.
+Exec=aviary %u
 Icon=aviary
 Terminal=false
 # One main category only. Adding Office (for the calendar) makes menus list
@@ -14,10 +18,7 @@ Terminal=false
 Categories=Network;Email;
 Keywords=email;mail;imap;gmail;calendar;kanban;
 Keywords[fr]=courriel;courrier;mail;imap;gmail;calendrier;kanban;
-# Deliberately not registering `MimeType=x-scheme-handler/mailto;`: the binary
-# takes no arguments today, so claiming the handler would let the desktop offer
-# Aviary as the default mail client and then open it on an empty inbox instead
-# of a pre-filled composer. Add it together with `%u` and argument parsing.
+MimeType=x-scheme-handler/mailto;
 # Wayland matches a window to this file through its app_id, which ui/mod.rs
 # sets to "aviary" in WindowOptions. Both must stay equal or the launcher shows
 # a generic icon in the dock. Renaming this file to a reverse-DNS id (needed

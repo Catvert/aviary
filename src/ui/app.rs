@@ -669,7 +669,14 @@ pub struct AviaryApp {
 }
 
 impl AviaryApp {
-    pub fn new(settings: Settings, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        settings: Settings,
+        external_requests: tokio::sync::mpsc::UnboundedReceiver<
+            crate::single_instance::ExternalRequest,
+        >,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         super::blitz_body::install_link_handler(cx.weak_entity(), cx);
         let restored_session = AppSession::load();
         let session_fingerprint =
@@ -837,6 +844,26 @@ impl AviaryApp {
             }
         })
         .detach();
+
+        // Requests from other invocations of the binary: this process's own
+        // launch arguments first, then every `mailto:` the desktop sends while
+        // Aviary stays open. Same shape as the tray pump above.
+        {
+            let mut external_requests = external_requests;
+            cx.spawn_in(window, async move |this, cx| {
+                while let Some(request) = external_requests.recv().await {
+                    if this
+                        .update_in(cx, |app, window, cx| {
+                            app.handle_external_request(request, window, cx)
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
 
         #[cfg(target_os = "linux")]
         let tray = if settings.global.tray_enabled {

@@ -185,6 +185,16 @@ Issues come back as `ProofreadingIssue` ranges and are painted as highlight runs
 
 `ksni` is declared with `default-features = false, features = ["blocking", "async-io"]`. **Do not** re-enable the `tokio` feature: it would set `zbus/tokio` and — via Cargo feature unification — flip every other zbus consumer into tokio mode, which panics from threads without a runtime entered. The spawn pattern is `use ksni::blocking::TrayMethods; tray.spawn()`.
 
+### Instance unique et `mailto:` (`src/single_instance.rs`, `src/mailto.rs`)
+
+`packaging/aviary.desktop` déclare `MimeType=x-scheme-handler/mailto;` et `Exec=aviary %u`, donc **le bureau lance un nouveau processus à chaque clic** sur un lien de courriel. Aviary tient un `session.json`, un `settings.json` et deux bases SQLite qu'aucun second écrivain n'est prévu : `main()` réclame donc la session **avant d'ouvrir quoi que ce soit**, par un socket Unix dans `XDG_RUNTIME_DIR` (repli `temp_dir`). Le premier processus le lie et devient le primaire ; les suivants s'y connectent, transmettent une ligne JSON et sortent sans jamais ouvrir de fenêtre.
+
+**La présence du fichier ne prouve rien** — un plantage le laisse derrière —, c'est la *connexion* qui prouve qu'une instance vit : `acquire` tente `connect` d'abord, et n'efface le fichier qu'après un refus. Un `bind` perdu de justesse contre un processus frère est retenté une fois en `connect` ; tout autre échec (dossier en lecture seule) est journalisé et le démarrage continue sans la garantie, parce que refuser de démarrer serait pire. `acquire_at` prend le chemin en paramètre pour que le passage de relais soit testé de bout en bout hors du runtime dir réel.
+
+**La requête de lancement du processus primaire est poussée dans le même canal** que celles qui arriveront ensuite, si bien que l'UI n'a qu'un chemin à servir (`AviaryApp::handle_external_request`, pompé comme le tray). Chaque requête appelle `window.activate_window()` : sans ça, une fenêtre réduite dans la barre système prendrait le `mailto:` en restant cachée.
+
+`mailto.rs` est le parseur RFC 6068 partagé par ce chemin **et** par le clic sur une ancre `mailto:` dans un corps lu (`blitz_body/element.rs::mailto_compose_init`, qui remplace l'ancien `mailto_recipients` — celui-ci ne lisait que les destinataires, donc un lien portant `?subject=` ouvrait un message vide). Deux restrictions volontaires, parce que l'URL vient d'une page web ou d'un courriel, jamais de l'utilisateur : **`attach` et tout en-tête inconnu sont ignorés** (l'honorer laisserait une page nommer un fichier local et le faire envoyer), et **les caractères de contrôle sont retirés** (un `%0A` dans `subject` est l'injection d'en-tête classique). `+` n'est pas décodé en espace : RFC 6068 percent-encode et ne fait pas de *form encoding*, or `user+tag@example.com` est trop courant pour être abîmé. Un `mailto:` n'est **jamais** repassé à l'ouvreur système, même vide : Aviary peut être le gestionnaire enregistré, donc déléguer reviendrait à demander au bureau de nous relancer.
+
 ### gpui / gpui-component — pièges connus
 
 - gpui renders through **blade (Vulkan)** on Linux: `shell.nix` must keep `vulkan-loader` in `LD_LIBRARY_PATH` (plus wayland/x11/fontconfig/freetype).
