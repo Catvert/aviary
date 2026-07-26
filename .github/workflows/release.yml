@@ -39,7 +39,7 @@ jobs:
           sudo apt-get install --no-install-recommends -y \
             pkg-config clang cmake \
             libwayland-dev libxkbcommon-dev libgl-dev \
-            libfontconfig-1-dev libfreetype-dev \
+            libfontconfig1-dev libfreetype-dev \
             libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxcb1-dev \
             libvulkan-dev libssl-dev libdbus-1-dev libzstd-dev
 
