@@ -1,3 +1,4 @@
+use super::retry::retry_read;
 use super::{BgAccount, Evt};
 use std::sync::Arc;
 
@@ -15,7 +16,9 @@ pub(super) async fn load_sender_history(account: Arc<BgAccount>, email: String, 
         }
     };
     let _permit = account.mailbox_permit().await;
-    match account.session(&auth).list_from_sender(&email, limit).await {
+    match retry_read(|| async { account.session(&auth).list_from_sender(&email, limit).await })
+        .await
+    {
         Ok((mut messages, next_link)) => {
             for m in &mut messages {
                 m.account_id = account.id.clone();
@@ -54,7 +57,9 @@ pub(super) async fn load_more_sender_history(
         }
     };
     let _permit = account.mailbox_permit().await;
-    match account.session(&auth).fetch_messages_page(&next_link).await {
+    match retry_read(|| async { account.session(&auth).fetch_messages_page(&next_link).await })
+        .await
+    {
         Ok((mut messages, next_link)) => {
             for m in &mut messages {
                 m.account_id = account.id.clone();

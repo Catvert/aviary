@@ -1,5 +1,6 @@
 //! Runtime tasks related to the folder tree.
 
+use super::retry::retry_read;
 use super::{BgAccount, Evt};
 use std::sync::Arc;
 
@@ -17,7 +18,7 @@ pub(super) async fn load(account: Arc<BgAccount>) {
         }
     };
     let _permit = account.mailbox_permit().await;
-    match account.session(&auth).list_folders().await {
+    match retry_read(|| async { account.session(&auth).list_folders().await }).await {
         Ok(folders) => account.emit(Evt::Folders {
             account_id: account.id.clone(),
             folders,

@@ -1,5 +1,6 @@
 //! Runtime tasks related to tags and kanban columns.
 
+use super::retry::retry_read;
 use super::{BgAccount, Evt};
 use std::sync::Arc;
 
@@ -17,7 +18,7 @@ pub(super) async fn load(account: Arc<BgAccount>) {
         }
     };
     let _permit = account.mailbox_permit().await;
-    match account.session(&auth).list_tags().await {
+    match retry_read(|| async { account.session(&auth).list_tags().await }).await {
         Ok(tags) => account.emit(Evt::Tags {
             account_id: account.id.clone(),
             tags,
@@ -196,11 +197,14 @@ pub(super) async fn load_listing(account: Arc<BgAccount>, tag_id: String, limit:
         return;
     };
     let _permit = account.mailbox_permit().await;
-    match account
-        .session(&auth)
-        .list_messages_tagged(&tag_id, limit)
-        .await
-    {
+    let listed = retry_read(|| async {
+        account
+            .session(&auth)
+            .list_messages_tagged(&tag_id, limit)
+            .await
+    })
+    .await;
+    match listed {
         Ok(mut messages) => {
             for message in &mut messages {
                 message.account_id = account.id.clone();

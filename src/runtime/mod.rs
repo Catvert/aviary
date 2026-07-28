@@ -21,6 +21,7 @@ mod mailbox;
 mod operation_store;
 mod operations;
 mod protocol;
+mod retry;
 mod send;
 mod sender_history;
 mod tags;

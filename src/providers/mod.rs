@@ -25,7 +25,7 @@ pub mod graph;
 pub mod html;
 pub mod imap;
 
-pub(crate) use error::{http_error, status_of};
+pub(crate) use error::{http_error, retry_after_of, status_of};
 
 /// One page of incremental folder changes. Cursors remain opaque to the
 /// runtime and are persisted unchanged in SQLite.

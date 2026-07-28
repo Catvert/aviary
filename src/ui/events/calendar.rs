@@ -78,6 +78,23 @@ impl AviaryApp {
         }
     }
 
+    /// A window failed even after the runtime's transient-failure retries.
+    /// Its months go back among the missing chunks (behind the scope's
+    /// cooldown) — leaving them marked would display them as event-free until
+    /// the next full reload.
+    pub(super) fn on_calendar_load_failed(
+        &mut self,
+        account_id: AccountId,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        error: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.calendar.on_load_failed(&account_id.0, from, to);
+        self.notify_error(error, window, cx);
+    }
+
     pub(super) fn on_calendar_event_saved(
         &mut self,
         request_id: u64,
@@ -192,6 +209,12 @@ impl AviaryApp {
         error: Option<String>,
         last_success: Option<chrono::DateTime<chrono::Utc>>,
     ) {
+        // A failed sync forgets the feed's chunk marks so its months are
+        // refetched (behind the scope's cooldown) instead of staying empty.
+        if !syncing && error.is_some() {
+            self.calendar
+                .on_scope_failed(&format!("ical:{subscription_id}"));
+        }
         self.calendar.ical_sync.insert(
             subscription_id,
             super::super::calendar_view::IcalSyncStatus {

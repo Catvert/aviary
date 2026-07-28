@@ -24,6 +24,7 @@ use gpui_component::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Default)]
 pub struct IcalSyncStatus {
@@ -59,6 +60,11 @@ const GRID_PREFETCH_WEEKS: usize = 5;
 /// the viewed period are evicted to bound memory during long scrolls.
 const MAX_CHUNK_KEYS: usize = 120;
 const KEEP_CHUNK_RADIUS: i32 = 24;
+/// Pause before a scope whose fetch failed is asked again. The runtime already
+/// retried transient failures before reporting one, so a failure landing here
+/// is durable enough that refetching sooner would hammer the provider — and
+/// toast the user — from the per-render fetch pass.
+const FAILED_FETCH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Sequential month index (`year * 12 + month0`) used as fetch-chunk key.
 fn month_chunk(day: NaiveDate) -> i32 {
@@ -94,6 +100,11 @@ pub struct CalendarViewState {
     /// Month chunks already requested, keyed by calendar scope (account id or
     /// `ical:{id}`). Cleared by [`Self::force_reload`] to force a refetch.
     loaded_chunks: HashMap<String, HashSet<i32>>,
+    /// Scopes whose last fetch failed, not refetched before the stored
+    /// deadline. `ensure_calendar_loaded` runs on every render, so returning
+    /// a failed window to the missing chunks without this pause would retry a
+    /// durable failure frame after frame.
+    fetch_cooldowns: HashMap<String, Instant>,
     pub loading: bool,
     pub composes: Vec<EventComposeHandle>,
     pub inline_compose: Option<InlineEventCompose>,
@@ -130,6 +141,7 @@ impl CalendarViewState {
             date_drag_anchor: None,
             selected: None,
             loaded_chunks: HashMap::new(),
+            fetch_cooldowns: HashMap::new(),
             loading: false,
             composes: Vec::new(),
             inline_compose: None,
@@ -161,6 +173,7 @@ impl CalendarViewState {
         self.events.extend(events);
         self.events.sort_by_key(|a| a.start);
         self.week_cache.clear();
+        self.fetch_cooldowns.remove(&account_id.0);
         self.loading = false;
     }
 
@@ -176,7 +189,42 @@ impl CalendarViewState {
 
     pub fn force_reload(&mut self) {
         self.loaded_chunks.clear();
+        self.fetch_cooldowns.clear();
         self.week_cache.clear();
+    }
+
+    /// Returns a failed fetch window to the missing chunks, so the next fetch
+    /// pass — once the scope's cooldown expires — asks for those months again
+    /// instead of leaving them to render as empty.
+    pub fn on_load_failed(&mut self, scope: &str, from: DateTime<Utc>, to: DateTime<Utc>) {
+        let first = month_chunk(from.with_timezone(&Local).date_naive());
+        let last =
+            month_chunk(to.with_timezone(&Local).date_naive() - Duration::days(1)).max(first);
+        if let Some(chunks) = self.loaded_chunks.get_mut(scope) {
+            for chunk in first..=last {
+                chunks.remove(&chunk);
+            }
+        }
+        self.begin_cooldown(scope);
+    }
+
+    /// Scope-wide failure — an iCal feed that could not be fetched is one
+    /// document, so no single window can be blamed.
+    pub fn on_scope_failed(&mut self, scope: &str) {
+        self.loaded_chunks.remove(scope);
+        self.begin_cooldown(scope);
+    }
+
+    fn begin_cooldown(&mut self, scope: &str) {
+        self.fetch_cooldowns
+            .insert(scope.to_string(), Instant::now() + FAILED_FETCH_COOLDOWN);
+        self.loading = false;
+    }
+
+    fn scope_cooling_down(&self, scope: &str) -> bool {
+        self.fetch_cooldowns
+            .get(scope)
+            .is_some_and(|until| *until > Instant::now())
     }
 
     pub(super) fn invalidate_event_layouts(&mut self) {
@@ -1250,6 +1298,9 @@ impl AviaryApp {
         // One request per contiguous run of missing months per calendar.
         let mut sent = false;
         for account_id in account_ids {
+            if self.calendar.scope_cooling_down(&account_id.0) {
+                continue;
+            }
             for (start, end) in self
                 .calendar
                 .missing_runs(&account_id.0, first_chunk, last_chunk)
@@ -1264,6 +1315,9 @@ impl AviaryApp {
         }
         for subscription_id in ical_ids {
             let scope = format!("ical:{subscription_id}");
+            if self.calendar.scope_cooling_down(&scope) {
+                continue;
+            }
             for (start, end) in self.calendar.missing_runs(&scope, first_chunk, last_chunk) {
                 sent = true;
                 self.send(Cmd::LoadIcalCalendar {
@@ -2453,6 +2507,50 @@ mod tests {
         assert_eq!(state.missing_runs("account", 8, 15), vec![(8, 9), (14, 15)]);
         // Scopes are independent.
         assert_eq!(state.missing_runs("ical:1", 12, 12), vec![(12, 12)]);
+    }
+
+    #[test]
+    fn a_failed_window_returns_to_the_missing_chunks_behind_a_cooldown() {
+        let mut state = CalendarViewState::new(CalendarLayout::List);
+        assert_eq!(state.missing_runs("account", 10, 13), vec![(10, 13)]);
+
+        state.on_load_failed("account", to_utc(chunk_start(11)), to_utc(chunk_start(13)));
+
+        // The failed months are missing again, but only this scope waits.
+        assert_eq!(state.missing_runs("account", 10, 13), vec![(11, 12)]);
+        assert!(state.scope_cooling_down("account"));
+        assert!(!state.scope_cooling_down("ical:1"));
+
+        // An explicit reload does not wait out the pause.
+        state.force_reload();
+        assert!(!state.scope_cooling_down("account"));
+    }
+
+    #[test]
+    fn a_successful_window_clears_its_scope_cooldown() {
+        let mut state = CalendarViewState::new(CalendarLayout::List);
+        let account = AccountId("account".into());
+        state.on_load_failed("account", to_utc(chunk_start(11)), to_utc(chunk_start(12)));
+        assert!(state.scope_cooling_down("account"));
+
+        state.on_events(
+            &account,
+            to_utc(chunk_start(11)),
+            to_utc(chunk_start(12)),
+            Vec::new(),
+        );
+        assert!(!state.scope_cooling_down("account"));
+    }
+
+    #[test]
+    fn a_failed_feed_forgets_all_its_chunk_marks() {
+        let mut state = CalendarViewState::new(CalendarLayout::List);
+        assert_eq!(state.missing_runs("ical:1", 5, 6), vec![(5, 6)]);
+
+        state.on_scope_failed("ical:1");
+
+        assert!(state.scope_cooling_down("ical:1"));
+        assert_eq!(state.missing_runs("ical:1", 5, 6), vec![(5, 6)]);
     }
 
     #[test]

@@ -9,6 +9,7 @@
 //! removes the guesswork; the rendered message is unchanged.
 
 use reqwest::StatusCode;
+use std::time::Duration;
 
 /// A non-success HTTP response from a provider.
 #[derive(Debug)]
@@ -16,6 +17,9 @@ pub struct ProviderError {
     /// Status the provider replied with, when the failure came from a response
     /// rather than from the transport.
     pub status: Option<StatusCode>,
+    /// Server-directed pause from a `Retry-After` header, when the response
+    /// carried one (throttling replies do).
+    pub retry_after: Option<Duration>,
     message: String,
 }
 
@@ -23,6 +27,7 @@ impl ProviderError {
     pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
             status: Some(status),
+            retry_after: None,
             message: message.into(),
         }
     }
@@ -42,8 +47,24 @@ impl std::error::Error for ProviderError {}
 /// `"<label> failed (<status>): <body>"`, the shape the UI already displays.
 pub(crate) async fn http_error(resp: reqwest::Response, label: &str) -> anyhow::Error {
     let status = resp.status();
+    let retry_after = parse_retry_after(resp.headers());
     let body = resp.text().await.unwrap_or_default();
-    ProviderError::new(status, format!("{label} failed ({status}): {body}")).into()
+    let mut error = ProviderError::new(status, format!("{label} failed ({status}): {body}"));
+    error.retry_after = retry_after;
+    error.into()
+}
+
+/// Seconds form of `Retry-After` only: Graph and Google both use it, and the
+/// HTTP-date form is not worth a date parser here.
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
 }
 
 /// Status carried by any `ProviderError` in the chain.
@@ -52,6 +73,14 @@ pub(crate) fn status_of(error: &anyhow::Error) -> Option<StatusCode> {
         .chain()
         .find_map(|cause| cause.downcast_ref::<ProviderError>())
         .and_then(|provider| provider.status)
+}
+
+/// Server-directed pause carried by any `ProviderError` in the chain.
+pub(crate) fn retry_after_of(error: &anyhow::Error) -> Option<Duration> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ProviderError>())
+        .and_then(|provider| provider.retry_after)
 }
 
 #[cfg(test)]
@@ -85,5 +114,27 @@ mod tests {
     #[test]
     fn an_unrelated_error_carries_no_status() {
         assert_eq!(status_of(&anyhow::anyhow!("keyring unavailable")), None);
+    }
+
+    #[test]
+    fn retry_after_reads_the_seconds_form_and_ignores_the_date_form() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "12".parse().unwrap());
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(12)));
+
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn the_retry_after_survives_added_context() {
+        let mut provider = ProviderError::new(StatusCode::TOO_MANY_REQUESTS, "slow down");
+        provider.retry_after = Some(Duration::from_secs(7));
+        let wrapped = anyhow::Error::from(provider).context("while loading the calendar");
+
+        assert_eq!(retry_after_of(&wrapped), Some(Duration::from_secs(7)));
     }
 }

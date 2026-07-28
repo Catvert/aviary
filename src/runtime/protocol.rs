@@ -743,6 +743,16 @@ pub enum Evt {
         to: DateTime<Utc>,
         events: Vec<CalendarEvent>,
     },
+    /// A calendar window could not be loaded even after the runtime's
+    /// transient-failure retries. Carries the requested window so the UI can
+    /// return those months to the missing chunks — without it they would
+    /// render as empty until the next full reload.
+    CalendarLoadFailed {
+        account_id: AccountId,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        error: String,
+    },
     IcalEvents {
         subscription_id: String,
         from: DateTime<Utc>,
@@ -1047,6 +1057,7 @@ impl Evt {
             | Self::ThreadMessageError { .. }
             | Self::Thread { .. }
             | Self::CalendarEvents { .. }
+            | Self::CalendarLoadFailed { .. }
             | Self::IcalEvents { .. }
             | Self::IcalSyncState { .. }
             | Self::IcalFeedUpdated { .. }
@@ -1144,6 +1155,7 @@ impl Evt {
             | Self::ThreadMessageError { .. }
             | Self::Thread { .. }
             | Self::CalendarEvents { .. }
+            | Self::CalendarLoadFailed { .. }
             | Self::IcalEvents { .. }
             | Self::IcalSyncState { .. }
             | Self::IcalFeedUpdated { .. }
@@ -1254,6 +1266,7 @@ impl Evt {
             | Self::Thread { .. }
             | Self::SearchResults { .. }
             | Self::CalendarEvents { .. }
+            | Self::CalendarLoadFailed { .. }
             | Self::IcalEvents { .. }
             | Self::IcalSyncState { .. }
             | Self::IcalFeedUpdated { .. }
@@ -1312,6 +1325,7 @@ impl Evt {
             | Self::Thread { account_id, .. }
             | Self::SearchResults { account_id, .. }
             | Self::CalendarEvents { account_id, .. }
+            | Self::CalendarLoadFailed { account_id, .. }
             | Self::EventCreated { account_id, .. }
             | Self::EventCreateError { account_id, .. }
             | Self::CalendarEventUpdated { account_id, .. }

@@ -1,3 +1,4 @@
+use super::retry::retry_read;
 use super::{BgAccount, BgGlobal, Evt, UnifiedAccountPage};
 use crate::model::{AccountId, MessageHeader, Provider};
 use crate::providers::MessagePage;
@@ -135,16 +136,17 @@ async fn fetch_unified_page(
     };
     let permit = account.mailbox_permit().await;
     let result = if let Some(cursor) = cursor {
-        account
-            .session(&auth)
-            .fetch_messages_page(&cursor)
+        retry_read(|| async { account.session(&auth).fetch_messages_page(&cursor).await })
             .await
             .map(|(messages, next)| MessagePage { messages, next })
     } else {
-        account
-            .session(&auth)
-            .list_folder_messages_page(None, page_size)
-            .await
+        retry_read(|| async {
+            account
+                .session(&auth)
+                .list_folder_messages_page(None, page_size)
+                .await
+        })
+        .await
     };
     drop(permit);
 
@@ -403,10 +405,13 @@ pub(super) async fn refresh_inbox(
             .is_none()
     {
         let permit = account.mailbox_permit().await;
-        let seed = account
-            .session(&auth)
-            .sync_folder_messages(folder_id.as_deref(), None)
-            .await;
+        let seed = retry_read(|| async {
+            account
+                .session(&auth)
+                .sync_folder_messages(folder_id.as_deref(), None)
+                .await
+        })
+        .await;
         drop(permit);
         if let Ok(seed) = seed {
             if let Some(cursor) = seed.cursor {
@@ -421,10 +426,13 @@ pub(super) async fn refresh_inbox(
     }
     let permit = account.mailbox_permit().await;
     account.emit(Evt::Status(tr!("status-loading-messages").to_string()));
-    let response = account
-        .session(&auth)
-        .list_folder_messages(folder_id.as_deref(), limit, 0)
-        .await;
+    let response = retry_read(|| async {
+        account
+            .session(&auth)
+            .list_folder_messages(folder_id.as_deref(), limit, 0)
+            .await
+    })
+    .await;
     drop(permit);
     match response {
         Ok(mut msgs) => {
@@ -559,11 +567,14 @@ pub(super) async fn load_more(
         return;
     };
     let _permit = account.mailbox_permit().await;
-    match account
-        .session(&auth)
-        .list_folder_messages(folder_id.as_deref(), limit, skip)
-        .await
-    {
+    let listed = retry_read(|| async {
+        account
+            .session(&auth)
+            .list_folder_messages(folder_id.as_deref(), limit, skip)
+            .await
+    })
+    .await;
+    match listed {
         Ok(mut msgs) => {
             for m in &mut msgs {
                 m.account_id = account.id.clone();
@@ -603,10 +614,13 @@ async fn auto_refresh_check(account: Arc<BgAccount>, limit: usize) -> bool {
         }
     };
     let permit = account.mailbox_permit().await;
-    let response = account
-        .session(&auth)
-        .list_folder_messages(folder_id.as_deref(), limit, 0)
-        .await;
+    let response = retry_read(|| async {
+        account
+            .session(&auth)
+            .list_folder_messages(folder_id.as_deref(), limit, 0)
+            .await
+    })
+    .await;
     drop(permit);
     match response {
         Ok(mut msgs) => {
@@ -741,7 +755,7 @@ pub(super) async fn open_message(account: Arc<BgAccount>, id: String) {
     let permit = account.mailbox_permit().await;
     let gate_elapsed = gate_started.elapsed();
     let fetch_started = std::time::Instant::now();
-    let fetched = account.session(&auth).get_message(&id).await;
+    let fetched = retry_read(|| async { account.session(&auth).get_message(&id).await }).await;
     let fetch_elapsed = fetch_started.elapsed();
     match fetched {
         Ok(mut m) => {
@@ -864,10 +878,13 @@ pub(super) async fn load_quick_action_message(
         let auth = account.ensure_auth().await?;
         let _permit = account.mailbox_permit().await;
         let session = account.session(&auth);
-        let mut message = session.get_message(&id).await?;
+        let mut message = retry_read(|| async { session.get_message(&id).await }).await?;
         for attachment in &mut message.attachments {
             if attachment.bytes.is_none() && !attachment.id.is_empty() {
-                attachment.bytes = Some(session.fetch_attachment(&id, &attachment.id).await?);
+                let bytes =
+                    retry_read(|| async { session.fetch_attachment(&id, &attachment.id).await })
+                        .await?;
+                attachment.bytes = Some(bytes);
             }
         }
         message.header.account_id = account.id.clone();
@@ -910,11 +927,14 @@ pub(super) async fn fetch_attachment(
         }
     };
     let _permit = account.mailbox_permit().await;
-    match account
-        .session(&auth)
-        .fetch_attachment(&message_id, &attachment_id)
-        .await
-    {
+    let fetched = retry_read(|| async {
+        account
+            .session(&auth)
+            .fetch_attachment(&message_id, &attachment_id)
+            .await
+    })
+    .await;
+    match fetched {
         Ok(bytes) => {
             account.global.cache.store_attachment(
                 account.id.clone(),
@@ -973,7 +993,7 @@ pub(super) async fn load_thread_message(account: Arc<BgAccount>, id: String) {
         }
     };
     let _permit = account.mailbox_permit().await;
-    match account.session(&auth).get_message(&id).await {
+    match retry_read(|| async { account.session(&auth).get_message(&id).await }).await {
         Ok(mut m) => {
             m.header.account_id = account.id.clone();
             if !m.header.is_read {
@@ -1130,11 +1150,14 @@ pub(super) async fn search_messages(
     account.emit(Evt::Status(
         tr!("status-searching", { query: query.clone() }).to_string(),
     ));
-    match account
-        .session(&auth)
-        .search(&parsed, scope.folder(), limit)
-        .await
-    {
+    let searched = retry_read(|| async {
+        account
+            .session(&auth)
+            .search(&parsed, scope.folder(), limit)
+            .await
+    })
+    .await;
+    match searched {
         Ok(mut messages) => {
             // Backends drop what their dialect cannot express — Graph cannot
             // combine `$search` with a date filter, IMAP has no attachment
@@ -1160,7 +1183,8 @@ pub(super) async fn load_thread(account: Arc<BgAccount>, conversation_id: String
         return;
     };
     let _permit = account.mailbox_permit().await;
-    match account.session(&auth).list_thread(&conversation_id).await {
+    match retry_read(|| async { account.session(&auth).list_thread(&conversation_id).await }).await
+    {
         Ok(mut messages) => {
             let message_count = messages.len();
             for m in &mut messages {

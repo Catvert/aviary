@@ -8,7 +8,10 @@ pub(super) async fn load_calendar(account: Arc<BgAccount>, from: DateTime<Utc>, 
         return;
     };
     account.emit(Evt::Status(tr!("calendar-loading").to_string()));
-    match account.session(&auth).list_events(from, to).await {
+    let loaded =
+        super::retry::retry_read(|| async { account.session(&auth).list_events(from, to).await })
+            .await;
+    match loaded {
         Ok(mut events) => {
             for ev in &mut events {
                 ev.account_id = account.id.clone();
@@ -20,7 +23,15 @@ pub(super) async fn load_calendar(account: Arc<BgAccount>, from: DateTime<Utc>, 
                 events,
             });
         }
-        Err(e) => account.emit(Evt::Error(e.to_string())),
+        // The window travels with the error so the UI can put those months
+        // back among the missing chunks — otherwise they would display as
+        // empty (no events at all) until the next force_reload.
+        Err(e) => account.emit(Evt::CalendarLoadFailed {
+            account_id: account.id.clone(),
+            from,
+            to,
+            error: e.to_string(),
+        }),
     }
 }
 

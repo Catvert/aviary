@@ -239,6 +239,10 @@ impl AviaryApp {
             if let Some(aid) = evt.account_id() {
                 let relevant = match &evt {
                     Evt::CalendarEvents { .. } => self.calendar_account_visible(aid),
+                    // Processed even for a calendar that was hidden meanwhile:
+                    // the failed window must return to the missing chunks, or
+                    // it would show empty once the calendar is visible again.
+                    Evt::CalendarLoadFailed { .. } => self.account(aid).is_some(),
                     Evt::Tags { .. }
                     | Evt::TagCreated { .. }
                     | Evt::TagRenamed { .. }
@@ -540,6 +544,12 @@ impl AviaryApp {
                 to,
                 events,
             } => self.on_calendar_events(account_id, from, to, events),
+            Evt::CalendarLoadFailed {
+                account_id,
+                from,
+                to,
+                error,
+            } => self.on_calendar_load_failed(account_id, from, to, error, window, cx),
             Evt::InvitationResponded {
                 account_id,
                 message_id,
