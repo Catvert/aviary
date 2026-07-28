@@ -38,7 +38,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             pkg-config clang cmake \
-            libwayland-dev libxkbcommon-dev libgl-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libgl-dev \
             libfontconfig1-dev libfreetype-dev \
             libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxcb1-dev \
             libvulkan-dev libssl-dev libdbus-1-dev libzstd-dev
@@ -98,7 +98,10 @@ jobs:
           - arch: arm64
             runner: macos-14
           - arch: x86_64
-            runner: macos-13
+            # macos-13, the last free Intel image, was retired in December
+            # 2025 — a job requesting it queues for 24 h and dies waiting.
+            # macos-15-intel is GitHub's stopgap Intel label (until 2027).
+            runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
 
     steps:
