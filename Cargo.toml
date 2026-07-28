@@ -1,6 +1,6 @@
 [package]
 name = "aviary"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Desktop email, calendar and kanban client for Microsoft 365, Gmail and IMAP/SMTP, built on gpui"
 repository = "https://github.com/Catvert/aviary"
