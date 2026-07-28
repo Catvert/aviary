@@ -101,11 +101,18 @@ impl BodyPart {
         let from_matches = self.headers.from.as_deref().is_some_and(|from| {
             normalized_address(from).eq_ignore_ascii_case(&normalized_address(&header.from))
         });
-        let subject_matches = self
-            .headers
-            .subject
-            .as_deref()
-            .is_some_and(|subject| subject.trim().eq_ignore_ascii_case(header.subject.trim()));
+        let subject = self.headers.subject.as_deref().map(str::trim);
+        let subject_matches =
+            subject.is_some_and(|subject| subject.eq_ignore_ascii_case(header.subject.trim()));
+        // Quoting a reply rewrites its "Objet :" line as often as not: Outlook
+        // repeats the subject of the mail it is answering rather than the one
+        // it quotes, and a thread accumulates "RE:"/"TR :" as it goes. When a
+        // date is there to discriminate, the subject only has to corroborate,
+        // so compare it without those prefixes.
+        let subject_corroborates = subject.is_some_and(|subject| {
+            super::strip_reply_prefixes(subject)
+                .eq_ignore_ascii_case(super::strip_reply_prefixes(&header.subject))
+        });
         let date_matches = self
             .headers
             .received
@@ -114,8 +121,8 @@ impl BodyPart {
         if self.headers.received.is_some() {
             date_matches
                 && (self.headers.from.is_none() || from_matches)
-                && (self.headers.subject.is_none() || subject_matches)
-                && (self.headers.from.is_some() || self.headers.subject.is_some())
+                && (subject.is_none() || subject_corroborates)
+                && (self.headers.from.is_some() || subject.is_some())
         } else {
             from_matches && subject_matches
         }
@@ -1188,5 +1195,30 @@ mod tests {
         let mut unrelated = target.header.clone();
         unrelated.from = "Contact C <contact-c@example.test>".into();
         assert!(!split.quoted[0].matches_header(&unrelated));
+    }
+
+    #[test]
+    fn dated_quote_matches_through_accumulated_reply_prefixes() {
+        let html = r#"<div>Ma réponse</div>
+            <div id="divRplyFwdMsg"><b>De :</b> Contact B &lt;contact-b@example.test&gt;<br>
+              <b>Envoyé :</b> 17 juillet 2026 à 17:19:33 UTC+2<br>
+              <b>Objet :</b> RE: Message historique</div>
+            <div>Corps cité</div>"#;
+        let source = message("", Some(html));
+        let split = split_message(&source).expect("conversation detected");
+        let mut header = split.quoted[0].as_message(&source, "quoted-0").header;
+
+        // Même mail, même date : seuls les préfixes de réponse diffèrent.
+        header.subject = "TR : RE: Message historique".into();
+        assert!(split.quoted[0].matches_header(&header));
+
+        // Un autre objet reste un autre message, préfixes ou pas.
+        header.subject = "RE: Autre sujet".into();
+        assert!(!split.quoted[0].matches_header(&header));
+
+        // Et la date reste le discriminant : même objet, autre horodatage.
+        header.subject = "RE: Message historique".into();
+        header.received += chrono::Duration::hours(3);
+        assert!(!split.quoted[0].matches_header(&header));
     }
 }

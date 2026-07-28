@@ -1035,18 +1035,19 @@ impl AviaryApp {
     /// Resolve an embedded quote to exactly one native message in the loaded
     /// conversation. Ambiguous or metadata-poor quotes deliberately have no
     /// jump action.
+    ///
+    /// The conversation is deduplicated first: a mail you sent comes back from
+    /// both Sent Items and the folder it was delivered to, and two copies of
+    /// the one mail would read as an ambiguity and silently drop the button.
     fn quoted_message_target(
         &self,
         source: &Message,
         quoted: &quoted_body::BodyPart,
     ) -> Option<MessageRef> {
-        let (conversation_id, thread) = self.mailbox.thread.as_ref()?;
-        if source.header.conversation_id.as_deref() != Some(conversation_id.as_str()) {
-            return None;
-        }
+        let thread = self.thread_without_duplicates(&source.header);
         let mut matches = thread
             .iter()
-            .filter(|header| header.id != source.header.id && quoted.matches_header(header))
+            .filter(|header| quoted.matches_header(header))
             .map(|header| MessageRef {
                 account_id: header.account_id.clone(),
                 id: header.id.clone(),
