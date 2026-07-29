@@ -94,6 +94,18 @@ impl BodyPart {
         self.headers.received
     }
 
+    /// Which identifying fields this quote carries. Diagnostics report the
+    /// *shape* of a quote, never its values: the log is readable in the
+    /// Préférences → Journaux tab and copied into bug reports.
+    pub(super) fn metadata_shape(&self) -> String {
+        format!(
+            "from={} subject={} date={}",
+            self.headers.from.is_some(),
+            self.headers.subject.is_some(),
+            self.headers.received.is_some()
+        )
+    }
+
     /// Whether this embedded quote can be tied reliably to a provider-native
     /// message from the loaded conversation. A date plus sender or subject is
     /// sufficient; without a date, both sender and subject must match.
@@ -202,7 +214,88 @@ fn split_message_uncached(message: &Message) -> Option<QuotedBody> {
         return None;
     }
 
+    let mut quoted = quoted;
+    inherit_attributions(current.as_ref(), &mut quoted);
     Some(QuotedBody { current, quoted })
+}
+
+/// Fills in the metadata of a fragment whose introduction stayed *outside* it.
+///
+/// Only Outlook copies a full De/Envoyé/À/Objet block inside the quote it
+/// describes. Apple Mail, Gmail and Thunderbird write a single attribution
+/// line — "Le 17 juillet 2026 à 09:00, Contact A a écrit :" — as a *sibling*
+/// placed just before the container, and a `>>` level inherits the same line
+/// from the `>` level above it. Splitting therefore leaves that fragment with
+/// no sender and no date of its own: it cannot be dated in the banner and
+/// [`BodyPart::matches_header`] can never tie it to a native message, so its
+/// "go to message" button silently disappears. In a thread whose recent hops
+/// come from Outlook and whose oldest hop was quoted by one of those clients,
+/// the button is missing on exactly the oldest card.
+///
+/// Only missing fields are filled: a fragment carrying its own header block
+/// stays authoritative.
+fn inherit_attributions(current: Option<&BodyPart>, quoted: &mut [BodyPart]) {
+    for index in 0..quoted.len() {
+        if quoted[index].headers.from.is_some() && quoted[index].headers.received.is_some() {
+            continue;
+        }
+        let attribution = if index == 0 {
+            current.and_then(|part| trailing_attribution(&part.body))
+        } else {
+            trailing_attribution(&quoted[index - 1].body)
+        };
+        let Some((from, received)) = attribution else {
+            continue;
+        };
+        let headers = &mut quoted[index].headers;
+        if headers.from.is_none() {
+            headers.from = from;
+        }
+        if headers.received.is_none() {
+            headers.received = received;
+        }
+    }
+}
+
+/// The attribution line, if any, closing a fragment: it introduces whatever
+/// was quoted right after it. Only the last few lines are considered, so a
+/// "wrote:" buried in the middle of a body is not read as one.
+fn trailing_attribution(body: &str) -> Option<(Option<String>, Option<DateTime<Utc>>)> {
+    body.lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(3)
+        .find_map(attribution_metadata)
+}
+
+/// Recognizes "On … <address> wrote:" / "Le … a écrit :" and reads back the
+/// sender and the date it carries.
+fn attribution_metadata(line: &str) -> Option<(Option<String>, Option<DateTime<Utc>>)> {
+    const MARKERS: [&str; 6] = [
+        "wrote",
+        "a écrit",
+        "schrieb",
+        "schreef",
+        "escribió",
+        "ha scritto",
+    ];
+    let lower = line.to_lowercase();
+    if !MARKERS.iter().any(|marker| lower.contains(marker)) {
+        return None;
+    }
+    let from = email_regex()
+        .find(line)
+        .map(|address| address.as_str().to_string());
+    let received = find_date_time(line);
+    (from.is_some() || received.is_some()).then_some((from, received))
+}
+
+fn email_regex() -> &'static Regex {
+    static EMAIL: OnceLock<Regex> = OnceLock::new();
+    EMAIL.get_or_init(|| {
+        Regex::new(r"(?i)[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}")
+            .expect("email regex")
+    })
 }
 
 fn html_part(html: &str, source: &Message) -> BodyPart {
@@ -299,31 +392,16 @@ fn extract_quoted_headers(body: &str) -> QuotedHeaders {
     }
 
     // Gmail often places all metadata in an "On ... <mail> wrote" line
-    // au lieu de lignes De/Date/Objet distinctes.
-    if headers.from.is_none() {
-        static EMAIL: OnceLock<Regex> = OnceLock::new();
-        let email = EMAIL.get_or_init(|| {
-            Regex::new(r"(?i)[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}")
-                .expect("email regex")
-        });
+    // au lieu de lignes De/Date/Objet distinctes. That line also carries the
+    // date, which is what a jump target is matched on.
+    if headers.from.is_none() || headers.received.is_none() {
         for line in body.lines().take(12) {
-            let lower = line.to_lowercase();
-            if [
-                "wrote",
-                "a écrit",
-                "schrieb",
-                "schreef",
-                "escribió",
-                "ha scritto",
-            ]
-            .iter()
-            .any(|marker| lower.contains(marker))
-            {
-                if let Some(address) = email.find(line) {
-                    headers.from = Some(address.as_str().to_string());
-                }
-                break;
-            }
+            let Some((from, received)) = attribution_metadata(line) else {
+                continue;
+            };
+            headers.from = headers.from.take().or(from);
+            headers.received = headers.received.or(received);
+            break;
         }
     }
     headers
@@ -347,61 +425,183 @@ fn split_header_addresses(value: &str) -> Vec<String> {
 }
 
 fn parse_header_date(value: &str) -> Option<DateTime<Utc>> {
+    let value = value.trim();
     if let Ok(date) = DateTime::parse_from_rfc3339(value) {
         return Some(date.with_timezone(&Utc));
     }
     if let Ok(date) = DateTime::parse_from_rfc2822(value) {
         return Some(date.with_timezone(&Utc));
     }
+    find_date_time(value)
+}
 
-    static FRENCH: OnceLock<Regex> = OnceLock::new();
-    let french = FRENCH.get_or_init(|| {
-        Regex::new(
-            r"(?ix)^(?:(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\s+)?
-                (\d{1,2})\s+([[:alpha:]éû]+)\s+(\d{4})\s+(?:à\s+)?
-                (\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s+UTC([+-]\d{1,2}))?$",
-        )
-        .expect("French date regex")
+/// Reads the date a mail client wrote for a human, in a transport header or an
+/// attribution line.
+///
+/// It is the strongest link between an embedded quote and a native message —
+/// without it, sender *and* subject must both match exactly — and every client
+/// writes it differently: locale, abbreviated or full month names, 12- or
+/// 24-hour clocks, numeric dates. So the value is *scanned* rather than parsed
+/// as a whole: find a calendar date anywhere in it, then the first time that
+/// follows. A missing time is treated as no date at all, midnight being a real
+/// timestamp that could match a message by accident.
+fn find_date_time(text: &str) -> Option<DateTime<Utc>> {
+    let (year, month, day, end) = find_calendar_date(text)?;
+    let (hour, minute, second) = find_time(&text[end..])?;
+    let seconds_east = find_utc_offset(text);
+    build_date_time(year, month, day, hour, minute, second, seconds_east)
+}
+
+/// The calendar date and the offset just past it, so the time is searched to
+/// its right ("17 juillet 2026 à 09:12", "Jul 17, 2026 at 9:12 AM").
+fn find_calendar_date(text: &str) -> Option<(i32, u32, u32, usize)> {
+    static DAY_FIRST: OnceLock<Regex> = OnceLock::new();
+    static MONTH_FIRST: OnceLock<Regex> = OnceLock::new();
+    static NUMERIC: OnceLock<Regex> = OnceLock::new();
+    // `[[:alpha:]]` is ASCII-only in the regex crate, and "février" or "März"
+    // are exactly the values that must be recognized.
+    let day_first = DAY_FIRST.get_or_init(|| {
+        Regex::new(r"(?i)\b(\d{1,2})(?:er)?\.?\s+(\p{L}{3,})\.?,?\s+(\d{4})\b")
+            .expect("day-first date regex")
     });
-    let captures = french.captures(value.trim())?;
-    let month = match captures[2].to_lowercase().as_str() {
-        "janvier" => 1,
-        "février" => 2,
-        "mars" => 3,
-        "avril" => 4,
-        "mai" => 5,
-        "juin" => 6,
-        "juillet" => 7,
-        "août" => 8,
-        "septembre" => 9,
-        "octobre" => 10,
-        "novembre" => 11,
-        "décembre" => 12,
-        _ => return None,
-    };
-    let parse = |index: usize| captures[index].parse::<u32>().ok();
-    let day = parse(1)?;
-    let year = captures[3].parse::<i32>().ok()?;
-    let hour = parse(4)?;
-    let minute = parse(5)?;
-    let second = captures
-        .get(6)
-        .and_then(|value| value.as_str().parse::<u32>().ok())
-        .unwrap_or(0);
-    if let Some(offset_hours) = captures
-        .get(7)
-        .and_then(|value| value.as_str().parse::<i32>().ok())
-    {
-        let offset = FixedOffset::east_opt(offset_hours * 3600)?;
-        offset
-            .with_ymd_and_hms(year, month, day, hour, minute, second)
-            .single()
-            .map(|date| date.with_timezone(&Utc))
+    let month_first = MONTH_FIRST.get_or_init(|| {
+        Regex::new(r"(?i)\b(\p{L}{3,})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b")
+            .expect("month-first date regex")
+    });
+    let numeric = NUMERIC.get_or_init(|| {
+        Regex::new(r"\b(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})\b").expect("numeric date regex")
+    });
+
+    let textual = day_first
+        .captures_iter(text)
+        .filter_map(|captures| {
+            let day = captures[1].parse().ok()?;
+            let month = month_number(&captures[2])?;
+            let year = captures[3].parse().ok()?;
+            Some((year, month, day, captures.get(0)?.end()))
+        })
+        .next()
+        .or_else(|| {
+            month_first
+                .captures_iter(text)
+                .filter_map(|captures| {
+                    let month = month_number(&captures[1])?;
+                    let day = captures[2].parse().ok()?;
+                    let year = captures[3].parse().ok()?;
+                    Some((year, month, day, captures.get(0)?.end()))
+                })
+                .next()
+        });
+    if textual.is_some() {
+        return textual;
+    }
+
+    let captures = numeric.captures(text)?;
+    let first: u32 = captures[1].parse().ok()?;
+    let second: u32 = captures[2].parse().ok()?;
+    // Nothing in the string says which convention the client used. A component
+    // above 12 settles it; otherwise day-first is assumed, and a wrong guess
+    // simply fails to match any message rather than pointing at one.
+    let (day, month) = if second > 12 {
+        (second, first)
     } else {
-        Local
+        (first, second)
+    };
+    let year = match captures[3].parse::<i32>().ok()? {
+        year if year < 70 => 2000 + year,
+        year if year < 100 => 1900 + year,
+        year => year,
+    };
+    Some((year, month, day, captures.get(0)?.end()))
+}
+
+fn find_time(text: &str) -> Option<(u32, u32, u32)> {
+    static TIME: OnceLock<Regex> = OnceLock::new();
+    let time = TIME.get_or_init(|| {
+        Regex::new(r"(?i)\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?")
+            .expect("time regex")
+    });
+    let captures = time.captures(text)?;
+    let mut hour: u32 = captures[1].parse().ok()?;
+    let minute: u32 = captures[2].parse().ok()?;
+    let second = captures
+        .get(3)
+        .and_then(|value| value.as_str().parse().ok())
+        .unwrap_or(0);
+    if let Some(meridiem) = captures.get(4) {
+        let afternoon = meridiem.as_str().to_lowercase().starts_with('p');
+        hour = match (hour % 12, afternoon) {
+            (hour, false) => hour,
+            (hour, true) => hour + 12,
+        };
+    }
+    Some((hour, minute, second))
+}
+
+/// "UTC+2", "GMT+02:00" or a parenthesized "(+02:00)". Anything else is read
+/// as local time, which is what clients write when they omit the zone.
+fn find_utc_offset(text: &str) -> Option<i32> {
+    static OFFSET: OnceLock<Regex> = OnceLock::new();
+    let offset = OFFSET.get_or_init(|| {
+        Regex::new(r"(?i)(?:(?:UTC|GMT)\s*|\()([+-])(\d{1,2}):?(\d{2})?\)?")
+            .expect("UTC offset regex")
+    });
+    let captures = offset.captures(text)?;
+    let hours: i32 = captures[2].parse().ok()?;
+    let minutes: i32 = captures
+        .get(3)
+        .and_then(|value| value.as_str().parse().ok())
+        .unwrap_or(0);
+    let sign = if &captures[1] == "-" { -1 } else { 1 };
+    Some(sign * (hours * 3600 + minutes * 60))
+}
+
+/// Month names as the clients Aviary reads actually abbreviate them (French,
+/// English, Dutch, German), matched on their distinguishing prefix — "juillet"
+/// and "juin" only diverge on the fourth character.
+fn month_number(name: &str) -> Option<u32> {
+    const MONTHS: [&[&str]; 12] = [
+        &["jan"],
+        &["fév", "fev", "feb"],
+        &["mars", "mar", "mär", "mrt", "mrz"],
+        &["avr", "apr"],
+        &["mai", "may", "mei"],
+        &["juin", "jun"],
+        &["juil", "jul"],
+        &["aoû", "aou", "aug"],
+        &["sep"],
+        &["oct", "okt"],
+        &["nov"],
+        &["déc", "dec", "dez"],
+    ];
+    let name = name.trim().trim_end_matches('.').to_lowercase();
+    MONTHS
+        .iter()
+        .position(|prefixes| prefixes.iter().any(|prefix| name.starts_with(prefix)))
+        .map(|index| index as u32 + 1)
+}
+
+fn build_date_time(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    seconds_east: Option<i32>,
+) -> Option<DateTime<Utc>> {
+    match seconds_east {
+        Some(seconds_east) => FixedOffset::east_opt(seconds_east)?
             .with_ymd_and_hms(year, month, day, hour, minute, second)
             .single()
-            .map(|date| date.with_timezone(&Utc))
+            .map(|date| date.with_timezone(&Utc)),
+        // The hour repeated by an autumn DST change is ambiguous; taking the
+        // earlier of the two keeps a date rather than dropping the quote's
+        // only reliable identifier.
+        None => Local
+            .with_ymd_and_hms(year, month, day, hour, minute, second)
+            .earliest()
+            .map(|date| date.with_timezone(&Utc)),
     }
 }
 
@@ -965,6 +1165,22 @@ mod tests {
     use crate::model::{AccountId, MessageHeader};
     use chrono::Utc;
 
+    /// A client that names no zone means the reader's own.
+    fn local(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+    ) -> DateTime<Utc> {
+        Local
+            .with_ymd_and_hms(year, month, day, hour, minute, second)
+            .earliest()
+            .expect("synthetic local timestamp")
+            .with_timezone(&Utc)
+    }
+
     fn message(body: &str, html: Option<&str>) -> Message {
         Message {
             header: MessageHeader {
@@ -1195,6 +1411,107 @@ mod tests {
         let mut unrelated = target.header.clone();
         unrelated.from = "Contact C <contact-c@example.test>".into();
         assert!(!split.quoted[0].matches_header(&unrelated));
+    }
+
+    /// Apple Mail, Gmail and Thunderbird leave their attribution line outside
+    /// the container they quote. Without inheritance the fragment carries no
+    /// sender and no date, so it can never be tied to a native message — the
+    /// oldest card of an otherwise Outlook thread loses its jump button.
+    #[test]
+    fn inherits_the_attribution_line_placed_before_the_quote() {
+        let html = r#"<div>Ma réponse</div>
+            <div>Le 17 juillet 2026 à 09:12, Contact A &lt;contact-a@example.test&gt; a écrit :</div>
+            <blockquote type="cite"><div>Message initial</div></blockquote>"#;
+        let source = message("", Some(html));
+        let split = split_message(&source).expect("conversation detected");
+
+        assert_eq!(split.quoted.len(), 1);
+        let quoted = &split.quoted[0];
+        assert!(quoted.body.contains("Message initial"));
+        assert_eq!(
+            quoted
+                .received()
+                .expect("date inherited from the attribution line"),
+            local(2026, 7, 17, 9, 12, 0)
+        );
+
+        let mut header = source.header.clone();
+        header.id = "native-1".into();
+        header.from = "Contact A <contact-a@example.test>".into();
+        header.received = local(2026, 7, 17, 9, 12, 30);
+        assert!(quoted.matches_header(&header));
+
+        header.from = "Contact C <contact-c@example.test>".into();
+        assert!(!quoted.matches_header(&header));
+    }
+
+    /// A `>>` level inherits its introduction from the `>` level above it, so
+    /// the deepest — oldest — fragment is the one left without metadata.
+    #[test]
+    fn inherits_the_attribution_of_a_deeper_markdown_quote() {
+        let body = "Réponse\n\n\
+            Le 17 juillet 2026 à 09:12, Contact B <contact-b@example.test> a écrit :\n\
+            > Précédent\n\
+            >\n\
+            > Le 16 juillet 2026 à 08:00, Contact A <contact-a@example.test> a écrit :\n\
+            >> Ancien";
+        let split = split_message(&message(body, None)).expect("conversation detected");
+
+        assert_eq!(split.quoted.len(), 2);
+        assert_eq!(
+            split.quoted[1].received().expect("inherited date"),
+            local(2026, 7, 16, 8, 0, 0)
+        );
+        assert_eq!(
+            split.quoted[1].headers.from.as_deref(),
+            Some("contact-a@example.test")
+        );
+    }
+
+    /// The date is what ties a quote to a native message; every client writes
+    /// it in its own dialect, and one that does not parse costs a jump button.
+    #[test]
+    fn reads_the_date_dialects_of_common_clients() {
+        let cases = [
+            // Outlook desktop, French and English.
+            (
+                "vendredi 17 juillet 2026 09:12",
+                local(2026, 7, 17, 9, 12, 0),
+            ),
+            (
+                "Friday, July 17, 2026 9:12 AM",
+                local(2026, 7, 17, 9, 12, 0),
+            ),
+            (
+                "Friday, July 17, 2026 9:12 PM",
+                local(2026, 7, 17, 21, 12, 0),
+            ),
+            // Gmail attributions, abbreviated in both languages.
+            ("mer. 17 juil. 2026 à 09:12", local(2026, 7, 17, 9, 12, 0)),
+            ("Fri, Jul 17, 2026 at 12:05 AM", local(2026, 7, 17, 0, 5, 0)),
+            // Thunderbird, numeric and locale-ordered.
+            ("17/07/2026 09:12", local(2026, 7, 17, 9, 12, 0)),
+            ("17.07.2026 09:12", local(2026, 7, 17, 9, 12, 0)),
+            ("7/17/26 9:12 AM", local(2026, 7, 17, 9, 12, 0)),
+            // Explicit zones win over the local one.
+            (
+                "17 juillet 2026 à 09:12:30 UTC+2",
+                Utc.with_ymd_and_hms(2026, 7, 17, 7, 12, 30).unwrap(),
+            ),
+            (
+                "Fri, 17 Jul 2026 09:12:30 +0200",
+                Utc.with_ymd_and_hms(2026, 7, 17, 7, 12, 30).unwrap(),
+            ),
+        ];
+
+        for (value, expected) in cases {
+            assert_eq!(parse_header_date(value), Some(expected), "{value}");
+        }
+
+        // A date with no time of day is not a timestamp: matching it against a
+        // message would be a coincidence, not a resolution.
+        assert_eq!(parse_header_date("17 juillet 2026"), None);
+        assert_eq!(parse_header_date("Un sujet sans date"), None);
     }
 
     #[test]

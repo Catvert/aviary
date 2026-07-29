@@ -41,7 +41,9 @@ use gpui_component::{
     tooltip::Tooltip,
     v_flex, ActiveTheme, Disableable, IconName, Selectable, Sizable, StyledExt, WindowExt as _,
 };
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -803,7 +805,7 @@ impl AviaryApp {
             let expanded = self.mailbox.expanded_quoted_sections.contains(&key);
             let toggle_key = key.clone();
             let source_id = message.header.id.clone();
-            let jump_target = self.quoted_message_target(message, &quoted);
+            let jump_target = self.quoted_message_target(message, &quoted, index);
             let label = tr!("viewer-quoted-message", { number: index + 1 });
             let preview = quoted.preview.clone();
             let quoted_date = quoted.received().map(|date| util::short_date(&date));
@@ -1043,17 +1045,22 @@ impl AviaryApp {
         &self,
         source: &Message,
         quoted: &quoted_body::BodyPart,
+        index: usize,
     ) -> Option<MessageRef> {
         let thread = self.thread_without_duplicates(&source.header);
-        let mut matches = thread
+        let matches = thread
             .iter()
             .filter(|header| quoted.matches_header(header))
             .map(|header| MessageRef {
                 account_id: header.account_id.clone(),
                 id: header.id.clone(),
-            });
-        let target = matches.next()?;
-        matches.next().is_none().then_some(target)
+            })
+            .take(2)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            log_unresolved_quote(source, quoted, index, thread.len(), matches.len());
+        }
+        (matches.len() == 1).then(|| matches.into_iter().next().expect("single match"))
     }
 
     /// Does `from` resolve to the address of the account it belongs to —
@@ -1113,6 +1120,47 @@ impl AviaryApp {
         newer.sort_by_key(|h| std::cmp::Reverse(h.received));
         newer
     }
+}
+
+/// Says why a quoted card got no "go to message" button — the quote carries
+/// too little metadata, the conversation is not loaded, nothing matched, or
+/// several messages did. `element()` runs every frame, so each quote is
+/// reported once; values are never logged, only which fields are present.
+fn log_unresolved_quote(
+    source: &Message,
+    quoted: &quoted_body::BodyPart,
+    index: usize,
+    thread_len: usize,
+    candidates: usize,
+) {
+    const REPORTED_CAPACITY: usize = 128;
+    thread_local! {
+        static REPORTED: RefCell<VecDeque<u64>> = const { RefCell::new(VecDeque::new()) };
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.header.id.hash(&mut hasher);
+    index.hash(&mut hasher);
+    let key = hasher.finish();
+    let first_time = REPORTED.with(|reported| {
+        let mut reported = reported.borrow_mut();
+        if reported.contains(&key) {
+            return false;
+        }
+        if reported.len() == REPORTED_CAPACITY {
+            reported.pop_front();
+        }
+        reported.push_back(key);
+        true
+    });
+    if !first_time {
+        return;
+    }
+
+    log::debug!(
+        "quoted message {index} has no jump target: {} thread={thread_len} candidates={candidates}",
+        quoted.metadata_shape()
+    );
 }
 
 /// Strips accumulated reply/forward prefixes ("RE:", "TR :", "Fwd:", …) so
