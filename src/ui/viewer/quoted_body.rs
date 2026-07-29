@@ -605,11 +605,15 @@ fn build_date_time(
     }
 }
 
+/// Rebuilds the HTML of a fragment that was split in Markdown.
+///
+/// This goes through the reader's own converter for its `bytes://cid-` →
+/// `cid:` rewrite: providers hand over their Markdown with inline images in
+/// that internal form, which no Blitz `NetProvider` scheme resolves. Rendering
+/// the fragment straight from `push_html` left every inline image blank —
+/// while the same message shown whole (a reply's quoted block) displayed them.
 fn markdown_to_html(markdown: &str) -> String {
-    let parser = pulldown_cmark::Parser::new_ext(markdown, pulldown_cmark::Options::all());
-    let mut html = String::new();
-    pulldown_cmark::html::push_html(&mut html, parser);
-    html
+    super::markdown_to_preview_html(markdown)
 }
 
 // -------------------------------------------------------------------------
@@ -1162,7 +1166,7 @@ fn markdown_body_preview(markdown: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{AccountId, MessageHeader};
+    use crate::model::{AccountId, InlineImage, MessageHeader};
     use chrono::Utc;
 
     /// A client that names no zone means the reader's own.
@@ -1370,6 +1374,44 @@ mod tests {
                 .to_string(),
             "2026-07-17 16:18:39"
         );
+    }
+
+    /// Un corps que ni les conteneurs de citation ni les marqueurs Outlook ne
+    /// savent découper retombe sur la découpe Markdown, qui resynthétise le
+    /// HTML de chaque fragment. Or le Markdown des providers désigne les
+    /// images inline par la forme interne `bytes://cid-` : laissée telle
+    /// quelle, elle ne correspond à aucun schéma du `NetProvider` de Blitz et
+    /// le fragment s'affiche sans ses images, alors que le même message rendu
+    /// d'un bloc (réponse, transfert) les montre.
+    #[test]
+    fn markdown_fallback_restores_cid_images_in_the_synthesized_html() {
+        let html = r#"<html><head></head><body><div>Voici&nbsp;:</div>
+            <div><img src="cid:image-a@example.test" alt="image.png"></div>
+            <div>--------------- Message d'origine ---------------<br>
+            <b>De:</b> Contact B [contact-b@example.test]<br>
+            <b>Envoyé:</b> 29/07/2026 10:28<br>
+            <b>Objet:</b> Sujet</div>
+            <div>Message précédent.</div></body></html>"#;
+        let body = "Voici :\n\n![image.png](bytes://cid-image-a@example.test)\n\n\
+             --------------- Message d'origine ---------------\n\n\
+             **De:** Contact B [contact-b@example.test]\n\
+             **Envoyé:** 29/07/2026 10:28\n\
+             **Objet:** Sujet\n\nMessage précédent.\n";
+        let mut source = message(body, Some(html));
+        source.inline_images = vec![InlineImage {
+            cid: "image-a@example.test".into(),
+            mime: "image/png".into(),
+            bytes: vec![1, 2, 3],
+        }];
+
+        let split = split_message(&source).expect("conversation detected");
+        let current = split.current.expect("current message");
+        let rendered = current.as_message(&source, "0");
+        let rendered_html = rendered.raw_body.as_deref().expect("current HTML");
+
+        assert!(rendered_html.contains("cid:image-a@example.test"));
+        assert!(!rendered_html.contains("bytes://cid-"));
+        assert_eq!(rendered.inline_images.len(), 1);
     }
 
     #[test]
