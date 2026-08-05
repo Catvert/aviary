@@ -258,7 +258,8 @@ pub(super) async fn resume_session(
         // Stay below Graph's nominal four concurrent Outlook requests. This
         // gate is acquired by every actual HTTP attempt, including fan-outs
         // hidden inside one provider operation.
-        graph_request_gate: Arc::new(Semaphore::new(3)),
+        graph_request_gate: Arc::new(crate::providers::graph::RequestGate::new(3)),
+        throttle_retry: Mutex::new(None),
         // Coarsely bound concurrent provider operations as well as their
         // individual HTTP requests. Gmail and IMAP also benefit from avoiding
         // unbounded UI-triggered fan-outs.

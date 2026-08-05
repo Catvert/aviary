@@ -8,7 +8,62 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub(super) const BASE: &str = "https://graph.microsoft.com/v1.0";
 const MAX_THROTTLE_RETRIES: u32 = 3;
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+/// Longest server-directed pause served by retrying inline. Beyond this the
+/// 429 is returned to the caller — the account-wide cooldown paces every
+/// later request, and the runtime reschedules the read itself. Must match
+/// `runtime::retry::MAX_RETRY_AFTER`, or one layer sleeps out a pause the
+/// other refuses (locked by a test there).
+pub(crate) const MAX_INLINE_RETRY_AFTER: Duration = Duration::from_secs(15);
+
+/// Upper bound on the account-wide cooldown a single `Retry-After` may
+/// impose: a malformed or hostile header must not silence an account for an
+/// afternoon. The runtime applies the same cap to the pause it reports to
+/// the UI and to its rescheduled sync.
+pub(crate) const MAX_COOLDOWN: Duration = Duration::from_secs(300);
+
+/// Per-account request gate: the concurrency permits plus the cooldown a 429
+/// imposes on the whole mailbox. It lives at the transport so every HTTP
+/// attempt — including fan-outs hidden inside one provider operation — both
+/// honors and feeds it; without the shared cooldown, each concurrent task
+/// would only learn about the throttle by burning a request into it.
+pub struct RequestGate {
+    permits: Arc<Semaphore>,
+    cooldown_until: std::sync::Mutex<Option<tokio::time::Instant>>,
+}
+
+impl RequestGate {
+    pub fn new(permits: usize) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(permits)),
+            cooldown_until: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Records a server-directed pause. Extends the current cooldown, never
+    /// shortens it: two 429s in flight must not let the smaller pause win.
+    fn set_cooldown(&self, pause: Duration) {
+        let target = tokio::time::Instant::now() + pause.min(MAX_COOLDOWN);
+        let mut slot = self.cooldown_until.lock().expect("cooldown lock poisoned");
+        if slot.is_none_or(|current| current < target) {
+            *slot = Some(target);
+        }
+    }
+
+    /// Sleeps until the cooldown has elapsed. Re-reads the deadline after
+    /// each sleep — another request may have received a fresh 429 meanwhile.
+    async fn wait_cooldown(&self) {
+        loop {
+            let deadline = *self.cooldown_until.lock().expect("cooldown lock poisoned");
+            match deadline {
+                Some(deadline) if deadline > tokio::time::Instant::now() => {
+                    tokio::time::sleep_until(deadline).await;
+                }
+                _ => return,
+            }
+        }
+    }
+}
 
 /// Authenticated Graph transport shared by every provider operation.
 ///
@@ -20,14 +75,14 @@ const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 pub struct Client<'a> {
     http: &'a reqwest::Client,
     access_token: &'a str,
-    request_gate: Option<&'a Arc<Semaphore>>,
+    request_gate: Option<&'a Arc<RequestGate>>,
 }
 
 impl<'a> Client<'a> {
     pub(crate) fn new(
         http: &'a reqwest::Client,
         access_token: &'a str,
-        request_gate: &'a Arc<Semaphore>,
+        request_gate: &'a Arc<RequestGate>,
     ) -> Self {
         Self {
             http,
@@ -71,12 +126,17 @@ impl<'a> Client<'a> {
 
     async fn acquire(&self) -> Option<OwnedSemaphorePermit> {
         let gate = self.request_gate?;
-        Some(
-            gate.clone()
-                .acquire_owned()
-                .await
-                .expect("Graph request semaphore is never closed"),
-        )
+        let permit = gate
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("Graph request semaphore is never closed");
+        // Waiting *with* the permit is deliberate: during a cooldown no
+        // request may go out anyway, so releasing it would only let more
+        // tasks pile up at the wall.
+        gate.wait_cooldown().await;
+        Some(permit)
     }
 }
 
@@ -116,13 +176,23 @@ impl RequestBuilder<'_> {
                 .expect("request cloneability was checked above");
             let permit = self.client.acquire().await;
             let response = request.send().await?;
-            if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS
-                || retry == MAX_THROTTLE_RETRIES
-            {
+            if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
                 return Ok(response);
             }
 
             let delay = retry_delay(response.headers().get(RETRY_AFTER), retry);
+            if let Some(gate) = self.client.request_gate {
+                // The whole account backs off, not just this request: Graph
+                // throttles per mailbox, so every sibling request would only
+                // deepen the penalty.
+                gate.set_cooldown(delay);
+            }
+            if retry == MAX_THROTTLE_RETRIES || delay > MAX_INLINE_RETRY_AFTER {
+                // Return the 429 as-is: `http_error` preserves its
+                // `Retry-After`, the caller decides (and the cooldown above
+                // already paces whatever runs next).
+                return Ok(response);
+            }
             log::warn!(
                 "Graph request throttled; retry {}/{} in {:.1}s",
                 retry + 1,
@@ -131,7 +201,10 @@ impl RequestBuilder<'_> {
             );
             drop(response);
             drop(permit);
-            tokio::time::sleep(delay).await;
+            if self.client.request_gate.is_none() {
+                // With a gate, the next `acquire` sleeps the cooldown out.
+                tokio::time::sleep(delay).await;
+            }
         }
         unreachable!("the retry loop always returns on its final attempt")
     }
@@ -143,7 +216,6 @@ fn retry_delay(retry_after: Option<&reqwest::header::HeaderValue>, retry: u32) -
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(1_u64 << retry.min(5)))
-        .min(MAX_RETRY_DELAY)
 }
 
 #[derive(Deserialize)]
@@ -238,14 +310,16 @@ mod transport_tests {
     use reqwest::header::HeaderValue;
 
     #[test]
-    fn retry_after_seconds_are_honoured_and_capped() {
+    fn retry_after_seconds_are_honoured() {
         assert_eq!(
             retry_delay(Some(&HeaderValue::from_static("7")), 0),
             Duration::from_secs(7)
         );
+        // No cap here: a long pause is returned as-is so the send loop can
+        // decide to give up instead of sleeping it out inline.
         assert_eq!(
             retry_delay(Some(&HeaderValue::from_static("120")), 0),
-            MAX_RETRY_DELAY
+            Duration::from_secs(120)
         );
     }
 
@@ -256,5 +330,42 @@ mod transport_tests {
             Duration::from_secs(4)
         );
         assert_eq!(retry_delay(None, 0), Duration::from_secs(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_cooldown_extends_but_never_shrinks_and_is_capped() {
+        let gate = RequestGate::new(3);
+        gate.set_cooldown(Duration::from_secs(10));
+        gate.set_cooldown(Duration::from_secs(2));
+        let deadline = gate
+            .cooldown_until
+            .lock()
+            .unwrap()
+            .expect("a cooldown was recorded");
+        assert_eq!(
+            deadline - tokio::time::Instant::now(),
+            Duration::from_secs(10)
+        );
+        gate.set_cooldown(Duration::from_secs(3_600));
+        let deadline = gate.cooldown_until.lock().unwrap().unwrap();
+        assert_eq!(deadline - tokio::time::Instant::now(), MAX_COOLDOWN);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waiting_out_the_cooldown_observes_extensions() {
+        let gate = Arc::new(RequestGate::new(1));
+        gate.set_cooldown(Duration::from_secs(5));
+        let waiter = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                gate.wait_cooldown().await;
+                tokio::time::Instant::now()
+            }
+        });
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        gate.set_cooldown(Duration::from_secs(8));
+        let start = tokio::time::Instant::now() - Duration::from_secs(2);
+        let released = waiter.await.unwrap();
+        assert_eq!(released - start, Duration::from_secs(10));
     }
 }

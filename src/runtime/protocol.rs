@@ -643,6 +643,14 @@ pub enum Evt {
         online: bool,
         error: Option<String>,
     },
+    /// The provider rate-limited a sync (HTTP 429). Deliberately not an
+    /// offline transition: the server answered, the cached view stays
+    /// authoritative, and the runtime retries by itself once the pause has
+    /// elapsed — the UI should stay discreet rather than alarm.
+    SyncThrottled {
+        account_id: AccountId,
+        retry_after: std::time::Duration,
+    },
     /// A durable message mutation was accepted locally and will be retried
     /// after connectivity recovers.
     MutationDeferred {
@@ -1041,6 +1049,7 @@ impl Evt {
             | Self::AttachmentFetched { .. }
             | Self::AttachmentFetchError { .. }
             | Self::SyncStateChanged { .. }
+            | Self::SyncThrottled { .. }
             | Self::MutationDeferred { .. }
             | Self::MutationSucceeded { .. }
             | Self::MutationFailed { .. }
@@ -1139,6 +1148,7 @@ impl Evt {
             | Self::AttachmentFetched { .. }
             | Self::AttachmentFetchError { .. }
             | Self::SyncStateChanged { .. }
+            | Self::SyncThrottled { .. }
             | Self::MutationDeferred { .. }
             | Self::MutationSucceeded { .. }
             | Self::MutationFailed { .. }
@@ -1215,6 +1225,7 @@ impl Evt {
             | Self::AttachmentFetched { .. }
             | Self::AttachmentFetchError { .. }
             | Self::SyncStateChanged { .. }
+            | Self::SyncThrottled { .. }
             | Self::MutationDeferred { .. }
             | Self::MutationSucceeded { .. }
             | Self::MutationFailed { .. }
@@ -1310,6 +1321,7 @@ impl Evt {
             | Self::AttachmentFetched { account_id, .. }
             | Self::AttachmentFetchError { account_id, .. }
             | Self::SyncStateChanged { account_id, .. }
+            | Self::SyncThrottled { account_id, .. }
             | Self::MutationDeferred { account_id, .. }
             | Self::MutationSucceeded { account_id, .. }
             | Self::MutationFailed { account_id, .. }

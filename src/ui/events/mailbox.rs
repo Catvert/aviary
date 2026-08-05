@@ -427,6 +427,7 @@ impl AviaryApp {
     ) {
         if online {
             self.offline_accounts.remove(&account_id);
+            self.throttled_accounts.remove(&account_id);
         } else if self.offline_accounts.insert(account_id) {
             let detail = error
                 .as_deref()
@@ -436,6 +437,35 @@ impl AviaryApp {
                 window,
                 cx,
                 Notification::warning(tr!("offline-local-copy", { detail: detail })),
+            );
+        }
+    }
+
+    /// The provider rate-limited a sync. Deliberately not `on_sync_state_changed`:
+    /// the server answers, the cached view stays trustworthy and the runtime
+    /// retries by itself, so the account is *not* flagged offline and the
+    /// toast is informative, shown once per throttling episode.
+    pub(super) fn on_sync_throttled(
+        &mut self,
+        account_id: AccountId,
+        retry_after: std::time::Duration,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.offline_accounts.remove(&account_id);
+        let now = std::time::Instant::now();
+        let ongoing = self
+            .throttled_accounts
+            .get(&account_id)
+            .is_some_and(|until| *until > now);
+        self.throttled_accounts
+            .insert(account_id, now + retry_after);
+        if !ongoing {
+            let secs = retry_after.as_secs().max(1).to_string();
+            self.toast(
+                window,
+                cx,
+                Notification::info(tr!("sync-throttled", { secs: secs })),
             );
         }
     }

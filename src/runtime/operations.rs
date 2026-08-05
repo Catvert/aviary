@@ -515,11 +515,7 @@ async fn quick_action_failed(
             .await
             .is_ok()
         {
-            account.emit(Evt::SyncStateChanged {
-                account_id: account.id.clone(),
-                online: false,
-                error: Some(format!("{error:#}")),
-            });
+            account.emit(super::sync_failure_evt(account.id.clone(), &error));
             return;
         }
     }
@@ -558,11 +554,7 @@ async fn handle_failure(account: Arc<BgAccount>, operation: StoredOperation, err
         if operation.attempts == 0 {
             emit_deferred(&account.global, &operation);
         }
-        account.emit(Evt::SyncStateChanged {
-            account_id: account.id.clone(),
-            online: false,
-            error: Some(raw_error),
-        });
+        account.emit(super::sync_failure_evt(account.id.clone(), &error));
         return;
     }
 

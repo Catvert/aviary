@@ -22,7 +22,10 @@ const BACKOFF: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
 
 /// Longest server-directed pause honored. Beyond this the user is better
 /// served by the error (and the calendar's own cooldown) than by a silent
-/// half-minute hang holding a mailbox permit.
+/// half-minute hang holding a mailbox permit. The Graph transport gives up
+/// its own inline retries at the same threshold — see
+/// `providers::graph::MAX_INLINE_RETRY_AFTER` and the alignment test below —
+/// so neither layer sleeps out a pause the other refuses.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(15);
 
 /// Runs `attempt` until it succeeds, fails permanently, or exhausts the
@@ -87,6 +90,14 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     const NO_PAUSE: [Duration; 2] = [Duration::ZERO, Duration::ZERO];
+
+    #[test]
+    fn the_inline_retry_threshold_matches_the_graph_transport() {
+        assert_eq!(
+            MAX_RETRY_AFTER,
+            crate::providers::graph::MAX_INLINE_RETRY_AFTER
+        );
+    }
 
     fn gateway_timeout() -> anyhow::Error {
         ProviderError::new(StatusCode::GATEWAY_TIMEOUT, "graph calendar failed (504)").into()

@@ -577,6 +577,10 @@ pub struct AviaryApp {
     /// Accounts whose latest synchronization failed. Cached data remains
     /// available, but mutations are blocked until reconnection.
     pub offline_accounts: HashSet<AccountId>,
+    /// Accounts the provider is rate-limiting, with the instant the pause
+    /// elapses. Distinct from offline — the server answers — and only used to
+    /// toast once per throttling episode instead of once per failed request.
+    pub throttled_accounts: HashMap<AccountId, std::time::Instant>,
     pub mail_cache_used_bytes: u64,
     pub mail_cache_limit_bytes: u64,
     pub languagetool_status: crate::proofreading::LanguageToolStatus,
@@ -1037,6 +1041,7 @@ impl AviaryApp {
             kanban,
             log_filter: log::LevelFilter::Debug,
             offline_accounts: HashSet::new(),
+            throttled_accounts: HashMap::new(),
             mail_cache_used_bytes: 0,
             mail_cache_limit_bytes,
             languagetool_status: crate::proofreading::LanguageToolStatus::default(),

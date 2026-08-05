@@ -126,11 +126,7 @@ async fn fetch_unified_page(
     let auth = match account.ensure_auth().await {
         Ok(auth) => auth,
         Err(error) => {
-            account.emit(Evt::SyncStateChanged {
-                account_id,
-                online: false,
-                error: Some(error.to_string()),
-            });
+            account.emit(super::sync_failure_evt(account_id, &error));
             return Err(error);
         }
     };
@@ -160,11 +156,7 @@ async fn fetch_unified_page(
             page
         }
         Err(error) => {
-            account.emit(Evt::SyncStateChanged {
-                account_id: account_id.clone(),
-                online: false,
-                error: Some(error.to_string()),
-            });
+            account.emit(super::sync_failure_evt(account_id.clone(), &error));
             return Err(error);
         }
     };
@@ -361,11 +353,19 @@ async fn emit_conversation_totals(account: &Arc<BgAccount>, folder_id: Option<St
     }
 }
 
-pub(super) async fn refresh_inbox(
+/// The explicitly boxed return type is load-bearing: a throttled refresh
+/// reschedules itself through `schedule_throttled_refresh`, and a plain
+/// `async fn` calling itself across `tokio::spawn` is a type cycle the
+/// compiler rejects.
+pub(super) fn refresh_inbox(
     account: Arc<BgAccount>,
     folder_id: Option<String>,
     limit: usize,
-) {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(refresh_inbox_inner(account, folder_id, limit))
+}
+
+async fn refresh_inbox_inner(account: Arc<BgAccount>, folder_id: Option<String>, limit: usize) {
     if let Ok(cached) = account
         .global
         .cache
@@ -384,11 +384,7 @@ pub(super) async fn refresh_inbox(
     let auth = match account.ensure_auth().await {
         Ok(auth) => auth,
         Err(e) => {
-            account.emit(Evt::SyncStateChanged {
-                account_id: account.id.clone(),
-                online: false,
-                error: Some(e.to_string()),
-            });
+            account.emit(super::sync_failure_evt(account.id.clone(), &e));
             return;
         }
     };
@@ -459,12 +455,34 @@ pub(super) async fn refresh_inbox(
             sync_cached_folder(account.clone(), &auth, folder_id).await;
             super::operations::drain_account(account).await;
         }
-        Err(e) => account.emit(Evt::SyncStateChanged {
-            account_id: account.id.clone(),
-            online: false,
-            error: Some(e.to_string()),
-        }),
+        Err(e) => {
+            if let Some(pause) = super::throttle_pause(&e) {
+                schedule_throttled_refresh(account.clone(), folder_id, limit, pause).await;
+            }
+            account.emit(super::sync_failure_evt(account.id.clone(), &e));
+        }
     }
+}
+
+/// Re-runs a throttled folder refresh once the server-directed pause has
+/// elapsed, so recovery does not wait for the next auto-refresh tick. One
+/// pending retry per account: a newer throttle replaces (and aborts) the
+/// previous one.
+async fn schedule_throttled_refresh(
+    account: Arc<BgAccount>,
+    folder_id: Option<String>,
+    limit: usize,
+    pause: std::time::Duration,
+) {
+    let mut guard = account.throttle_retry.lock().await;
+    if let Some(handle) = guard.take() {
+        handle.abort();
+    }
+    let acc = account.clone();
+    *guard = Some(tokio::spawn(async move {
+        tokio::time::sleep(pause + std::time::Duration::from_secs(1)).await;
+        refresh_inbox(acc, folder_id, limit).await;
+    }));
 }
 
 async fn sync_cached_folder(
@@ -605,11 +623,7 @@ async fn auto_refresh_check(account: Arc<BgAccount>, limit: usize) -> bool {
     let auth = match account.ensure_auth().await {
         Ok(t) => t,
         Err(e) => {
-            account.emit(Evt::SyncStateChanged {
-                account_id: account.id.clone(),
-                online: false,
-                error: Some(e.to_string()),
-            });
+            account.emit(super::sync_failure_evt(account.id.clone(), &e));
             return false;
         }
     };
@@ -670,11 +684,7 @@ async fn auto_refresh_check(account: Arc<BgAccount>, limit: usize) -> bool {
         }
         Err(e) => {
             log::warn!("auto-refresh failed: {e:#}");
-            account.emit(Evt::SyncStateChanged {
-                account_id: account.id.clone(),
-                online: false,
-                error: Some(e.to_string()),
-            });
+            account.emit(super::sync_failure_evt(account.id.clone(), &e));
             false
         }
     }
@@ -739,11 +749,7 @@ pub(super) async fn open_message(account: Arc<BgAccount>, id: String) {
     let auth = match account.ensure_auth().await {
         Ok(auth) => auth,
         Err(e) => {
-            account.emit(Evt::SyncStateChanged {
-                account_id: account.id.clone(),
-                online: false,
-                error: Some(e.to_string()),
-            });
+            account.emit(super::sync_failure_evt(account.id.clone(), &e));
             if !had_cached {
                 account.emit(Evt::Error(e.to_string()));
             }
@@ -838,11 +844,7 @@ pub(super) async fn open_message(account: Arc<BgAccount>, id: String) {
             }
         }
         Err(e) => {
-            account.emit(Evt::SyncStateChanged {
-                account_id: account.id.clone(),
-                online: false,
-                error: Some(e.to_string()),
-            });
+            account.emit(super::sync_failure_evt(account.id.clone(), &e));
             if !had_cached {
                 account.emit(Evt::Error(e.to_string()));
             }

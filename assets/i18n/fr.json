@@ -914,6 +914,7 @@
   "offline": "Hors connexion",
   "network-unavailable": "réseau indisponible",
   "offline-local-copy": "Mode hors connexion — copie locale (%{detail})",
+  "sync-throttled": "Débit limité par le serveur — nouvelle tentative automatique dans %{secs} s",
   "open-in-browser": "Ouvrir dans le navigateur",
   "load-more-short": "Plus",
   "generic-file": "fichier",

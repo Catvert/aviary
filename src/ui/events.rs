@@ -427,6 +427,10 @@ impl AviaryApp {
                 online,
                 error,
             } => self.on_sync_state_changed(account_id, online, error, window, cx),
+            Evt::SyncThrottled {
+                account_id,
+                retry_after,
+            } => self.on_sync_throttled(account_id, retry_after, window, cx),
             Evt::MutationDeferred {
                 account_id,
                 operation_id,

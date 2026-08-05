@@ -126,6 +126,12 @@ lettre = { version = "0.11", default-features = false, features = ["tokio1-rustl
 # session-scoped kernel keyring.
 keyring = "4"
 
+[dev-dependencies]
+# `start_paused` virtual time for the Graph throttle-cooldown tests. A
+# dev-dependency so the feature never reaches release builds through
+# unification.
+tokio = { version = "1", features = ["test-util"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # `default-features = false` strips ksni's `tokio` default, which would
 # enable `zbus/tokio` globally. With Cargo's feature unification that

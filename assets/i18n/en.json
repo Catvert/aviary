@@ -910,6 +910,7 @@
   "offline": "Offline",
   "network-unavailable": "network unavailable",
   "offline-local-copy": "Offline mode — local copy (%{detail})",
+  "sync-throttled": "The server is rate limiting requests — retrying automatically in %{secs} s",
   "open-in-browser": "Open in browser",
   "load-more-short": "More",
   "generic-file": "file",

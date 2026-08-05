@@ -167,10 +167,15 @@ pub(super) struct BgAccount {
     /// happened to drain the account.
     pub operation_retry: Mutex<Option<JoinHandle<()>>>,
     pub global: Arc<BgGlobal>,
-    /// Caps actual in-flight Microsoft Graph requests for this account.
-    /// Provider operations may issue several requests internally, so this
-    /// transport-level gate is the authoritative MailboxConcurrency guard.
-    pub graph_request_gate: Arc<Semaphore>,
+    /// Caps actual in-flight Microsoft Graph requests for this account, and
+    /// carries the account-wide 429 cooldown. Provider operations may issue
+    /// several requests internally, so this transport-level gate is the
+    /// authoritative MailboxConcurrency guard.
+    pub graph_request_gate: Arc<crate::providers::graph::RequestGate>,
+    /// Pending rescheduled folder refresh after a throttled sync. Replaced
+    /// (and the previous one aborted) on every new throttle so retries never
+    /// pile up.
+    pub throttle_retry: Mutex<Option<JoinHandle<()>>>,
     /// Coarse per-account operation scheduler shared by every provider.
     /// This prevents large UI fan-outs (for example kanban columns) from
     /// starting an unbounded number of mailbox operations. For Graph, the
@@ -912,6 +917,37 @@ fn build_http_client() -> reqwest::Client {
             log::warn!("falling back to an untimed HTTP client: {error:#}");
             reqwest::Client::new()
         })
+}
+
+/// Server-directed pause when a provider call failed on HTTP 429, `None` for
+/// every other failure. Falls back to a nominal pause when the header is
+/// absent, and caps what a header may ask — the transport cooldown applies
+/// the same cap, so both layers resume together.
+pub(super) fn throttle_pause(error: &anyhow::Error) -> Option<std::time::Duration> {
+    const DEFAULT_PAUSE: std::time::Duration = std::time::Duration::from_secs(30);
+    (crate::providers::status_of(error)? == reqwest::StatusCode::TOO_MANY_REQUESTS).then(|| {
+        crate::providers::retry_after_of(error)
+            .unwrap_or(DEFAULT_PAUSE)
+            .min(crate::providers::graph::MAX_COOLDOWN)
+    })
+}
+
+/// Maps a failed sync to the event the UI should see. A 429 is not an
+/// offline transition — the server answered — so it becomes `SyncThrottled`,
+/// carrying the pause after which the runtime tries again, instead of
+/// flagging the account offline until the next successful sync.
+pub(super) fn sync_failure_evt(account_id: AccountId, error: &anyhow::Error) -> Evt {
+    match throttle_pause(error) {
+        Some(retry_after) => Evt::SyncThrottled {
+            account_id,
+            retry_after,
+        },
+        None => Evt::SyncStateChanged {
+            account_id,
+            online: false,
+            error: Some(format!("{error:#}")),
+        },
+    }
 }
 
 /// Fetches one pasted image and reports it back to the editor that asked.
