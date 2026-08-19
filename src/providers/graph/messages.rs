@@ -363,6 +363,41 @@ fn take_attachments(payload: &mut serde_json::Value) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Pauses between retries of the `/send` POST when Exchange rejects it with
+/// a 412. The mailbox assistants (search indexing, language detection, …)
+/// rewrite a fresh draft concurrently with our create/PATCH/attach calls, and
+/// a `/send` landing mid-write loses the change-key race and comes back as
+/// `ErrorIrresolvableConflict`. Aviary never sends `If-Match`, so a 412 here
+/// can only be that internal race — and it proves the message was *not*
+/// submitted, which is what makes replaying it safe where a send is
+/// otherwise never retried (see `send_retry_is_safe`). The change key
+/// settles as soon as the assistants finish, so a few short pauses cover it.
+const SEND_CONFLICT_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(4),
+];
+
+fn is_send_conflict(error: &anyhow::Error) -> bool {
+    crate::providers::status_of(error) == Some(reqwest::StatusCode::PRECONDITION_FAILED)
+}
+
+async fn send_draft_with_conflict_retry(client: &Client<'_>, draft_id: &str) -> Result<()> {
+    let url = format!("{BASE}/me/messages/{draft_id}/send");
+    let mut delays = SEND_CONFLICT_DELAYS.iter();
+    loop {
+        let error = match post_json(client, &url, &serde_json::json!({}), "sendDraft").await {
+            Err(error) if is_send_conflict(&error) => error,
+            outcome => return outcome,
+        };
+        let Some(delay) = delays.next() else {
+            return Err(error);
+        };
+        log::warn!("graph sendDraft lost the change-key race, retrying in {delay:?}: {error:#}");
+        tokio::time::sleep(*delay).await;
+    }
+}
+
 /// Upload attachments then send the prepared draft. On failure the draft is
 /// deleted (best effort) so it does not linger in the Drafts folder.
 async fn finish_draft_send(
@@ -375,8 +410,7 @@ async fn finish_draft_send(
             let url = format!("{BASE}/me/messages/{draft_id}/attachments");
             post_json(client, &url, attachment, "addAttachment").await?;
         }
-        let url = format!("{BASE}/me/messages/{draft_id}/send");
-        post_json(client, &url, &serde_json::json!({}), "sendDraft").await
+        send_draft_with_conflict_retry(client, draft_id).await
     }
     .await;
     if let Err(e) = result {
@@ -1042,9 +1076,35 @@ fn drop_unresolved_cid_images(md: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{search_expression, GraphMessage, MESSAGE_SELECT};
+    use super::{is_send_conflict, search_expression, GraphMessage, MESSAGE_SELECT};
     use crate::model::MessageHeader;
     use crate::search_query::SearchQuery;
+
+    /// A 412 on `/send` is Exchange's own assistants bumping the change key
+    /// mid-flight; it proves the message was not submitted, so it is the one
+    /// send failure that may be replayed. Anything else keeps the "never
+    /// replay a send" rule.
+    #[test]
+    fn only_a_412_counts_as_a_send_conflict() {
+        let conflict = |status: u16, body: &str| -> anyhow::Error {
+            crate::providers::error::ProviderError::new(
+                reqwest::StatusCode::from_u16(status).expect("valid status"),
+                format!("graph sendDraft failed failed ({status} Precondition Failed): {body}"),
+            )
+            .into()
+        };
+        assert!(is_send_conflict(&conflict(
+            412,
+            r#"{"error":{"code":"ErrorIrresolvableConflict"}}"#
+        )));
+        assert!(!is_send_conflict(&conflict(429, "throttled")));
+        assert!(!is_send_conflict(&conflict(500, "server error")));
+        // A body merely quoting "(412)" must not trigger the retry: the
+        // status travels as data, never parsed back out of the message.
+        assert!(!is_send_conflict(&anyhow::anyhow!(
+            "smtp said (412) in its banner"
+        )));
+    }
 
     /// Graph only returns the fields `$select` asks for. Dropping
     /// `conversationId` from the listing would silently ungroup every mailbox
