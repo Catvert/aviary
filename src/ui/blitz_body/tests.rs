@@ -475,7 +475,9 @@ fn renders_a_simple_document() {
     let bytes = tile_bytes(&r, 0);
     assert!(
         bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|p| p[0] != 255 || p[1] != 255 || p[2] != 255),
         "render should not be entirely white"
     );
@@ -845,8 +847,10 @@ fn zero_border_does_not_draw_email_tables() {
     let pixels = tile_bytes(&rendered, 0);
     assert!(
         pixels
-            .chunks_exact(4)
-            .all(|pixel| pixel == [0xff, 0xff, 0xff, 0xff]),
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [0xff, 0xff, 0xff, 0xff]),
         "a collapsed border=0 table must not paint black grid lines"
     );
 }
@@ -864,8 +868,10 @@ fn nonzero_border_remains_visible_on_collapsed_table() {
     let pixels = tile_bytes(&rendered, 0);
     assert!(
         pixels
-            .chunks_exact(4)
-            .any(|pixel| pixel != [0xff, 0xff, 0xff, 0xff]),
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| *pixel != [0xff, 0xff, 0xff, 0xff]),
         "a real collapsed table border must remain visible"
     );
 }
@@ -947,13 +953,17 @@ fn renders_embedded_emoji_with_color_bitmap_glyphs() {
     );
     let pixels = tile_bytes(&rendered, 0);
     let colored_pixels = pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|pixel| {
             pixel[3] != 0 && (pixel[0] != pixel[1] || pixel[1] != pixel[2] || pixel[0] != pixel[2])
         })
         .count();
     let non_white_pixels = pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|pixel| **pixel != [0xff, 0xff, 0xff, 0xff])
         .count();
     assert!(
@@ -1197,6 +1207,31 @@ fn dark_render_converts_an_email_white_canvas() {
 
 /// Pointer-event selection crosses the entire pipeline: down -> drag -> up,
 /// followed by extraction of selected text.
+/// A drag whose endpoints resolve to no text and no image (started in a
+/// margin, ended in padding) selects nothing on screen — Ctrl+C must copy
+/// nothing rather than the whole container under the pointer, which for real
+/// mail is a layout `<td>` full of nested tables that then pastes as an
+/// opaque "HTML fragment".
+#[test]
+fn a_drag_selecting_nothing_visible_copies_nothing() {
+    let html = r#"<html><body><table width="600"><tr><td>
+        <p style="font-size:14px">une phrase dans un tableau</p>
+        <p style="font-size:14px">une autre phrase dessous</p>
+        </td></tr></table></body></html>"#;
+    let (_r, mut doc, render_h) = render_test_doc(html);
+    let mut st = PaintState::new(render_h, LIGHT_THEME.background_color());
+    // Both endpoints land between the paragraphs' text runs.
+    let _ = process_batch(&mut doc, drag_batch(20.0, 20.0), 600, TEST_SCALE, &mut st);
+    assert!(
+        doc.as_ref().get_selected_text().is_none(),
+        "the drag was chosen to select no text"
+    );
+    assert!(
+        selected_content(&doc, &st, &[]).is_none(),
+        "no visible selection must mean no copied fragment"
+    );
+}
+
 #[test]
 fn selects_text_by_dragging() {
     let (_r, mut doc, render_h) =

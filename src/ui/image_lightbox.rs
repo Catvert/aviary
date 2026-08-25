@@ -370,7 +370,7 @@ fn rendered_png(image: &RenderImage) -> Result<Vec<u8>, String> {
         .as_bytes(0)
         .ok_or_else(|| tr!("viewer-image-content-unavailable"))?
         .to_vec();
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2); // gpui stores BGRA; image expects RGBA.
     }
     let image = image::RgbaImage::from_raw(width, height, rgba)

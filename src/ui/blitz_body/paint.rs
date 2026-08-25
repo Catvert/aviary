@@ -530,7 +530,7 @@ pub(super) fn tile_image(
     width_phys: u32,
     rows: u32,
 ) -> Result<Arc<RenderImage>, String> {
-    for pixel in buffer.chunks_exact_mut(4) {
+    for pixel in buffer.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     let tile = image::RgbaImage::from_raw(width_phys, rows, buffer)

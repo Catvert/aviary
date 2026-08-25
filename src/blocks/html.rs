@@ -459,9 +459,13 @@ fn sole_image_block(element: ElementRef<'_>) -> Option<BlockKind> {
 
 fn image_block(element: ElementRef<'_>) -> Option<BlockKind> {
     let src = element.value().attr("src")?.trim();
+    // `bytes://cid-` is the reader/editor preview scheme (the Markdown view
+    // rewrites `cid:` to it), so a fragment copied from that view keeps its
+    // image instead of degrading into a dead inline link.
     let cid = src
         .strip_prefix("cid:")
-        .or_else(|| src.strip_prefix("CID:"))?;
+        .or_else(|| src.strip_prefix("CID:"))
+        .or_else(|| src.strip_prefix("bytes://cid-"))?;
     let cid = normalize_cid(cid);
     if cid.is_empty() {
         return None;
@@ -1061,6 +1065,23 @@ mod tests {
             blocks
                 .iter()
                 .any(|block| matches!(block, BlockKind::OriginalMessage { .. })),
+            "{blocks:?}"
+        );
+    }
+
+    /// Le mode Markdown du lecteur réécrit `cid:` en `bytes://cid-` : un
+    /// fragment copié depuis cette vue doit quand même redonner un bloc image.
+    #[test]
+    fn preview_scheme_image_source_becomes_an_image_block() {
+        let blocks = html_to_blocks(
+            r#"<p><img src="bytes://cid-logo@example" width="240"></p>"#,
+            &HtmlImport::bare(),
+        );
+        assert!(
+            matches!(
+                blocks.as_slice(),
+                [BlockKind::Image { cid, width: Some(240) }] if cid == "logo@example"
+            ),
             "{blocks:?}"
         );
     }

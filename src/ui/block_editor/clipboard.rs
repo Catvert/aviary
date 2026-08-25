@@ -141,7 +141,7 @@ impl BlockEditor {
             return;
         };
         let rich = rich_clipboard::read(&item);
-        let pasted_html = rich.is_some() || looks_like_html(&text);
+        let mut pasted_html = rich.is_some() || looks_like_html(&text);
         let sidecar: Vec<InlineImage> = rich
             .as_ref()
             .map(|content| content.images.clone())
@@ -155,15 +155,41 @@ impl BlockEditor {
                     .unwrap_or_default()
             });
         let mut kinds = if pasted_html {
-            vec![BlockKind::RawHtml {
-                html: rich
-                    .as_ref()
-                    .map(|content| content.html.clone())
-                    .unwrap_or_else(|| text.clone()),
-            }]
+            let html = rich
+                .as_ref()
+                .map(|content| content.html.clone())
+                .unwrap_or_else(|| text.clone());
+            match editable_html_paste_kinds(&html, &text, &sidecar) {
+                Some(kinds) => kinds,
+                // Rien d'éditable dans le fragment : son texte en clair rend
+                // mieux service que le bloc opaque.
+                None => {
+                    pasted_html = false;
+                    blocks::markdown_to_blocks(&text)
+                }
+            }
         } else {
             blocks::markdown_to_blocks(&text)
         };
+        // A single paragraph of pasted HTML — a sentence copied from a read
+        // message — belongs at the cursor, not in a block of its own below
+        // the current one. Images still need the structured path (adoption,
+        // registry).
+        if pasted_html {
+            if let [BlockKind::Paragraph(markdown)] = kinds.as_slice() {
+                if sidecar.is_empty()
+                    && !markdown.contains("cid:")
+                    && !remote_images::markdown_has_adoptable_source(markdown)
+                {
+                    cx.stop_propagation();
+                    self.push_undo(cx);
+                    let markdown = markdown.clone();
+                    input.update(cx, |state, cx| state.insert(&markdown, window, cx));
+                    cx.notify();
+                    return;
+                }
+            }
+        }
         if !pasted_html && kinds.len() < 2 {
             let known_image = kinds.first().is_some_and(|kind| match kind {
                 BlockKind::Paragraph(text) => {
@@ -220,6 +246,57 @@ impl BlockEditor {
     }
 }
 
+/// Blocs à coller pour un presse-papiers HTML, ou `None` quand le fragment
+/// est resté **entièrement opaque** (que des `RawHtml`) alors que le texte en
+/// clair du presse-papiers n'est pas lui-même du HTML : le vrai contenu — ce
+/// que l'utilisateur voyait sélectionné — est alors ce texte, et le coller
+/// éditable rend mieux service qu'un bloc « Fragment HTML » infidèle par
+/// construction (le fragment copié peut être un conteneur de mise en page
+/// bien plus large que la sélection).
+fn editable_html_paste_kinds(
+    html: &str,
+    text: &str,
+    images: &[crate::model::InlineImage],
+) -> Option<Vec<BlockKind>> {
+    let kinds = html_paste_kinds(html, images);
+    let only_opaque = kinds
+        .iter()
+        .all(|kind| matches!(kind, BlockKind::RawHtml { .. }));
+    if only_opaque && !text.trim().is_empty() && !looks_like_html(text) {
+        return None;
+    }
+    Some(kinds)
+}
+
+/// Pasted HTML becomes real editable blocks — the same return path a draft
+/// takes when it comes back from the provider. What the editor can hold
+/// (paragraphs, headings, lists, quotes, tables, `cid:` images) is editable
+/// in place; what it cannot stays an opaque `RawHtml` fragment, and an HTML
+/// body `scraper` cannot make anything of falls back to one such fragment
+/// rather than pasting nothing.
+fn html_paste_kinds(html: &str, images: &[crate::model::InlineImage]) -> Vec<BlockKind> {
+    use std::hash::{Hash, Hasher};
+    // Namespaces the `bytes://` preview cache of faithful sub-blocks; two
+    // pastes of different originals must not collide on identical CIDs.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    html.hash(&mut hasher);
+    let source_id = format!("paste-{:016x}", hasher.finish());
+    let kinds = blocks::html_to_blocks(
+        html,
+        &blocks::HtmlImport {
+            inline_images: images,
+            source_id: &source_id,
+        },
+    );
+    if kinds.is_empty() {
+        vec![BlockKind::RawHtml {
+            html: html.to_string(),
+        }]
+    } else {
+        kinds
+    }
+}
+
 /// A paragraph containing only `![](cid:x)` or `![](bytes://cid-x)` becomes a CID.
 pub(super) fn standalone_image_cid(text: &str) -> Option<String> {
     let text = text.trim();
@@ -249,7 +326,8 @@ fn looks_like_html(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::looks_like_html;
+    use super::{editable_html_paste_kinds, html_paste_kinds, looks_like_html};
+    use crate::blocks::BlockKind;
 
     #[test]
     fn detects_html_fragments_without_treating_addresses_as_tags() {
@@ -259,5 +337,72 @@ mod tests {
         assert!(looks_like_html("<div>Signature</div>"));
         assert!(!looks_like_html("Contact <nom@example.org>"));
         assert!(!looks_like_html("2 < 3 et 4 > 1"));
+    }
+
+    /// Un HTML simple collé — typiquement copié d'un courriel envoyé par
+    /// Aviary lui-même — doit devenir de vrais blocs éditables, pas un
+    /// fragment opaque.
+    #[test]
+    fn simple_pasted_html_becomes_editable_blocks() {
+        let kinds = html_paste_kinds(
+            "<h2>Titre</h2><p>Un <strong>texte</strong> modifiable.</p>\
+             <ul><li>a</li><li>b</li></ul>",
+            &[],
+        );
+        assert!(matches!(
+            kinds.as_slice(),
+            [
+                BlockKind::Heading { level: 2, .. },
+                BlockKind::Paragraph(_),
+                BlockKind::List { .. },
+            ]
+        ));
+        let BlockKind::Paragraph(markdown) = &kinds[1] else {
+            unreachable!();
+        };
+        assert_eq!(markdown, "Un **texte** modifiable.");
+    }
+
+    /// Une image `cid:` du HTML collé devient un bloc image (rendu par le
+    /// registre de l'éditeur), pas un lien mort.
+    #[test]
+    fn pasted_html_cid_image_becomes_an_image_block() {
+        let kinds = html_paste_kinds(r#"<p><img src="cid:logo@example"></p>"#, &[]);
+        assert!(matches!(
+            kinds.as_slice(),
+            [BlockKind::Image { cid, .. }] if cid == "logo@example"
+        ));
+    }
+
+    /// Un HTML dont rien n'est reconstructible retombe sur un fragment opaque
+    /// plutôt que de coller du vide.
+    #[test]
+    fn unparseable_pasted_html_falls_back_to_a_raw_fragment() {
+        let html = "<style>.a{color:red}</style>";
+        let kinds = html_paste_kinds(html, &[]);
+        assert!(matches!(
+            kinds.as_slice(),
+            [BlockKind::RawHtml { html: kept }] if kept == html
+        ));
+    }
+
+    /// Un fragment resté entièrement opaque alors que le presse-papiers porte
+    /// un texte en clair ordinaire — une phrase sélectionnée dont la copie a
+    /// embarqué son conteneur de mise en page — doit se coller comme ce
+    /// texte, pas comme un bloc « Fragment HTML » inéditable.
+    #[test]
+    fn opaque_only_fragment_with_plain_text_degrades_to_the_text() {
+        let layout_soup = r#"<table><tr>
+            <td><table><tr><td><p>une bête phrase</p></td></tr></table></td>
+            <td><img src="https://tracking.example/pixel"></td>
+        </tr></table>"#;
+        assert!(editable_html_paste_kinds(layout_soup, "une bête phrase", &[]).is_none());
+        // Du HTML collé *en tant que texte source* reste en revanche un
+        // fragment fidèle : le texte du presse-papiers est le HTML lui-même.
+        assert!(editable_html_paste_kinds(layout_soup, layout_soup, &[]).is_some());
+        // Et un fragment qui a produit au moins un bloc éditable est gardé.
+        assert!(
+            editable_html_paste_kinds("<p>une bête phrase</p>", "une bête phrase", &[]).is_some()
+        );
     }
 }

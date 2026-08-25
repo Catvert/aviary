@@ -222,7 +222,17 @@ pub(super) fn selected_content(
     state: &PaintState,
     available_images: &[InlineImage],
 ) -> Option<SelectedContent> {
+    let selected_text = doc
+        .get_selected_text()
+        .filter(|text| !text.trim().is_empty());
     let selected_images = selected_image_nodes(doc, state);
+    // A rich drag whose endpoints resolved to no text and no image selects
+    // nothing the user can see. Falling back to the elements under the
+    // pointer would copy their whole container — for real mail, a layout
+    // `<td>` full of nested tables — as a fragment the user never chose.
+    if selected_text.is_none() && selected_images.is_empty() {
+        return None;
+    }
     let html = if selected_images.is_empty() {
         selected_text_html(doc).or_else(|| {
             let (anchor, focus) = selection_endpoints(doc, state)?;
@@ -235,10 +245,7 @@ pub(super) fn selected_content(
     if html.trim().is_empty() {
         return None;
     }
-    let text = doc
-        .get_selected_text()
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or_else(|| html.clone());
+    let text = selected_text.unwrap_or_else(|| html.clone());
     let images = crate::blocks::referenced_inline_images(&html, available_images);
     Some(SelectedContent { text, html, images })
 }

@@ -2161,7 +2161,6 @@ impl BlockEditor {
                     return;
                 }
                 cx.stop_propagation();
-                self.push_undo(cx);
                 self.merge_into_previous(ix, window, cx);
             }
             (EbKind::List(lb), Some(rx)) if rx < lb.rows.len() => {
@@ -2184,8 +2183,11 @@ impl BlockEditor {
         }
     }
 
-    /// Merges paragraph `ix` with the preceding block, or removes the preceding
-    /// non-text block, as in Notion.
+    /// Merges paragraph `ix` with the preceding text block. A preceding
+    /// non-text block (image, separator, table, original message) is
+    /// **selected**, not removed, as in Notion: deleting it takes a second
+    /// Backspace on the selection — an image pasted above a paragraph must
+    /// not vanish because that paragraph was being emptied one key too far.
     fn merge_into_previous(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let text = match &self.blocks[ix].kind {
             EbKind::Text(tb) => tb.input.read(cx).value().to_string(),
@@ -2194,8 +2196,9 @@ impl BlockEditor {
 
         enum Prev {
             MergeInto(Entity<InputState>),
+            /// A rows-less list renders nothing to select; drop it.
             Remove,
-            RemoveImage(String),
+            Select(u64),
         }
         let prev = match &self.blocks[ix - 1].kind {
             EbKind::Text(p) => Prev::MergeInto(p.input.clone()),
@@ -2203,12 +2206,14 @@ impl BlockEditor {
                 Some(last) => Prev::MergeInto(last.input.clone()),
                 None => Prev::Remove,
             },
-            EbKind::Table(_) | EbKind::Divider | EbKind::Original { .. } => Prev::Remove,
-            EbKind::Image { cid, .. } => Prev::RemoveImage(cid.clone()),
+            EbKind::Table(_) | EbKind::Divider | EbKind::Original { .. } | EbKind::Image { .. } => {
+                Prev::Select(self.blocks[ix - 1].id)
+            }
         };
 
         match prev {
             Prev::MergeInto(input) => {
+                self.push_undo(cx);
                 input.update(cx, |s, cx| {
                     let junction = s.text().len();
                     let merged = format!("{}{}", s.value(), text);
@@ -2218,11 +2223,17 @@ impl BlockEditor {
                 self.blocks.remove(ix);
             }
             Prev::Remove => {
+                self.push_undo(cx);
                 self.blocks.remove(ix - 1);
             }
-            Prev::RemoveImage(cid) => {
-                self.blocks.remove(ix - 1);
-                self.prune_image(&cid, cx);
+            Prev::Select(bid) => {
+                // An emptied paragraph gives its place to the selection; a
+                // paragraph still holding text is left untouched.
+                if text.is_empty() {
+                    self.push_undo(cx);
+                    self.blocks.remove(ix);
+                }
+                self.select_blocks(bid, bid, window, cx);
             }
         }
         cx.notify();
