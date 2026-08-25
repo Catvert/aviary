@@ -19,6 +19,7 @@ use chrono::{DateTime, Utc};
 use lettre::message::header::{ContentType, HeaderName, HeaderValue};
 use lettre::message::{Attachment, Message as LettreMessage, MultiPart, SinglePart};
 
+pub mod eml;
 pub mod error;
 pub mod gmail;
 pub mod graph;
@@ -26,6 +27,28 @@ pub mod html;
 pub mod imap;
 
 pub(crate) use error::{http_error, retry_after_of, status_of};
+
+/// Nom de fichier d'un courriel joint. Les providers nomment un message
+/// joint d'après son objet (Graph) ou pas du tout (Gmail), sans extension :
+/// l'ajouter ici donne un nom d'enregistrement exploitable et permet à l'UI
+/// de reconnaître la pièce comme un courriel.
+pub(crate) fn ensure_eml_extension(name: &str) -> String {
+    let trimmed = name.trim();
+    let base = if trimmed.is_empty() {
+        "message"
+    } else {
+        trimmed
+    };
+    if std::path::Path::new(base)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("eml"))
+    {
+        base.to_string()
+    } else {
+        format!("{base}.eml")
+    }
+}
 
 /// One page of incremental folder changes. Cursors remain opaque to the
 /// runtime and are persisted unchanged in SQLite.
@@ -911,6 +934,17 @@ mod mime_tests {
     use crate::model::{
         AccountId, Attachment as FileAttachment, BodyFormat, InlineImage, MessageHeader,
     };
+
+    #[test]
+    fn eml_extension_is_added_once_and_to_empty_names() {
+        assert_eq!(
+            ensure_eml_extension("Rapport interne"),
+            "Rapport interne.eml"
+        );
+        assert_eq!(ensure_eml_extension("transfert.EML"), "transfert.EML");
+        assert_eq!(ensure_eml_extension(""), "message.eml");
+        assert_eq!(ensure_eml_extension("  "), "message.eml");
+    }
 
     #[test]
     fn shared_rfc822_builder_preserves_gmail_bcc_and_mime_layers() {

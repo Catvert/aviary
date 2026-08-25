@@ -114,9 +114,15 @@ pub(super) async fn fetch_attachments(
         // but still honour `isInline: true` as a hint that the sender
         // meant the part to be embedded (common for signature logos).
         if !disposition.embedded {
+            let filename = a.name.unwrap_or_else(|| "attachment".to_string());
+            let filename = if resolved.mime.eq_ignore_ascii_case("message/rfc822") {
+                crate::providers::ensure_eml_extension(&filename)
+            } else {
+                filename
+            };
             files.push(Attachment {
                 id: resolved.id,
-                filename: a.name.unwrap_or_else(|| "attachment".to_string()),
+                filename,
                 mime: resolved.mime,
                 size: a.size.unwrap_or_default(),
                 bytes: None,
@@ -139,6 +145,28 @@ async fn resolve_attachment(
     metadata: GraphAttachment,
     html_cids: &[String],
 ) -> Option<ResolvedAttachment> {
+    // Un courriel joint (« .eml ») est un `itemAttachment` chez Graph — pas
+    // de `contentBytes`, le flux MIME s'obtient par `/$value`. Il compte dans
+    // `hasAttachments`, donc il doit rester visible comme pièce téléchargeable
+    // au lieu d'être écarté avec les types inconnus.
+    if metadata
+        .odata_type
+        .as_deref()
+        .is_some_and(|kind| kind.ends_with("itemAttachment"))
+    {
+        let id = metadata.id.clone()?;
+        let mime = metadata
+            .content_type
+            .clone()
+            .unwrap_or_else(|| "message/rfc822".to_string());
+        return Some(ResolvedAttachment {
+            metadata,
+            id,
+            mime,
+            cid: None,
+            inline_bytes: None,
+        });
+    }
     let mime = metadata
         .content_type
         .clone()
@@ -206,7 +234,34 @@ pub async fn fetch_attachment(
     attachment_id: &str,
 ) -> Result<Vec<u8>> {
     let attachment = fetch_attachment_record(client, message_id, attachment_id).await?;
-    decode_attachment_bytes(&attachment)
+    if attachment.content_bytes.is_some() {
+        return decode_attachment_bytes(&attachment);
+    }
+    // Un `itemAttachment` (courriel joint) n'a pas de `contentBytes` : Graph
+    // livre son flux MIME — un `.eml` complet — par `/$value`.
+    fetch_attachment_value(client, message_id, attachment_id).await
+}
+
+async fn fetch_attachment_value(
+    client: &Client<'_>,
+    message_id: &str,
+    attachment_id: &str,
+) -> Result<Vec<u8>> {
+    let url = format!("{BASE}/me/messages/{message_id}/attachments/{attachment_id}/$value");
+    let resp = client.get(&url).send().await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!(
+            "{}",
+            tr!("attachment-error-provider", {
+                provider: "Microsoft Graph",
+                status: status,
+                detail: body
+            })
+        );
+    }
+    Ok(resp.bytes().await?.to_vec())
 }
 
 async fn fetch_attachment_record(

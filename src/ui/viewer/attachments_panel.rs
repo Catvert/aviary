@@ -92,6 +92,65 @@ impl AviaryApp {
         .detach();
     }
 
+    /// Ouvre une pièce jointe dont les octets sont disponibles : un courriel
+    /// joint (`.eml`) s'ouvre dans un onglet du lecteur, tout le reste part au
+    /// gestionnaire système.
+    pub(crate) fn open_fetched_attachment(
+        &mut self,
+        account_id: AccountId,
+        parent_message_id: &str,
+        attachment: crate::model::Attachment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if attachments::is_email_attachment(&attachment) && attachment.bytes.is_some() {
+            self.open_eml_attachment(account_id, parent_message_id, attachment, window, cx);
+        } else {
+            attachments::open(attachment);
+        }
+    }
+
+    /// Parse un `.eml` joint sur l'executor d'arrière-plan puis l'ouvre comme
+    /// onglet du lecteur. L'identifiant synthétique (préfixé, dérivé du
+    /// message porteur et de la pièce) rend l'onglet dédupliquable et le tient
+    /// à l'écart du runtime et de la session persistée.
+    fn open_eml_attachment(
+        &mut self,
+        account_id: AccountId,
+        parent_message_id: &str,
+        attachment: crate::model::Attachment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bytes) = attachment.bytes else {
+            return;
+        };
+        let attachment_key = if attachment.id.is_empty() {
+            attachment.filename
+        } else {
+            attachment.id
+        };
+        let synthetic_id = format!(
+            "{}{parent_message_id}:{attachment_key}",
+            crate::providers::eml::SYNTHETIC_EML_ID_PREFIX
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let parsed = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::providers::eml::parse_attached_eml(&bytes, account_id, synthetic_id)
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match parsed {
+                Some(message) => this.open_message_tab(message, cx),
+                None => {
+                    this.notify_error(tr!("viewer-attachment-eml-parse-error"), window, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     fn request_attachment(
         &mut self,
         account_id: AccountId,
@@ -214,7 +273,13 @@ impl AviaryApp {
             if let Some(attachment) =
                 self.attachment_for_message(&account_id, &message_id, &attachment_id)
             {
-                attachments::open(attachment);
+                self.open_fetched_attachment(
+                    account_id.clone(),
+                    &message_id,
+                    attachment,
+                    window,
+                    cx,
+                );
             }
         }
 
@@ -441,10 +506,18 @@ impl AviaryApp {
                 .border_color(theme.border)
                 .bg(theme.background)
                 .when(available, |card| {
+                    let open_account = account_id.clone();
+                    let open_message = message_id.clone();
                     card.cursor_pointer()
                         .hover(|card| card.bg(theme.list_hover))
-                        .on_click(cx.listener(move |_this, _, _window, _cx| {
-                            attachments::open(open_attachment.as_ref().clone());
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_fetched_attachment(
+                                open_account.clone(),
+                                &open_message,
+                                open_attachment.as_ref().clone(),
+                                window,
+                                cx,
+                            );
                         }))
                 })
                 .when(!available && !loading, |card| {
@@ -502,9 +575,17 @@ impl AviaryApp {
                         PopupMenuItem::new(tr!("viewer-attachment-open"))
                             .icon(crate::ui::icons::app_icon("external-link"))
                             .disabled(loading)
-                            .on_click(move |_, _, cx| {
+                            .on_click(move |_, window, cx| {
                                 if available {
-                                    attachments::open(attachment_to_open.as_ref().clone());
+                                    open_entity.update(cx, |this, cx| {
+                                        this.open_fetched_attachment(
+                                            open_account.clone(),
+                                            &open_message,
+                                            attachment_to_open.as_ref().clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    });
                                 } else {
                                     open_entity.update(cx, |this, cx| {
                                         this.request_attachment(

@@ -133,6 +133,17 @@ pub(super) fn suggested_filename(attachment: &Attachment) -> String {
     sanitize_filename(&attachment.filename)
 }
 
+/// Un courriel joint (`.eml`) : le lecteur l'ouvre dans un onglet plutôt que
+/// de le confier au système, qui n'a généralement pas de gestionnaire pour ce
+/// type.
+pub(super) fn is_email_attachment(attachment: &Attachment) -> bool {
+    attachment.mime.eq_ignore_ascii_case("message/rfc822")
+        || Path::new(&attachment.filename)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("eml"))
+}
+
 /// User-friendly initial directory for save dialogs.
 pub(super) fn download_directory() -> PathBuf {
     directories::UserDirs::new()

@@ -270,6 +270,7 @@
   "viewer-attachments-picker-error": "Impossible d’ouvrir le sélecteur de destination : %{error}",
   "viewer-attachment-content-unavailable": "Le contenu de « %{filename} » n’est pas disponible.",
   "viewer-attachment-fetching": "Téléchargement de la pièce jointe…",
+  "viewer-attachment-eml-parse-error": "Impossible de lire le courriel joint.",
   "viewer-attachment-fetch-error": "Impossible de télécharger la pièce jointe : %{error}",
   "viewer-attachments-zip-entry-error": "Impossible d’ajouter « %{filename} » à l’archive",
   "viewer-attachments-zip-finish-error": "Impossible de finaliser l’archive ZIP",

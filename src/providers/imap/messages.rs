@@ -393,8 +393,10 @@ fn decode_mailbox_name(name: &str) -> String {
             let replacement = engine.decode(shifted).ok().and_then(|bytes| {
                 (bytes.len() % 2 == 0).then(|| {
                     bytes
-                        .chunks_exact(2)
-                        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|pair| u16::from_be_bytes(*pair))
                         .collect::<Vec<_>>()
                 })
             });
@@ -1223,7 +1225,7 @@ pub async fn note_last_action(auth: &ImapAuth<'_>, id: &str, action: LastAction)
     .await
 }
 
-fn render_address(addr: Option<&Address<'_>>) -> String {
+pub(crate) fn render_address(addr: Option<&Address<'_>>) -> String {
     let Some(addr) = addr else {
         return String::new();
     };
@@ -1243,7 +1245,7 @@ fn render_address(addr: Option<&Address<'_>>) -> String {
 /// Render every address in an RFC 5322 list header (To, Cc) as its own
 /// `"Name <addr>"` string. Drafts re-open with these in the compose so
 /// recipient lists round-trip cleanly.
-fn render_address_list(addr: Option<&Address<'_>>) -> Vec<String> {
+pub(crate) fn render_address_list(addr: Option<&Address<'_>>) -> Vec<String> {
     let Some(addr) = addr else {
         return Vec::new();
     };
@@ -1269,7 +1271,10 @@ fn render_address_list(addr: Option<&Address<'_>>) -> Vec<String> {
 /// ids retain the library's stable ordering. The iterator deliberately
 /// includes binary `inline` parts; those referenced by the HTML body are
 /// filtered out below because they live in `Message::inline_images`.
-fn collect_attachments(msg: &mail_parser::Message<'_>, html_cids: &[String]) -> Vec<Attachment> {
+pub(crate) fn collect_attachments(
+    msg: &mail_parser::Message<'_>,
+    html_cids: &[String],
+) -> Vec<Attachment> {
     let mut out = Vec::new();
     for (idx, part) in msg.attachments().enumerate() {
         // mail-parser deliberately includes binary `inline` MIME parts in its
@@ -1290,6 +1295,12 @@ fn collect_attachments(msg: &mail_parser::Message<'_>, html_cids: &[String]) -> 
             mail_parser::PartType::Text(text) | mail_parser::PartType::Html(text) => {
                 text.len() as u64
             }
+            // Un courriel joint (`message/rfc822`) est une pièce jointe à part
+            // entière — Outlook et Thunderbird l'affichent, l'ignorer ferait
+            // mentir l'icône de la liste.
+            mail_parser::PartType::Message(nested) => {
+                nested_rfc822_bytes(msg, part, nested).len() as u64
+            }
             _ => continue,
         };
         let mime = part
@@ -1304,10 +1315,23 @@ fn collect_attachments(msg: &mail_parser::Message<'_>, html_cids: &[String]) -> 
                 }
             })
             .unwrap_or_else(|| "application/octet-stream".to_string());
-        let filename = part
-            .attachment_name()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("piece-jointe-{idx}"));
+        let filename = part.attachment_name().map(|s| s.to_string());
+        let (mime, filename) = if let mail_parser::PartType::Message(nested) = &part.body {
+            // Souvent sans `Content-Disposition; filename=`: l'objet du
+            // message joint est alors le nom le plus parlant.
+            let name = filename
+                .or_else(|| nested.subject().map(str::to_string))
+                .unwrap_or_else(|| format!("piece-jointe-{idx}"));
+            (
+                "message/rfc822".to_string(),
+                crate::providers::ensure_eml_extension(&name),
+            )
+        } else {
+            (
+                mime,
+                filename.unwrap_or_else(|| format!("piece-jointe-{idx}")),
+            )
+        };
         out.push(Attachment {
             id: format!("part:{idx}"),
             filename,
@@ -1317,6 +1341,26 @@ fn collect_attachments(msg: &mail_parser::Message<'_>, html_cids: &[String]) -> 
         });
     }
     out
+}
+
+/// Octets RFC 822 d'un message joint. Pour une partie encodée (base64,
+/// quoted-printable) mail-parser isole la charge décodée dans le
+/// `raw_message` du message imbriqué ; pour un message imbriqué en clair il
+/// y range en revanche tout le message *parent*, et c'est alors la tranche
+/// `offset_body..offset_end` de la partie qui délimite le vrai `.eml`.
+pub(crate) fn nested_rfc822_bytes<'a>(
+    outer: &'a mail_parser::Message<'_>,
+    part: &'a mail_parser::MessagePart<'_>,
+    nested: &'a mail_parser::Message<'_>,
+) -> &'a [u8] {
+    let nested_raw = nested.raw_message.as_ref();
+    if nested_raw != outer.raw_message.as_ref() {
+        return nested_raw;
+    }
+    outer
+        .raw_message
+        .get(part.offset_body as usize..part.offset_end as usize)
+        .unwrap_or(nested_raw)
 }
 
 pub async fn fetch_attachment(
@@ -1362,13 +1406,16 @@ pub async fn fetch_attachment(
             mail_parser::PartType::Text(text) | mail_parser::PartType::Html(text) => {
                 Ok(text.as_bytes().to_vec())
             }
+            mail_parser::PartType::Message(nested) => {
+                Ok(nested_rfc822_bytes(&parsed, part, nested).to_vec())
+            }
             _ => Err(anyhow!(tr!("attachment-error-not-found"))),
         }
     })
     .await
 }
 
-fn render_body(
+pub(crate) fn render_body(
     msg: &mail_parser::Message<'_>,
 ) -> (String, BodyFormat, Vec<InlineImage>, Option<String>) {
     // Collect inline images first so we can rewrite cid: refs in the HTML body.
@@ -1688,6 +1735,54 @@ JVBERi0=
         // The id retains its position in mail-parser's unfiltered attachment
         // iterator, so lazy fetching still selects the regular file.
         assert_eq!(attachments[0].id, "part:1");
+    }
+
+    #[test]
+    fn attached_rfc822_message_is_listed_as_an_eml_attachment() {
+        let raw = "From: Contact A <contact-a@example.test>\r\n\
+To: Contact B <contact-b@example.test>\r\n\
+Subject: Message transmis\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"outer\"\r\n\
+\r\n\
+--outer\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+Voir le message joint.\r\n\
+--outer\r\n\
+Content-Type: message/rfc822\r\n\
+Content-Disposition: attachment\r\n\
+\r\n\
+From: Contact C <contact-c@example.test>\r\n\
+Subject: Rapport interne\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+Contenu du rapport.\r\n\
+--outer--\r\n";
+        let parsed = MessageParser::default()
+            .parse(raw.as_bytes())
+            .expect("synthetic MIME message");
+        let attachments = collect_attachments(&parsed, &[]);
+
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].mime, "message/rfc822");
+        // Sans filename, l'objet du message joint nomme la pièce, avec
+        // l'extension qui la rend reconnaissable et enregistrable.
+        assert_eq!(attachments[0].filename, "Rapport interne.eml");
+        assert!(attachments[0].size > 0);
+
+        // Les octets extraits sont bien le .eml imbriqué, pas le message
+        // porteur entier (mail-parser range parfois tout le parent dans le
+        // raw_message imbriqué).
+        let part = parsed.attachments().next().expect("attached message part");
+        let mail_parser::PartType::Message(nested) = &part.body else {
+            panic!("expected a nested message part");
+        };
+        let bytes = super::nested_rfc822_bytes(&parsed, part, nested);
+        let reparsed = MessageParser::default()
+            .parse(bytes)
+            .expect("nested rfc822 bytes must parse on their own");
+        assert_eq!(reparsed.subject(), Some("Rapport interne"));
     }
 }
 

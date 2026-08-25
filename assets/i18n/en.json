@@ -270,6 +270,7 @@
   "viewer-attachments-picker-error": "Unable to open the destination picker: %{error}",
   "viewer-attachment-content-unavailable": "The content of “%{filename}” is unavailable.",
   "viewer-attachment-fetching": "Downloading attachment…",
+  "viewer-attachment-eml-parse-error": "Could not read the attached email.",
   "viewer-attachment-fetch-error": "Unable to download the attachment: %{error}",
   "viewer-attachments-zip-entry-error": "Unable to add “%{filename}” to the archive",
   "viewer-attachments-zip-finish-error": "Unable to finish the ZIP archive",

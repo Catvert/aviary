@@ -26,6 +26,10 @@ mod tags;
 
 pub use connect::close_session;
 
+pub(crate) use messages::{
+    collect_attachments, nested_rfc822_bytes, render_address, render_address_list, render_body,
+};
+
 pub use messages::{
     create_folder, delete_folder, delete_message, fetch_attachment, fetch_messages_page, get_me,
     get_message, list_folder_messages, list_folder_messages_page, list_folders, list_from_sender,

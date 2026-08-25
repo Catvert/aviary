@@ -1130,6 +1130,21 @@ fn walk_payload(
                 attachment_id: body.attachment_id.clone(),
             });
         }
+    } else if mime == "message/rfc822" {
+        // Un courriel joint. Gmail développe aussi ses parties internes dans
+        // le payload : ne PAS y descendre, sinon le corps et les pièces
+        // jointes du message joint se mêlent à ceux du message porteur.
+        if let Some(att_id) = p.body.as_ref().and_then(|body| body.attachment_id.clone()) {
+            files_out.push(FileRef {
+                filename: crate::providers::ensure_eml_extension(&p.filename),
+                mime,
+                size: p.body.as_ref().map(|body| body.size).unwrap_or_default(),
+                attachment_id: att_id,
+            });
+            return;
+        }
+        // Sans attachmentId, laisser la descente générique récupérer ce qui
+        // peut l'être plutôt que de perdre la partie.
     } else if mime.starts_with("image/") && (cid.is_some() || is_inline_disp) {
         if let Some(body) = &p.body {
             if let Some(att_id) = &body.attachment_id {
@@ -1615,10 +1630,61 @@ fn drop_unresolved_cid_images(md: &str) -> String {
 mod tests {
     use super::{
         invitation_uid, is_retryable_gmail_error, labels_belong_to_folder, move_label_payload,
-        parse_batch_metadata_response, trash_request, unfold_header_value, with_folder_labels,
+        parse_batch_metadata_response, trash_request, unfold_header_value, walk_payload,
+        with_folder_labels, GmailBody, GmailPayload,
     };
     use crate::providers::{ARCHIVE_FOLDER_ALIAS, INBOX_FOLDER_ALIAS, JUNK_FOLDER_ALIAS};
     use crate::search_query::SearchQuery;
+
+    /// Un courriel joint (`message/rfc822`) doit devenir une pièce jointe,
+    /// et le walker ne doit pas descendre dans ses parties : Gmail développe
+    /// aussi le message joint dans le payload, si bien qu'une récursion
+    /// mêlerait son corps et ses fichiers à ceux du message porteur.
+    #[test]
+    fn attached_rfc822_becomes_a_file_and_is_not_recursed_into() {
+        let nested_pdf = GmailPayload {
+            mime_type: "application/pdf".to_string(),
+            headers: Vec::new(),
+            parts: Vec::new(),
+            body: Some(GmailBody {
+                data: None,
+                attachment_id: Some("nested-pdf".to_string()),
+                size: 10,
+            }),
+            filename: "rapport.pdf".to_string(),
+        };
+        let attached_message = GmailPayload {
+            mime_type: "message/rfc822".to_string(),
+            headers: Vec::new(),
+            parts: vec![nested_pdf],
+            body: Some(GmailBody {
+                data: None,
+                attachment_id: Some("attached-eml".to_string()),
+                size: 2048,
+            }),
+            filename: String::new(),
+        };
+        let mut html = None;
+        let mut text = None;
+        let mut inline = Vec::new();
+        let mut files = Vec::new();
+        let mut calendar = Vec::new();
+        walk_payload(
+            &attached_message,
+            &mut html,
+            &mut text,
+            &mut inline,
+            &mut files,
+            &mut calendar,
+        );
+
+        assert_eq!(files.len(), 1, "le PDF interne ne doit pas remonter");
+        assert_eq!(files[0].attachment_id, "attached-eml");
+        assert_eq!(files[0].mime, "message/rfc822");
+        // Sans filename côté Gmail, un nom enregistrable est synthétisé.
+        assert_eq!(files[0].filename, "message.eml");
+        assert!(html.is_none() && text.is_none());
+    }
 
     /// Archiving is the one move with no target label: Gmail has no Archive
     /// folder, so the operation is exactly "drop INBOX". The UI relies on this

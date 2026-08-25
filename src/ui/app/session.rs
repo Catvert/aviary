@@ -53,9 +53,16 @@ impl AviaryApp {
         let mut inline_compose_ids = HashSet::new();
         for (index, tab) in self.mailbox.open_tabs.iter().enumerate() {
             let persisted = match tab {
-                crate::ui::state::ViewerTab::Message(message) => Some(SessionViewerTab::Message(
-                    MessageRef::from(message.as_ref()),
-                )),
+                crate::ui::state::ViewerTab::Message(message) => {
+                    // Un `.eml` joint ouvert en onglet n'existe chez aucun
+                    // provider : le persister ferait échouer sa réhydratation
+                    // au prochain démarrage.
+                    (!message
+                        .header
+                        .id
+                        .starts_with(crate::providers::eml::SYNTHETIC_EML_ID_PREFIX))
+                    .then(|| SessionViewerTab::Message(MessageRef::from(message.as_ref())))
+                }
                 crate::ui::state::ViewerTab::Loading(reference) => {
                     Some(SessionViewerTab::Message(reference.clone()))
                 }
