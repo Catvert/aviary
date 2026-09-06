@@ -9,16 +9,16 @@ use crate::{
     model::InlineImage,
     ui::{blitz_body, components::block_input::BlockInput as Input, icons},
 };
-use gpui::{
-    canvas, div, img, prelude::*, px, AnyElement, App, Context, ElementId, FontWeight, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, Render, ScrollHandle, SharedUri, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     menu::{DropdownMenu, PopupMenuItem},
-    scroll::{ScrollableElement, Scrollbar, ScrollbarShow},
+    scroll::{ScrollableElement, Scrollbar, ScrollbarMode},
     v_flex, ActiveTheme, Sizable, StyledExt, Theme,
+};
+use gpui_kit::{
+    canvas, div, img, prelude::*, px, AnyElement, App, Context, ElementId, FontWeight, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Pixels, Render, ScrollHandle, SharedUri, Window,
 };
 
 /// Type sizes for one frame: the window's rem size times the editor's zoom.
@@ -375,8 +375,8 @@ impl BlockEditor {
                                 if delta.x == px(0.) && delta.y != px(0.) {
                                     let offset = image_scroll.offset();
                                     let x = (offset.x + delta.y)
-                                        .clamp(-image_scroll.max_offset().width, px(0.));
-                                    image_scroll.set_offset(gpui::point(x, offset.y));
+                                        .clamp(-image_scroll.max_offset().x, px(0.));
+                                    image_scroll.set_offset(gpui_kit::point(x, offset.y));
                                     cx.notify(window.current_view());
                                 }
                                 cx.stop_propagation();
@@ -389,7 +389,7 @@ impl BlockEditor {
                             div().relative().w_full().h(px(16.)).child(
                                 Scrollbar::horizontal(scroll)
                                     .id(ElementId::Name(format!("blk-img-scroll-{bid}").into()))
-                                    .scrollbar_show(ScrollbarShow::Always),
+                                    .mode(ScrollbarMode::Always),
                             ),
                         )
                     })
@@ -713,7 +713,7 @@ impl BlockEditor {
                         let selection = Some((anchor, bid));
                         if this.sel != selection {
                             this.sel = selection;
-                            this.focus_handle.focus(window);
+                            this.focus_handle.focus(window, cx);
                             cx.notify();
                         }
                     }
@@ -782,7 +782,7 @@ impl Render for BlockEditor {
             .on_action(cx.listener(Self::on_add_spelling_to_dictionary))
             .on_action(cx.listener(Self::on_ignore_proofreading_rule))
             .on_scroll_wheel(
-                cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
+                cx.listener(|this, event: &gpui_kit::ScrollWheelEvent, window, cx| {
                     if !event.modifiers.control && !event.modifiers.platform {
                         return;
                     }

@@ -4,7 +4,7 @@ use super::super::app::AviaryApp;
 use super::super::state::SenderHistoryState;
 use super::super::util;
 use crate::model::{AccountId, Contact, MessageHeader};
-use gpui::Context;
+use gpui_kit::Context;
 
 impl AviaryApp {
     pub(super) fn on_sender_history(

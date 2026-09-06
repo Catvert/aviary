@@ -6,7 +6,7 @@ use crate::{
     model::InlineImage,
     ui::rich_clipboard,
 };
-use gpui::{App, ClipboardEntry, ClipboardItem, Context, Window};
+use gpui_kit::{App, ClipboardEntry, ClipboardItem, Context, Window};
 
 /// The system clipboard carries only Markdown on Linux. This sidecar restores
 /// inline images when pasted text matches the latest

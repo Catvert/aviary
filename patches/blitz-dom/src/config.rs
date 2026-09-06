@@ -53,8 +53,13 @@ pub struct DocumentConfig {
     /// Strategy for Stylo's style traversal.
     /// Defaults to [`StyleThreading::Parallel`].
     pub style_threading: StyleThreading,
+    /// Whether incremental layout is enabled. Defaults to `true`.
+    pub incremental: Option<bool>,
     /// If set, every sub-resource `Request` blitz-dom creates for this
     /// document will carry this signal. Aborting it cancels every in-flight
     /// fetch tied to this document.
     pub abort_signal: Option<AbortSignal>,
+    /// How deeply this document is nested within other documents
+    /// (0 for a root document). Used to limit `<iframe>` nesting depth.
+    pub subdocument_depth: usize,
 }

@@ -4,8 +4,8 @@
 //! are available.
 
 use super::settings::{CustomThemePalette, GlobalSettings, ThemeMode};
-use gpui::{px, App, Hsla, Rgba, Window};
-use gpui_component::{Colorize, Theme, ThemeColor};
+use gpui_kit::component::{Colorize, Theme, ThemeColor};
+use gpui_kit::{px, App, Hsla, Rgba, Window};
 
 fn c(hex: u32) -> Hsla {
     Rgba {
@@ -90,7 +90,6 @@ fn apply_custom_palette(t: &mut ThemeColor, p: CustomThemePalette, dark: bool) {
     t.group_box = c(p.surface);
     t.group_box_foreground = c(p.foreground);
     t.accordion = c(p.surface);
-    t.accordion_hover = hover_surface;
 
     t.list = c(p.surface);
     t.list_active = active_surface;
@@ -109,7 +108,7 @@ fn apply_custom_palette(t: &mut ThemeColor, p: CustomThemePalette, dark: bool) {
 
     t.tab_bar = c(p.surface);
     t.tab_bar_segmented = c(p.surface_variant);
-    t.tab = gpui::transparent_black();
+    t.tab = gpui_kit::transparent_black();
     t.tab_active = c(p.background);
     t.tab_foreground = c(p.muted_foreground);
     t.tab_active_foreground = c(p.foreground);
@@ -127,7 +126,7 @@ fn apply_custom_palette(t: &mut ThemeColor, p: CustomThemePalette, dark: bool) {
     t.table_even = c(p.background);
     t.table_row_border = c(p.border);
 
-    t.scrollbar = gpui::transparent_black();
+    t.scrollbar = gpui_kit::transparent_black();
     t.scrollbar_thumb = c(p.surface_variant);
     t.scrollbar_thumb_hover = hover_surface;
     t.skeleton = c(p.surface_variant);
@@ -161,7 +160,7 @@ fn apply_custom_palette(t: &mut ThemeColor, p: CustomThemePalette, dark: bool) {
 /// rendering (secondary windows do not have access to settings).
 struct UiScale(f32);
 
-impl gpui::Global for UiScale {}
+impl gpui_kit::Global for UiScale {}
 
 /// Base rem size in gpui; all `text_*` sizes in
 /// derive from it, making `set_rem_size` the global interface zoom.
@@ -184,8 +183,8 @@ pub fn apply_window_scale(window: &mut Window, cx: &App) {
 pub fn apply(global: &GlobalSettings, window: Option<&mut Window>, cx: &mut App) {
     cx.set_global(UiScale(global.ui_scale));
     let mode = match global.theme_mode {
-        ThemeMode::Dark => gpui_component::ThemeMode::Dark,
-        ThemeMode::Light => gpui_component::ThemeMode::Light,
+        ThemeMode::Dark => gpui_kit::component::ThemeMode::Dark,
+        ThemeMode::Light => gpui_kit::component::ThemeMode::Light,
     };
     Theme::change(mode, window, cx);
 

@@ -5,14 +5,14 @@ use super::app::AviaryApp;
 use super::state::AuthState;
 use crate::auth::{ImapConfig, NetSecurity};
 use crate::runtime::Cmd;
-use gpui::{div, prelude::*, px, ClipboardItem, Context, Entity, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputState},
     spinner::Spinner,
     v_flex, ActiveTheme, IconName, Sizable, StyledExt,
 };
+use gpui_kit::{div, prelude::*, px, ClipboardItem, Context, Entity, Window};
 
 /// Input entities for the IMAP form (the equivalent of `ImapFormState`).
 pub struct ImapFormUi {
@@ -55,7 +55,7 @@ impl ImapFormUi {
     }
 }
 
-fn security_label(s: NetSecurity) -> gpui::SharedString {
+fn security_label(s: NetSecurity) -> gpui_kit::SharedString {
     match s {
         NetSecurity::Plain => tr!("security-plain"),
         NetSecurity::StartTls => tr!("security-starttls"),

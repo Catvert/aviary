@@ -13,13 +13,41 @@ license files are retained where the published package provides them.
 
 | Crate | Base | Upstream commit | Modified files | Purpose |
 | --- | --- | --- | --- | --- |
-| `blitz-dom` | `0.3.0-beta.1` | `11279518661e1e0af3ee141c232daffa8968d3fe` | `src/layout/construct.rs`, `src/layout/table.rs` | Preserve non-breaking spaces and correct email table track/row sizing. |
-| `blitz-paint` | `0.3.0-beta.1` | `11279518661e1e0af3ee141c232daffa8968d3fe` | `src/render/border.rs`, `src/text.rs` | Do not paint `border-style: none` collapsed borders and correct faux-italic skew. |
-| `cosmic-text` | `0.14.2` | `9e7a56f083db15f67510df4396351464df2e64bd` | `src/font/fallback/unix.rs` | Prefer the embedded color emoji font before monochrome text fallbacks on Unix. |
-| `stylo_derive` | `0.19.0` | `e0bcd28a1f1a0b35903b4a9b7652c6b993a26ccc` | `to_css.rs` | Avoid ambiguous `?` conversions when GPUI enables `log`'s Serde key-value support. |
+| `blitz-dom` | `0.3.0-beta.2` | `67edf2061121382b3e43af19977fc3472aa7e069` | `src/layout/construct.rs`, `src/layout/table.rs` | Preserve non-breaking spaces and correct email table tracks; backport used collapsed-border widths. |
+| `blitz-paint` | `0.3.0-beta.2` | `67edf2061121382b3e43af19977fc3472aa7e069` | `src/render/border.rs`, `src/text.rs` | Do not paint `border-style: none` collapsed borders and correct faux-italic skew. |
+| `cosmic-text` | `0.19.0` | `c24886c2471e5606587c46090cd25dbbf209186b` | `src/font/fallback/unix.rs` | Prefer the embedded color emoji font before monochrome text fallbacks on Unix. |
+| `stylo_derive` | `0.20.0` | `67faaab3ff7aa66780ec1d0f51ca47e177b812d3` | `to_css.rs` | Avoid ambiguous `?` conversions when GPUI enables `log`'s Serde key-value support. |
 
 All other source files should remain identical to the corresponding published
 crate.
+
+## Blitz beta.2 audit (2026-09-06)
+
+The published beta.2 sources were tested without local Blitz patches before
+reapplying fixes. The retained differences are:
+
+- `construct.rs`: preserve NBSP runs. Parley 0.11.1 still trims Unicode
+  whitespace at span boundaries; the indentation regression test fails without
+  this fix.
+- `table.rs`: retain the maximum column count across rows and collapse redundant
+  single-cell `colspan` tracks. The wrapped-row regression test still fails
+  without the column fix.
+- **Removed** the forced `PerformLayout` pass during vertical intrinsic sizing.
+  Both nested Outlook rows and wrapped text rows now size correctly with
+  beta.2/Taffy 0.14 once the column fix is applied.
+- Collapsed borders: replace the old paint-only workaround with the upstream
+  [#791 fix](https://github.com/DioxusLabs/blitz/commit/2bc63f4b3f), including
+  zero used widths in table spacing. This is already on `main` but was merged
+  after beta.2, so the backport remains necessary until the next release.
+- `text.rs`: retain the negative faux-italic skew. The published painter still
+  supplies a positive skew, while Glifo 0.2 applies the glyph transform before
+  its font-space Y flip. The local unit test checks the resulting direction.
+
+Stylo's `ToCss` error-propagation patch is rebased onto 0.20.0, retaining its
+upstream change for function variants without fields. All four Blitz crates,
+AnyRender 0.13, its Vello CPU backend 0.17, Vello CPU 0.1 and Fontique 0.11 are
+aligned in the root manifest. Incremental layout is now enabled by default at
+runtime (`DocumentConfig::incremental`), replacing the removed Cargo feature.
 
 ## Updating a patched crate
 

@@ -1,14 +1,14 @@
 use alloc::{collections::BTreeMap, string::String};
 use core::cmp;
 use modit::{Event, Key, Parser, TextObject, WordIter};
-use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     Action, AttrsList, BorrowedWithFontSystem, BufferRef, Change, Color, Cursor, Edit, FontSystem,
-    Motion, Selection, SyntaxEditor, SyntaxTheme,
+    Motion, Renderer, Selection, SyntaxEditor, SyntaxTheme,
 };
 
 pub use modit::{ViMode, ViParser};
+use unicode_segmentation::UnicodeSegmentation;
 
 fn undo_2_action<'buffer, E: Edit<'buffer>>(
     editor: &mut E,
@@ -302,11 +302,32 @@ impl<'syntax_system, 'buffer> ViEditor<'syntax_system, 'buffer> {
         self.changed = eval_changed(&self.commands, self.save_pivot);
     }
 
+    /// Draw the editor.
+    ///
+    /// Automatically resolves any pending dirty state before drawing.
     #[cfg(feature = "swash")]
-    pub fn draw<F>(&self, font_system: &mut FontSystem, cache: &mut crate::SwashCache, mut f: F)
-    where
+    pub fn draw<F>(
+        &mut self,
+        font_system: &mut FontSystem,
+        cache: &mut crate::SwashCache,
+        callback: F,
+    ) where
         F: FnMut(i32, i32, u32, u32, Color),
     {
+        self.with_buffer_mut(|buffer| buffer.shape_until_scroll(font_system, false));
+        let mut renderer = crate::LegacyRenderer {
+            font_system,
+            cache,
+            callback,
+        };
+        self.render(&mut renderer);
+    }
+
+    /// Render the editor using the provided renderer.
+    ///
+    /// The caller is responsible for calling [`Edit::shape_as_needed`] first
+    /// to ensure layout is up to date.
+    pub fn render<R: Renderer>(&self, renderer: &mut R) {
         let background_color = self.background_color();
         let foreground_color = self.foreground_color();
         let cursor_color = self.cursor_color();
@@ -315,7 +336,7 @@ impl<'syntax_system, 'buffer> ViEditor<'syntax_system, 'buffer> {
             let size = buffer.size();
             if let Some(width) = size.0 {
                 if let Some(height) = size.1 {
-                    f(0, 0, width as u32, height as u32, background_color);
+                    renderer.rectangle(0, 0, width as u32, height as u32, background_color);
                 }
             }
             let font_size = buffer.metrics().font_size;
@@ -386,7 +407,7 @@ impl<'syntax_system, 'buffer> ViEditor<'syntax_system, 'buffer> {
                                         None => Some((c_x as i32, (c_x + c_w) as i32)),
                                     };
                                 } else if let Some((min, max)) = range_opt.take() {
-                                    f(
+                                    renderer.rectangle(
                                         min,
                                         line_top as i32,
                                         cmp::max(0, max - min) as u32,
@@ -412,7 +433,7 @@ impl<'syntax_system, 'buffer> ViEditor<'syntax_system, 'buffer> {
                                     max = buffer.size().0.unwrap_or(0.0) as i32;
                                 }
                             }
-                            f(
+                            renderer.rectangle(
                                 min,
                                 line_top as i32,
                                 cmp::max(0, max - min) as u32,
@@ -474,7 +495,7 @@ impl<'syntax_system, 'buffer> ViEditor<'syntax_system, 'buffer> {
                     if block_cursor {
                         let left_x = cmp::min(start_x, end_x);
                         let right_x = cmp::max(start_x, end_x);
-                        f(
+                        renderer.rectangle(
                             left_x,
                             line_top as i32,
                             (right_x - left_x) as u32,
@@ -482,7 +503,7 @@ impl<'syntax_system, 'buffer> ViEditor<'syntax_system, 'buffer> {
                             selection_color,
                         );
                     } else {
-                        f(
+                        renderer.rectangle(
                             start_x,
                             line_top as i32,
                             1,
@@ -493,27 +514,14 @@ impl<'syntax_system, 'buffer> ViEditor<'syntax_system, 'buffer> {
                 }
 
                 for glyph in run.glyphs.iter() {
-                    let physical_glyph = glyph.physical((0., 0.), 1.0);
+                    let physical_glyph = glyph.physical((0., line_y), 1.0);
 
                     let glyph_color = match glyph.color_opt {
                         Some(some) => some,
                         None => foreground_color,
                     };
 
-                    cache.with_pixels(
-                        font_system,
-                        physical_glyph.cache_key,
-                        glyph_color,
-                        |x, y, color| {
-                            f(
-                                physical_glyph.x + x,
-                                line_y as i32 + physical_glyph.y + y,
-                                1,
-                                1,
-                                color,
-                            );
-                        },
-                    );
+                    renderer.glyph(physical_glyph, glyph_color);
                 }
             }
         });
@@ -557,8 +565,8 @@ impl<'buffer> Edit<'buffer> for ViEditor<'_, 'buffer> {
         self.editor.tab_width()
     }
 
-    fn set_tab_width(&mut self, font_system: &mut FontSystem, tab_width: u16) {
-        self.editor.set_tab_width(font_system, tab_width);
+    fn set_tab_width(&mut self, tab_width: u16) {
+        self.editor.set_tab_width(tab_width);
     }
 
     fn shape_as_needed(&mut self, font_system: &mut FontSystem, prune: bool) {
@@ -599,7 +607,7 @@ impl<'buffer> Edit<'buffer> for ViEditor<'_, 'buffer> {
     }
 
     fn action(&mut self, font_system: &mut FontSystem, action: Action) {
-        log::debug!("Action {:?}", action);
+        log::debug!("Action {action:?}");
 
         let editor = &mut self.editor;
 
@@ -636,7 +644,7 @@ impl<'buffer> Edit<'buffer> for ViEditor<'_, 'buffer> {
             Action::Unindent => Key::Backtab,
             Action::Motion(Motion::Up) => Key::Up,
             _ => {
-                log::debug!("Pass through action {:?}", action);
+                log::debug!("Pass through action {action:?}");
                 editor.action(font_system, action);
                 // Always finish change when passing through (TODO: group changes)
                 finish_change(
@@ -652,7 +660,7 @@ impl<'buffer> Edit<'buffer> for ViEditor<'_, 'buffer> {
         let has_selection = !matches!(editor.selection(), Selection::None);
 
         self.parser.parse(key, has_selection, |event| {
-            log::debug!("  Event {:?}", event);
+            log::debug!("  Event {event:?}");
             let action = match event {
                 Event::AutoIndent => {
                     log::info!("TODO: AutoIndent");
@@ -813,7 +821,7 @@ impl<'buffer> Edit<'buffer> for ViEditor<'_, 'buffer> {
                             editor.set_cursor(cursor);
                         }
                         _ => {
-                            log::info!("TODO: {:?}", text_object);
+                            log::info!("TODO: {text_object:?}");
                         }
                     }
                     return;
@@ -1006,7 +1014,7 @@ impl<'buffer> Edit<'buffer> for ViEditor<'_, 'buffer> {
                                             }
                                             None
                                         })
-                                        .last()
+                                        .next_back()
                                     {
                                         cursor.index = i;
                                     }

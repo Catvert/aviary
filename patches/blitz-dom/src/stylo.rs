@@ -1,7 +1,9 @@
 //! Enable the dom to participate in styling by servo
 //!
 
+use blitz_traits::node_id::NodeId;
 use std::ptr::NonNull;
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
 use crate::StyleThreading;
@@ -23,7 +25,6 @@ use style::applicable_declarations::ApplicableDeclarationBlock;
 use style::bloom::each_relevant_element_hash;
 use style::color::AbsoluteColor;
 use style::data::{ElementDataMut, ElementDataRef};
-use style::dom::AttributeProvider;
 use style::global_style_data::STYLE_THREAD_POOL;
 use style::invalidation::element::restyle_hints::RestyleHint;
 use style::properties::ComputedValues;
@@ -67,7 +68,7 @@ impl crate::document::BaseDocument {
             ua_or_user: &guard.read(),
         };
 
-        let root = TDocument::as_node(&&self.nodes[0])
+        let root = TDocument::as_node(&&self.nodes[self.root_node_id])
             .first_element_child()
             .unwrap()
             .as_element()
@@ -80,7 +81,7 @@ impl crate::document::BaseDocument {
         // Mark actively animating nodes as dirty
         let mut sets = self.animations.sets.write();
         for (key, set) in sets.iter_mut() {
-            let node_id = key.node.id();
+            let node_id = NodeId::from_u64(key.node.id() as u64);
 
             // Drop animations belonging to nodes that are no longer in the
             // document. A removed element is never restyled, so it would never
@@ -140,20 +141,25 @@ impl crate::document::BaseDocument {
         // dbg!(root);
         let token = RecalcStyle::pre_traverse(root, &context);
 
+        let mut nodes_needing_style_image_flush = Vec::new();
         if token.should_traverse() {
             // Style the elements, resolving their data
-            let traverser = RecalcStyle::new(context);
+            let mut traverser = RecalcStyle::new(context);
             // `Sequential` bypasses Stylo's global pool. See `StyleThreading`.
             let pool_guard = matches!(self.style_threading, StyleThreading::Parallel)
                 .then(|| STYLE_THREAD_POOL.pool());
             let rayon_pool = pool_guard.as_ref().and_then(|g| g.as_ref());
             style::driver::traverse_dom(&traverser, token, rayon_pool);
+            nodes_needing_style_image_flush =
+                std::mem::take(traverser.nodes_needing_style_image_flush.get_mut().unwrap());
         }
+        self.pending_style_image_nodes
+            .extend(nodes_needing_style_image_flush);
 
         for opaque in self.snapshots.keys() {
-            let id = opaque.id();
+            let id = NodeId::from_u64(opaque.id() as u64);
             if let Some(node) = self.nodes.get_mut(id) {
-                node.has_snapshot = false;
+                node.set_has_snapshot(false);
             }
         }
         self.snapshots.clear();
@@ -200,7 +206,7 @@ impl<'a> TDocument for BlitzNode<'a> {
     }
 
     fn shared_lock(&self) -> &SharedRwLock {
-        &self.guard
+        self.guard()
     }
 }
 
@@ -260,7 +266,12 @@ impl<'a> TNode for BlitzNode<'a> {
     }
 
     fn owner_doc(&self) -> Self::ConcreteDocument {
-        self.with(1)
+        // Walk up the (layout-)parent chain to the root Document node.
+        let mut node = *self;
+        while let Some(parent_id) = node.parent {
+            node = node.with(parent_id);
+        }
+        node
     }
 
     fn is_in_document(&self) -> bool {
@@ -276,11 +287,11 @@ impl<'a> TNode for BlitzNode<'a> {
     }
 
     fn opaque(&self) -> OpaqueNode {
-        OpaqueNode(self.id)
+        OpaqueNode(self.id.as_u64() as usize)
     }
 
     fn debug_id(self) -> usize {
-        self.id
+        self.id.as_u64() as usize
     }
 
     fn as_element(&self) -> Option<Self::ConcreteElement> {
@@ -292,7 +303,7 @@ impl<'a> TNode for BlitzNode<'a> {
 
     fn as_document(&self) -> Option<Self::ConcreteDocument> {
         match self.data {
-            NodeData::Document => Some(self),
+            NodeData::Document(_) => Some(self),
             _ => None,
         }
     }
@@ -300,13 +311,6 @@ impl<'a> TNode for BlitzNode<'a> {
     fn as_shadow_root(&self) -> Option<Self::ConcreteShadowRoot> {
         // TODO: implement shadow DOM
         None
-    }
-}
-
-impl AttributeProvider for BlitzNode<'_> {
-    fn get_attr(&self, attr: &style::LocalName, _ns: &style::Namespace) -> Option<String> {
-        // TODO: filter by namespace
-        self.attr(attr.0.clone()).map(|s| s.to_string())
     }
 }
 
@@ -321,7 +325,8 @@ impl selectors::Element for BlitzNode<'_> {
         // We should see if selectors will accept a PR that allows us to use 128bits for the OpaqueElement. Or
         // find some other solution that will enable "rehydration". This is required to enable and use the
         // Shadow DOM functionality in Stylo.
-        let non_null = NonNull::new((self.id + 1) as *mut ()).unwrap();
+        let non_null =
+            NonNull::new((self.id.as_u64() as usize).wrapping_add(1) as *mut ()).unwrap();
         OpaqueElement::from_non_null_ptr(non_null)
     }
 
@@ -406,41 +411,25 @@ impl selectors::Element for BlitzNode<'_> {
         _context: &mut MatchingContext<Self::Impl>,
     ) -> bool {
         match *pseudo_class {
-            NonTSPseudoClass::Active => self.element_state.contains(ElementState::ACTIVE),
+            NonTSPseudoClass::Active => self.element_state().contains(ElementState::ACTIVE),
             NonTSPseudoClass::AnyLink => self
-                .data
-                .downcast_element()
-                .map(|elem| {
-                    (elem.name.local == local_name!("a") || elem.name.local == local_name!("area"))
-                        && elem.attr(local_name!("href")).is_some()
-                })
-                .unwrap_or(false),
-            NonTSPseudoClass::Checked => self
-                .data
-                .downcast_element()
-                .and_then(|elem| elem.checkbox_input_checked())
-                .unwrap_or(false),
+                .element_state()
+                .intersects(ElementState::VISITED_OR_UNVISITED),
+            NonTSPseudoClass::Checked => self.element_state().contains(ElementState::CHECKED),
             NonTSPseudoClass::Valid => false,
             NonTSPseudoClass::Invalid => false,
             NonTSPseudoClass::Defined => false,
-            NonTSPseudoClass::Disabled => self.element_state.contains(ElementState::DISABLED),
-            NonTSPseudoClass::Enabled => self.element_state.contains(ElementState::ENABLED),
-            NonTSPseudoClass::Focus => self.element_state.contains(ElementState::FOCUS),
+            NonTSPseudoClass::Disabled => self.element_state().contains(ElementState::DISABLED),
+            NonTSPseudoClass::Enabled => self.element_state().contains(ElementState::ENABLED),
+            NonTSPseudoClass::Focus => self.element_state().contains(ElementState::FOCUS),
             NonTSPseudoClass::FocusWithin => false,
             NonTSPseudoClass::FocusVisible => false,
             NonTSPseudoClass::Fullscreen => false,
-            NonTSPseudoClass::Hover => self.element_state.contains(ElementState::HOVER),
+            NonTSPseudoClass::Hover => self.element_state().contains(ElementState::HOVER),
             NonTSPseudoClass::Indeterminate => false,
             NonTSPseudoClass::Lang(_) => false,
             NonTSPseudoClass::CustomState(_) => false,
-            NonTSPseudoClass::Link => self
-                .data
-                .downcast_element()
-                .map(|elem| {
-                    (elem.name.local == local_name!("a") || elem.name.local == local_name!("area"))
-                        && elem.attr(local_name!("href")).is_some()
-                })
-                .unwrap_or(false),
+            NonTSPseudoClass::Link => self.element_state().contains(ElementState::UNVISITED),
             NonTSPseudoClass::PlaceholderShown => false,
             NonTSPseudoClass::ReadWrite => false,
             NonTSPseudoClass::ReadOnly => false,
@@ -470,11 +459,15 @@ impl selectors::Element for BlitzNode<'_> {
         pe: &PseudoElement,
         _context: &mut MatchingContext<Self::Impl>,
     ) -> bool {
-        let pseudo = match self.stylo_element_data.get() {
-            Some(el) => el.styles.primary().pseudo().or(match &self.data {
-                NodeData::AnonymousBlock(_) => Some(PseudoElement::ServoAnonymousBox),
-                _ => None,
-            }),
+        let pseudo = match self.stylo_element_data_opt().and_then(|s| s.get()) {
+            Some(el) => el
+                .styles
+                .get_primary()
+                .and_then(|s| s.pseudo())
+                .or(match &self.data {
+                    NodeData::AnonymousBlock(_) => Some(PseudoElement::ServoAnonymousBox),
+                    _ => None,
+                }),
             None => None,
         };
 
@@ -485,8 +478,8 @@ impl selectors::Element for BlitzNode<'_> {
         // Handle flags that apply to the element.
         let self_flags = flags.for_self();
         if !self_flags.is_empty() {
-            self.selector_flags
-                .set(self.selector_flags.get() | self_flags);
+            self.selector_flags()
+                .set(self.selector_flags().get() | self_flags);
         }
 
         // Handle flags that apply to the parent.
@@ -494,8 +487,8 @@ impl selectors::Element for BlitzNode<'_> {
         if !parent_flags.is_empty() {
             if let Some(parent) = self.parent_node() {
                 parent
-                    .selector_flags
-                    .set(parent.selector_flags.get() | parent_flags);
+                    .selector_flags()
+                    .set(parent.selector_flags().get() | parent_flags);
             }
         }
     }
@@ -623,7 +616,7 @@ impl<'a> TElement for BlitzNode<'a> {
     }
 
     fn state(&self) -> ElementState {
-        self.element_state
+        *self.element_state()
     }
 
     fn has_part_attr(&self) -> bool {
@@ -668,15 +661,15 @@ impl<'a> TElement for BlitzNode<'a> {
     }
 
     fn has_snapshot(&self) -> bool {
-        self.has_snapshot
+        Node::has_snapshot(self)
     }
 
     fn handled_snapshot(&self) -> bool {
-        self.snapshot_handled.load(Ordering::SeqCst)
+        self.snapshot_handled().load(Ordering::SeqCst)
     }
 
     unsafe fn set_handled_snapshot(&self) {
-        self.snapshot_handled.store(true, Ordering::SeqCst);
+        self.snapshot_handled().store(true, Ordering::SeqCst);
     }
 
     unsafe fn set_dirty_descendants(&self) {
@@ -698,24 +691,24 @@ impl<'a> TElement for BlitzNode<'a> {
 
     unsafe fn ensure_data(&self) -> ElementDataMut<'_> {
         // SAFETY: stylo traversal has exclusive access to nodes
-        unsafe { self.stylo_element_data.ensure_init() }
+        unsafe { self.stylo_element_data().ensure_init() }
     }
 
     unsafe fn clear_data(&self) {
         // SAFETY: stylo traversal has exclusive access to nodes
-        unsafe { self.stylo_element_data.clear() }
+        unsafe { self.stylo_element_data().clear() }
     }
 
     fn has_data(&self) -> bool {
-        self.stylo_element_data.has_data()
+        self.stylo_element_data_opt().is_some_and(|s| s.has_data())
     }
 
     fn borrow_data(&self) -> Option<ElementDataRef<'_>> {
-        self.stylo_element_data.get()
+        self.stylo_element_data_opt().and_then(|s| s.get())
     }
 
     fn mutate_data(&self) -> Option<ElementDataMut<'_>> {
-        unsafe { self.stylo_element_data.unsafe_stylo_only_mut() }
+        unsafe { self.stylo_element_data().unsafe_stylo_only_mut() }
     }
 
     fn skip_item_display_fixup(&self) -> bool {
@@ -756,7 +749,7 @@ impl<'a> TElement for BlitzNode<'a> {
         context.animations.get_animation_declarations(
             &AnimationSetKey::new_for_non_pseudo(opaque),
             context.current_time_for_animations,
-            &self.guard,
+            self.guard(),
         )
     }
 
@@ -768,7 +761,7 @@ impl<'a> TElement for BlitzNode<'a> {
         context.animations.get_transition_declarations(
             &AnimationSetKey::new_for_non_pseudo(opaque),
             context.current_time_for_animations,
-            &self.guard,
+            self.guard(),
         )
     }
 
@@ -778,6 +771,12 @@ impl<'a> TElement for BlitzNode<'a> {
 
     fn containing_shadow(&self) -> Option<<Self::ConcreteNode as TNode>::ConcreteShadowRoot> {
         None
+    }
+
+    fn get_attr(&self, attr: &style::LocalName, _ns: &style::Namespace) -> Option<String> {
+        // TODO: filter by namespace
+        // TODO: case-insensitive matching for HTML-ns attrs
+        self.attr(attr.0.clone()).map(|s| s.to_string())
     }
 
     fn lang_attr(&self) -> Option<style::selector_parser::AttrValue> {
@@ -802,7 +801,7 @@ impl<'a> TElement for BlitzNode<'a> {
         }
 
         // If it is then check if it is a child of the root (<html>) element
-        let root_node = &self.tree()[0];
+        let root_node = TNode::owner_doc(self);
         let root_element = TDocument::as_node(&root_node)
             .first_element_child()
             .unwrap();
@@ -825,7 +824,7 @@ impl<'a> TElement for BlitzNode<'a> {
         let mut push_style = |decl: PropertyDeclaration| {
             hints.push(ApplicableDeclarationBlock::from_declarations(
                 Arc::new(
-                    self.guard
+                    self.guard()
                         .wrap(PropertyDeclarationBlock::with_one(decl, Importance::Normal)),
                 ),
                 CascadeLevel::new(CascadeOrigin::PresHints),
@@ -856,25 +855,35 @@ impl<'a> TElement for BlitzNode<'a> {
             None
         }
 
+        /// The HTML "rules for parsing dimension values" -- Stylo's
+        /// implementation of them -- packaged as a specified
+        /// `<length-percentage>`. `ignoring_zero` selects the spec's separate
+        /// "maps to the dimension property (ignoring zero)" mapping, where a
+        /// zero value is dropped rather than honoured.
+        ///
+        /// https://html.spec.whatwg.org/multipage/common-microsyntaxes.html#rules-for-parsing-dimension-values
         fn parse_size_attr(
             value: &str,
-            filter_fn: impl FnOnce(&f32) -> bool,
+            ignoring_zero: bool,
         ) -> Option<style::values::specified::LengthPercentage> {
+            use style::servo::attr::{
+                LengthOrPercentageOrAuto, parse_length, parse_nonzero_length,
+            };
             use style::values::specified::{LengthPercentage, NoCalcLength};
-            if let Some(value) = value.strip_suffix("px") {
-                let val: f32 = value.parse().ok()?;
-                return Some(LengthPercentage::Length(NoCalcLength::from_px(val)));
+            let parsed = if ignoring_zero {
+                parse_nonzero_length(value)
+            } else {
+                parse_length(value)
+            };
+            match parsed {
+                LengthOrPercentageOrAuto::Length(length) => Some(LengthPercentage::Length(
+                    NoCalcLength::from_px(length.to_f32_px()),
+                )),
+                LengthOrPercentageOrAuto::Percentage(fraction) => Some(
+                    LengthPercentage::Percentage(NoCalcPercentage::new(fraction)),
+                ),
+                LengthOrPercentageOrAuto::Auto => None,
             }
-
-            if let Some(value) = value.strip_suffix("%") {
-                let val: f32 = value.parse().ok()?;
-                return Some(LengthPercentage::Percentage(NoCalcPercentage::new(
-                    val / 100.0,
-                )));
-            }
-
-            let val: f32 = value.parse().ok().filter(filter_fn)?;
-            Some(LengthPercentage::Length(NoCalcLength::from_px(val)))
         }
 
         /// Parse the value of an SVG `width`/`height` presentation attribute.
@@ -909,6 +918,15 @@ impl<'a> TElement for BlitzNode<'a> {
             Some(LengthPercentage::Length(length))
         }
 
+        // `<input type=image>` is the only input type that is replaced
+        // content, and it is the only one that takes the embedded-content
+        // presentational attributes. The type attribute is matched ASCII
+        // case-insensitively, as attribute keywords always are.
+        let is_image_input = *tag == local_name!("input")
+            && elem.attrs().iter().any(|attr| {
+                attr.name.local == local_name!("type") && attr.value.eq_ignore_ascii_case("image")
+            });
+
         for attr in elem.attrs() {
             let name = &attr.name.local;
             let value = attr.value.as_str();
@@ -927,36 +945,85 @@ impl<'a> TElement for BlitzNode<'a> {
                 }
             }
 
+            // The width/height attributes on these elements map to the
+            // corresponding dimension properties (percentages allowed):
             // https://html.spec.whatwg.org/multipage/rendering.html#dimRendering
-            if *name == local_name!("width")
-                && (*tag == local_name!("table")
+            // https://html.spec.whatwg.org/multipage/rendering.html#attributes-for-embedded-content-and-images
+            let is_width = *name == local_name!("width");
+            let is_height = *name == local_name!("height");
+            // The elements whose width/height attributes map to the dimension
+            // properties. `input` only joins them as type=image, which is the
+            // one replaced input type.
+            let is_embedded = *tag == local_name!("iframe")
+                || *tag == local_name!("embed")
+                || *tag == local_name!("video")
+                || *tag == local_name!("object")
+                || *tag == local_name!("img")
+                || *tag == local_name!("marquee")
+                || is_image_input;
+            let maps_to_dimension = if is_width {
+                is_embedded
+                    || *tag == local_name!("table")
                     || *tag == local_name!("col")
+                    || *tag == local_name!("colgroup")
                     || *tag == local_name!("tr")
                     || *tag == local_name!("td")
                     || *tag == local_name!("th")
-                    || *tag == local_name!("hr"))
-            {
-                let is_table = *tag == local_name!("table");
-                if let Some(width) = parse_size_attr(value, |v| !is_table || *v != 0.0) {
+                    || *tag == local_name!("hr")
+            } else if is_height {
+                is_embedded
+                    || *tag == local_name!("table")
+                    || *tag == local_name!("thead")
+                    || *tag == local_name!("tbody")
+                    || *tag == local_name!("tfoot")
+                    || *tag == local_name!("tr")
+                    || *tag == local_name!("td")
+                    || *tag == local_name!("th")
+            } else {
+                false
+            };
+            if maps_to_dimension {
+                // Three of these use the "(ignoring zero)" variant of the
+                // mapping, where a zero is dropped instead of honoured:
+                // `table width`, and `td`/`th` in both axes.
+                let is_cell = *tag == local_name!("td") || *tag == local_name!("th");
+                let ignoring_zero = is_cell || (is_width && *tag == local_name!("table"));
+                if let Some(size) = parse_size_attr(value, ignoring_zero) {
                     use style::values::generics::{NonNegative, length::Size};
-
-                    push_style(PropertyDeclaration::Width(Size::LengthPercentage(
-                        NonNegative(width),
-                    )));
+                    let size = Size::LengthPercentage(NonNegative(size));
+                    push_style(if is_width {
+                        PropertyDeclaration::Width(size)
+                    } else {
+                        PropertyDeclaration::Height(size)
+                    });
                 }
             }
 
-            if *name == local_name!("height")
-                && (*tag == local_name!("table")
-                    || *tag == local_name!("thead")
-                    || *tag == local_name!("tbody")
-                    || *tag == local_name!("tfoot"))
-            {
-                if let Some(height) = parse_size_attr(value, |_| true) {
-                    use style::values::generics::{NonNegative, length::Size};
-                    push_style(PropertyDeclaration::Height(Size::LengthPercentage(
-                        NonNegative(height),
-                    )));
+            // hspace/vspace map to the horizontal and vertical margins as
+            // dimension properties. This is a *smaller* set than the one that
+            // takes width/height: `iframe` and `video` take width and height
+            // but not hspace/vspace, and html/rendering/unmapped-attributes
+            // checks exactly that -- browsers have got it wrong before.
+            let takes_spacing = *tag == local_name!("embed")
+                || *tag == local_name!("img")
+                || *tag == local_name!("object")
+                || *tag == local_name!("marquee")
+                || is_image_input;
+            if takes_spacing {
+                let is_hspace = *name == local_name!("hspace");
+                let is_vspace = *name == local_name!("vspace");
+                if is_hspace || is_vspace {
+                    if let Some(size) = parse_size_attr(value, false) {
+                        use style::values::generics::length::GenericMargin;
+                        let margin = GenericMargin::LengthPercentage(size);
+                        if is_hspace {
+                            push_style(PropertyDeclaration::MarginLeft(margin.clone()));
+                            push_style(PropertyDeclaration::MarginRight(margin));
+                        } else {
+                            push_style(PropertyDeclaration::MarginTop(margin.clone()));
+                            push_style(PropertyDeclaration::MarginBottom(margin));
+                        }
+                    }
                 }
             }
 
@@ -976,6 +1043,68 @@ impl<'a> TElement for BlitzNode<'a> {
                     } else {
                         PropertyDeclaration::Height(size)
                     });
+                }
+            }
+
+            // The `border` attribute maps to the four border widths as a
+            // pixel length, plus the four border styles as `solid` -- width
+            // alone would compute back to zero against the default
+            // border-style of `none`. It is only these three elements:
+            // `embed`, `iframe`, `marquee` and non-image `input` all have a
+            // `border` attribute that must stay unmapped.
+            if *name == local_name!("border")
+                && (*tag == local_name!("img") || *tag == local_name!("object") || is_image_input)
+            {
+                if let Ok(px) = style::servo::attr::parse_unsigned_integer(value.chars()) {
+                    use style::values::specified::{BorderSideWidth, BorderStyle};
+                    let width = BorderSideWidth::from_px(px as f32);
+                    push_style(PropertyDeclaration::BorderTopWidth(width.clone()));
+                    push_style(PropertyDeclaration::BorderRightWidth(width.clone()));
+                    push_style(PropertyDeclaration::BorderBottomWidth(width.clone()));
+                    push_style(PropertyDeclaration::BorderLeftWidth(width));
+                    push_style(PropertyDeclaration::BorderTopStyle(BorderStyle::Solid));
+                    push_style(PropertyDeclaration::BorderRightStyle(BorderStyle::Solid));
+                    push_style(PropertyDeclaration::BorderBottomStyle(BorderStyle::Solid));
+                    push_style(PropertyDeclaration::BorderLeftStyle(BorderStyle::Solid));
+                }
+            }
+
+            // `body` carries four legacy margin attributes, as pixel lengths:
+            // marginwidth and marginheight set both sides of an axis, and
+            // leftmargin and topmargin set one side each.
+            //
+            // There is deliberately no `rightmargin` or `bottommargin`. They
+            // look like the obvious counterparts to the two that exist, but
+            // the spec does not define them and browsers ignore them in both
+            // standards and quirks mode -- body-margin-3a/3b assert exactly
+            // that.
+            if *tag == local_name!("body") {
+                // Matched as strings: these are not in the static atom set,
+                // so `local_name!` will not compile for them.
+                let sides: &[u8] = match &**name {
+                    "marginwidth" => b"lr",
+                    "marginheight" => b"tb",
+                    "leftmargin" => b"l",
+                    "topmargin" => b"t",
+                    _ => b"",
+                };
+                if !sides.is_empty() {
+                    if let Ok(px) = style::servo::attr::parse_unsigned_integer(value.chars()) {
+                        use style::values::generics::length::GenericMargin;
+                        use style::values::specified::{LengthPercentage, NoCalcLength};
+                        let margin = GenericMargin::LengthPercentage(LengthPercentage::Length(
+                            NoCalcLength::from_px(px as f32),
+                        ));
+                        for side in sides {
+                            push_style(match side {
+                                b'l' => PropertyDeclaration::MarginLeft(margin.clone()),
+                                b'r' => PropertyDeclaration::MarginRight(margin.clone()),
+                                b't' => PropertyDeclaration::MarginTop(margin.clone()),
+                                b'b' => PropertyDeclaration::MarginBottom(margin.clone()),
+                                _ => unreachable!("side table above only yields lrtb"),
+                            });
+                        }
+                    }
                 }
             }
 
@@ -1019,11 +1148,11 @@ impl<'a> TElement for BlitzNode<'a> {
     }
 
     fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool {
-        self.selector_flags.get().contains(flags)
+        self.selector_flags().get().contains(flags)
     }
 
     fn relative_selector_search_direction(&self) -> ElementSelectorFlags {
-        let flags = self.selector_flags.get();
+        let flags = self.selector_flags().get();
         if flags.contains(ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_ANCESTOR_SIBLING)
         {
             ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_ANCESTOR_SIBLING
@@ -1084,7 +1213,7 @@ impl<'a> Iterator for Traverser<'a> {
 
 impl std::hash::Hash for BlitzNode<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write_usize(self.id)
+        state.write_u64(self.id.as_u64())
     }
 }
 
@@ -1102,24 +1231,28 @@ use style::traversal::recalc_style_at;
 
 pub struct RecalcStyle<'a> {
     context: SharedStyleContext<'a>,
+    /// Nodes whose `background-image`/`mask-image` layers need flushing to
+    /// dedicated storage on the node (see `flush_image_layers_from_style`)
+    /// because their style changed during this traversal.
+    nodes_needing_style_image_flush: Mutex<Vec<NodeId>>,
 }
 
 impl<'a> RecalcStyle<'a> {
     pub fn new(context: SharedStyleContext<'a>) -> Self {
-        RecalcStyle { context }
+        RecalcStyle {
+            context,
+            nodes_needing_style_image_flush: Mutex::new(Vec::new()),
+        }
     }
 }
 
 #[allow(unsafe_code)]
-impl<E> DomTraversal<E> for RecalcStyle<'_>
-where
-    E: TElement,
-{
-    fn process_preorder<F: FnMut(E::ConcreteNode)>(
+impl<'dom> DomTraversal<BlitzNode<'dom>> for RecalcStyle<'_> {
+    fn process_preorder<F: FnMut(BlitzNode<'dom>)>(
         &self,
         traversal_data: &PerLevelTraversalData,
-        context: &mut StyleContext<E>,
-        node: E::ConcreteNode,
+        context: &mut StyleContext<BlitzNode<'dom>>,
+        node: BlitzNode<'dom>,
         note_child: F,
     ) {
         if let Some(el) = node.as_element() {
@@ -1127,8 +1260,27 @@ where
             let mut data = unsafe { el.ensure_data() };
             recalc_style_at(self, traversal_data, context, el, &mut data, note_child);
 
+            sync_pseudo_element_styles(el, &data, &self.nodes_needing_style_image_flush);
+
+            if !data.damage.is_empty() {
+                // Mark the ancestor chain so that the damage propagation pass
+                // visits this element.
+                el.mark_damaged();
+
+                if data
+                    .styles
+                    .get_primary()
+                    .is_some_and(|style| needs_style_image_flush(el, style))
+                {
+                    self.nodes_needing_style_image_flush
+                        .lock()
+                        .unwrap()
+                        .push(el.id);
+                }
+            }
+
             // Gets set later on
-            unsafe { el.unset_dirty_descendants() }
+            el.unset_dirty_descendants();
         }
     }
 
@@ -1137,7 +1289,11 @@ where
         false
     }
 
-    fn process_postorder(&self, _style_context: &mut StyleContext<E>, _node: E::ConcreteNode) {
+    fn process_postorder(
+        &self,
+        _style_context: &mut StyleContext<BlitzNode<'dom>>,
+        _node: BlitzNode<'dom>,
+    ) {
         panic!("this should never be called")
     }
 
@@ -1145,6 +1301,118 @@ where
     fn shared_context(&self) -> &SharedStyleContext<'_> {
         &self.context
     }
+}
+
+/// Flush updated pseudo-element (`::before`/`::after`) styles from the owning
+/// element's freshly-computed stylo data to the pseudo-element's anonymous node.
+///
+/// Pseudo-element styles are normally flushed to the pseudo-element's node
+/// during box construction (see `flush_pseudo_elements`), but in incremental
+/// mode box construction only runs for nodes with construction damage.
+/// Pseudo-element style changes which don't require reconstruction (e.g.
+/// animations/transitions of repaint- or relayout-only properties) must still
+/// be flushed to the pseudo-element's node - along with the damage they imply -
+/// so that layout and paint see the new style.
+///
+/// This runs during the style traversal, immediately after the owning element
+/// has been restyled, because that is where the old and new pseudo styles can
+/// be diffed precisely (the pseudo node's stored primary style is the "old"
+/// style; the owner's just-computed pseudo styles are the "new" ones).
+///
+/// SAFETY: the style traversal has exclusive access to the tree, and each
+/// pseudo-element node is only ever accessed from its owning element's
+/// `process_preorder` (pseudo nodes are not part of the DOM child list and are
+/// not themselves visited by the traversal), so mutating the pseudo node's
+/// stylo data here cannot race with any other traversal thread.
+#[allow(unsafe_code)]
+fn sync_pseudo_element_styles(
+    el: &Node,
+    data: &style::data::ElementData,
+    nodes_needing_style_image_flush: &Mutex<Vec<NodeId>>,
+) {
+    let before_node_id = el.before();
+    let after_node_id = el.after();
+    if before_node_id.is_none() && after_node_id.is_none() {
+        return;
+    }
+
+    // Note: yes these are kinda backwards (see `flush_pseudo_elements`)
+    let pseudos = data.styles.pseudos.as_array();
+    let before_style = pseudos[1].clone();
+    let after_style = pseudos[0].clone();
+
+    // Creation and removal of pseudo-elements is handled during box construction
+    // (Stylo generates construction damage for those cases), so only the case
+    // where the pseudo-element both was and remains present is handled here.
+    for (pe_node_id, pe_style) in [(before_node_id, before_style), (after_node_id, after_style)] {
+        let (Some(pe_node_id), Some(pe_style)) = (pe_node_id, pe_style) else {
+            continue;
+        };
+        let pe_node = el.with(pe_node_id);
+        let Some(stylo_data) = pe_node.stylo_element_data_opt() else {
+            continue;
+        };
+        let mut pe_data = match unsafe { stylo_data.unsafe_stylo_only_mut() } {
+            Some(data) => data,
+            None => continue,
+        };
+        let Some(old_style) = pe_data.styles.primary.clone() else {
+            continue;
+        };
+        if std::ptr::eq(&*old_style, &*pe_style) {
+            continue;
+        }
+
+        let diff = RestyleDamage::compute_style_difference::<&Node>(&old_style, &pe_style);
+        if !diff.damage.is_empty() {
+            pe_data.damage.insert(diff.damage);
+            pe_node.mark_damaged();
+
+            if needs_style_image_flush(pe_node, &pe_style) {
+                nodes_needing_style_image_flush
+                    .lock()
+                    .unwrap()
+                    .push(pe_node_id);
+            }
+        }
+        pe_data.styles.primary = Some(pe_style);
+        pe_data.set_restyled();
+    }
+}
+
+/// Whether a node's `background-image`/`mask-image` layers need flushing to
+/// dedicated storage on the node: the URLs referenced by the new style differ
+/// from the image data currently stored on the node.
+fn needs_style_image_flush(node: &Node, style: &ComputedValues) -> bool {
+    use crate::node::ImageResourceData;
+    use style::url::ComputedUrl;
+    use style::values::computed::image::Image;
+
+    fn out_of_sync(style_images: &[Image], stored: &[Option<ImageResourceData>]) -> bool {
+        if style_images.len() != stored.len() {
+            // Differing lengths only matter if either side references an image
+            // (a style list of `none` layers and empty storage are in sync).
+            return style_images
+                .iter()
+                .any(|image| matches!(image, Image::Url(_)))
+                || stored.iter().any(Option::is_some);
+        }
+        std::iter::zip(style_images, stored).any(|(style_image, stored)| {
+            match (style_image, stored) {
+                (Image::Url(ComputedUrl::Valid(url)), Some(data)) => **url != *data.url,
+                (Image::Url(ComputedUrl::Valid(_)), None) => true,
+                (_, Some(_)) => true,
+                (_, None) => false,
+            }
+        })
+    }
+
+    node.data.downcast_element().is_some_and(|el| {
+        out_of_sync(
+            &style.get_background().background_image.0,
+            &el.background_images,
+        ) || out_of_sync(&style.get_svg().mask_image.0, &el.mask_images)
+    })
 }
 
 #[test]

@@ -5,7 +5,7 @@ use crate::ui::components::block_input::{
     Backspace, BlockInputState, DeleteToPreviousWordStart, Enter, Escape, IndentInline, MoveDown,
     MoveUp, OutdentInline, Paste, Redo, SelectAll, Undo,
 };
-use gpui::{div, prelude::*, px, AnyElement, Context, Window};
+use gpui_kit::{div, prelude::*, px, AnyElement, Context, Window};
 
 impl BlockEditor {
     /// Gives an open completion popup first refusal on the keys that the block
@@ -13,8 +13,8 @@ impl BlockEditor {
     /// split a block and Up/Down would leave it instead of navigating the emoji
     /// suggestions.
     fn route_completion_action(
-        input: &gpui::Entity<BlockInputState>,
-        action: Box<dyn gpui::Action>,
+        input: &gpui_kit::Entity<BlockInputState>,
+        action: Box<dyn gpui_kit::Action>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -32,7 +32,7 @@ impl BlockEditor {
     pub(super) fn wrap_text_actions(
         &self,
         content: AnyElement,
-        input: &gpui::Entity<BlockInputState>,
+        input: &gpui_kit::Entity<BlockInputState>,
         bid: u64,
         row: Option<usize>,
         cx: &mut Context<Self>,
@@ -177,7 +177,7 @@ impl BlockEditor {
     pub(super) fn wrap_table_cell_actions(
         &self,
         content: AnyElement,
-        input: &gpui::Entity<BlockInputState>,
+        input: &gpui_kit::Entity<BlockInputState>,
         bid: u64,
         row: usize,
         column: usize,

@@ -58,13 +58,13 @@ use crate::proofreading::{
     ProofreadingIssue,
 };
 use crate::runtime::Cmd;
-use gpui::{
+use gpui_kit::component::menu::PopupMenuItem;
+use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::{
     actions, prelude::*, px, App, Entity, EntityId, FocusHandle, Focusable as _, FontStyle,
     FontWeight, HighlightStyle, KeyBinding, Pixels, ScrollDelta, ScrollHandle, ScrollWheelEvent,
     StrikethroughStyle, Subscription, UnderlineStyle, Window,
 };
-use gpui_component::menu::PopupMenuItem;
-use gpui_component::ActiveTheme as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 use tokio::sync::mpsc;
@@ -86,7 +86,7 @@ actions!(
     ]
 );
 
-#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[derive(Clone, Debug, PartialEq, gpui_kit::Action)]
 #[action(namespace = block_editor, no_json)]
 struct ApplySpellingSuggestion {
     input_id: EntityId,
@@ -95,19 +95,19 @@ struct ApplySpellingSuggestion {
     replacement: String,
 }
 
-#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[derive(Clone, Debug, PartialEq, gpui_kit::Action)]
 #[action(namespace = block_editor, no_json)]
 struct IgnoreSpelling {
     word: String,
 }
 
-#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[derive(Clone, Debug, PartialEq, gpui_kit::Action)]
 #[action(namespace = block_editor, no_json)]
 struct AddSpellingToDictionary {
     word: String,
 }
 
-#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[derive(Clone, Debug, PartialEq, gpui_kit::Action)]
 #[action(namespace = block_editor, no_json)]
 struct IgnoreProofreadingRule {
     rule_id: String,
@@ -258,13 +258,13 @@ enum InlineVisualStyle {
     Strikethrough,
     /// Carries a theme colour: the palette is user-configurable, so these two
     /// cannot be constants like the others.
-    Link(gpui::Hsla),
+    Link(gpui_kit::Hsla),
     /// A link's destination. Dimmed with a real colour rather than `fade_out`:
     /// fading blends toward the background, which on a dark canvas reads as
     /// nearly invisible and on a light one as washed out. It is also only on
     /// screen while the link is unfolded — that is, while the user is reading or
     /// editing it — so it has to stay legible.
-    LinkDestination(gpui::Hsla),
+    LinkDestination(gpui_kit::Hsla),
     Syntax,
 }
 
@@ -321,13 +321,13 @@ impl InlineVisualStyle {
 #[derive(Clone, Copy)]
 struct InlineColors {
     /// A link's label.
-    link: gpui::Hsla,
+    link: gpui_kit::Hsla,
     /// A link's destination.
-    destination: gpui::Hsla,
+    destination: gpui_kit::Hsla,
 }
 
 impl InlineColors {
-    fn from_theme(theme: &gpui_component::Theme) -> Self {
+    fn from_theme(theme: &gpui_kit::component::Theme) -> Self {
         Self {
             link: readable_link_color(theme.link, theme.foreground),
             destination: theme.muted_foreground,
@@ -351,8 +351,8 @@ const LINK_MIN_SATURATION: f32 = 0.55;
 /// reads as dimmed rather than clickable. Matching the text's lightness leaves
 /// the hue and the underline to do the distinguishing, which is what they are
 /// for.
-fn readable_link_color(link: gpui::Hsla, foreground: gpui::Hsla) -> gpui::Hsla {
-    gpui::Hsla {
+fn readable_link_color(link: gpui_kit::Hsla, foreground: gpui_kit::Hsla) -> gpui_kit::Hsla {
+    gpui_kit::Hsla {
         l: foreground.l.clamp(LINK_MIN_LIGHTNESS, LINK_MAX_LIGHTNESS),
         s: link.s.max(LINK_MIN_SATURATION),
         ..link
@@ -528,7 +528,7 @@ pub struct BlockEditor {
     mail_body_options: MailBodyOptions,
     next_id: u64,
     /// Placeholder for the initial paragraph.
-    placeholder: gpui::SharedString,
+    placeholder: gpui_kit::SharedString,
     /// Input and offset designated by `{{cursor}}` in a template. The marker is
     /// removed during import; the target remains the document's first Tab stop
     /// without stealing initial focus from header fields.
@@ -578,7 +578,7 @@ pub struct BlockEditor {
     /// alongside the ranges prevents stale results from underlining new text.
     spelling: std::collections::HashMap<EntityId, SpellingResult>,
     /// Replacing a task cancels the previous debounce/check for that input.
-    spelling_tasks: std::collections::HashMap<EntityId, gpui::Task<()>>,
+    spelling_tasks: std::collections::HashMap<EntityId, gpui_kit::Task<()>>,
     /// Optional bridge to the background runtime, used for grammar checks and
     /// pasted-image downloads. Absent in the settings editors, which are not
     /// attached to an account.
@@ -592,7 +592,7 @@ pub struct BlockEditor {
     /// refreshes every open editor when preferences change.
     languagetool_settings: LanguageToolSettings,
     languagetool_results: std::collections::HashMap<EntityId, LanguageToolResult>,
-    languagetool_tasks: std::collections::HashMap<EntityId, gpui::Task<()>>,
+    languagetool_tasks: std::collections::HashMap<EntityId, gpui_kit::Task<()>>,
     languagetool_revisions: std::collections::HashMap<EntityId, u64>,
     /// Source text for which the latest LanguageTool request failed. This
     /// keeps Hunspell active without immediately rescheduling on every render.
@@ -634,7 +634,7 @@ struct ResizeDrag {
 impl BlockEditor {
     pub fn set_placeholder(
         &mut self,
-        placeholder: gpui::SharedString,
+        placeholder: gpui_kit::SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1652,9 +1652,9 @@ impl BlockEditor {
             .saturating_add(8);
         for _ in 0..max_steps {
             if forward {
-                window.focus_next();
+                window.focus_next(cx);
             } else {
-                window.focus_prev();
+                window.focus_prev(cx);
             }
             if !self.focus_handle.contains_focused(window, cx) {
                 break;
@@ -1728,7 +1728,7 @@ impl BlockEditor {
         self.sel = Some((anchor, head));
         // Block selection replaces any text selection still visible in inputs.
         self.unselect_others(None, window, cx);
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
         cx.notify();
     }
 
@@ -1881,7 +1881,7 @@ impl BlockEditor {
 
     /// Variant with an explicit position, used by the block insert-image menu.
     fn prompt_insert_image_at(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
             files: true,
             directories: false,
             multiple: true,
@@ -2761,7 +2761,7 @@ mod template_cursor_tests {
         LINK_MIN_SATURATION,
     };
     use crate::blocks::BlockKind;
-    use gpui::{FontStyle, FontWeight};
+    use gpui_kit::{FontStyle, FontWeight};
 
     #[test]
     fn removes_marker_and_preserves_offset() {
@@ -2792,12 +2792,12 @@ mod template_cursor_tests {
 
     /// Stand-ins for the theme colours these pure helpers receive rather than
     /// read from a context.
-    fn sample_link_color() -> gpui::Hsla {
-        gpui::hsla(0.6, 1., 0.5, 1.)
+    fn sample_link_color() -> gpui_kit::Hsla {
+        gpui_kit::hsla(0.6, 1., 0.5, 1.)
     }
 
-    fn sample_destination_color() -> gpui::Hsla {
-        gpui::hsla(0., 0., 0.55, 1.)
+    fn sample_destination_color() -> gpui_kit::Hsla {
+        gpui_kit::hsla(0., 0., 0.55, 1.)
     }
 
     fn sample_colors() -> InlineColors {
@@ -2812,8 +2812,8 @@ mod template_cursor_tests {
     #[test]
     fn a_link_matches_the_lightness_of_the_body_text() {
         // OneDark as shipped: text #abb2bf, primary #61afef.
-        let dark_text = gpui::hsla(0.61, 0.14, 0.71, 1.);
-        let one_dark_blue = gpui::hsla(0.58, 0.82, 0.659, 1.);
+        let dark_text = gpui_kit::hsla(0.61, 0.14, 0.71, 1.);
+        let one_dark_blue = gpui_kit::hsla(0.58, 0.82, 0.659, 1.);
 
         let corrected = readable_link_color(one_dark_blue, dark_text);
 
@@ -2826,9 +2826,9 @@ mod template_cursor_tests {
     /// white would otherwise drag the blue with it.
     #[test]
     fn link_lightness_stays_within_bounds_that_keep_the_hue() {
-        let blue = gpui::hsla(0.61, 0.9, 0.5, 1.);
-        let near_black_text = gpui::hsla(0., 0., 0.08, 1.);
-        let near_white_text = gpui::hsla(0., 0., 0.97, 1.);
+        let blue = gpui_kit::hsla(0.61, 0.9, 0.5, 1.);
+        let near_black_text = gpui_kit::hsla(0., 0., 0.08, 1.);
+        let near_white_text = gpui_kit::hsla(0., 0., 0.97, 1.);
 
         assert_eq!(
             readable_link_color(blue, near_black_text).l,
@@ -2840,7 +2840,7 @@ mod template_cursor_tests {
         );
 
         // A near-grey primary is saturated enough to read as a link.
-        let grey = gpui::hsla(0.61, 0.05, 0.5, 1.);
+        let grey = gpui_kit::hsla(0.61, 0.05, 0.5, 1.);
         assert!(readable_link_color(grey, near_white_text).s >= LINK_MIN_SATURATION);
     }
 
@@ -2908,7 +2908,7 @@ mod template_cursor_tests {
     fn combined_highlights_are_sorted_and_disjoint() {
         let value = "voir [Testing](http://localhost) fin";
         let combined: Vec<_> =
-            gpui::combine_highlights(inline_format_highlights(value, sample_colors()), [])
+            gpui_kit::combine_highlights(inline_format_highlights(value, sample_colors()), [])
                 .collect();
 
         let mut previous_end = 0;

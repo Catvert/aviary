@@ -2,11 +2,11 @@
 
 use super::app::AviaryApp;
 use crate::logging::LogEntry;
-use gpui::{div, prelude::*, px, ClipboardItem, Context};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex, v_flex, ActiveTheme, IconName, Selectable, Sizable, StyledExt,
 };
+use gpui_kit::{div, prelude::*, px, ClipboardItem, Context};
 use log::{Level, LevelFilter};
 
 fn visible(entry: &LogEntry, filter: LevelFilter) -> bool {
@@ -20,7 +20,7 @@ fn visible(entry: &LogEntry, filter: LevelFilter) -> bool {
     }
 }
 
-fn level_label(level: Level) -> gpui::SharedString {
+fn level_label(level: Level) -> gpui_kit::SharedString {
     match level {
         Level::Error => tr!("logs-level-error"),
         Level::Warn => tr!("logs-level-warn"),
@@ -121,7 +121,7 @@ impl AviaryApp {
                                 .child(entry.message.clone()),
                         )
                         .child(
-                            Button::new(gpui::ElementId::Name(
+                            Button::new(gpui_kit::ElementId::Name(
                                 format!("logs-copy-entry-{index}").into(),
                             ))
                             .ghost()

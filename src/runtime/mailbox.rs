@@ -1099,6 +1099,7 @@ pub(super) async fn perform_mark_read(
 /// sorts everything chronologically, as it does for a folder listing.
 pub(super) async fn search_messages(
     account: Arc<BgAccount>,
+    request_id: u64,
     query: String,
     scope: crate::runtime::protocol::SearchScope,
     limit: usize,
@@ -1125,6 +1126,7 @@ pub(super) async fn search_messages(
         Ok(messages) if !messages.is_empty() => {
             answered_locally = true;
             account.emit(Evt::SearchResults {
+                request_id,
                 account_id: account.id.clone(),
                 query: query.clone(),
                 messages,
@@ -1170,6 +1172,7 @@ pub(super) async fn search_messages(
                 m.account_id = account.id.clone();
             }
             account.emit(Evt::SearchResults {
+                request_id,
                 account_id: account.id.clone(),
                 query,
                 messages,

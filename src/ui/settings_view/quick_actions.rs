@@ -4,8 +4,7 @@ use super::super::app::AviaryApp;
 use super::super::block_editor::BlockEditor;
 use super::super::settings::{QuickAction, QuickActionIcon, QuickForward, QuickReply};
 use super::{labelled, QuickActionEditorState, SettingsTab};
-use gpui::{div, prelude::*, px, Context, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     color_picker::ColorPicker,
@@ -15,6 +14,7 @@ use gpui_component::{
     scroll::ScrollableElement,
     v_flex, ActiveTheme, Selectable, Sizable, StyledExt,
 };
+use gpui_kit::{div, prelude::*, px, Context, Window};
 
 impl AviaryApp {
     pub(super) fn render_settings_quick_actions(
@@ -113,7 +113,7 @@ impl AviaryApp {
             self.toast(
                 window,
                 cx,
-                gpui_component::notification::Notification::error(tr!(
+                gpui_kit::component::notification::Notification::error(tr!(
                     "quick-actions-validation-error"
                 )),
             );
@@ -150,7 +150,7 @@ impl AviaryApp {
             self.toast(
                 window,
                 cx,
-                gpui_component::notification::Notification::warning(tr!(
+                gpui_kit::component::notification::Notification::warning(tr!(
                     "quick-actions-favorite-limit"
                 )),
             );
@@ -367,7 +367,7 @@ impl AviaryApp {
                         )
                     })
                     .child(
-                        Button::new(gpui::ElementId::Name(
+                        Button::new(gpui_kit::ElementId::Name(
                             format!("edit-quick-action-{id}").into(),
                         ))
                         .ghost()
@@ -380,7 +380,7 @@ impl AviaryApp {
                         )),
                     )
                     .child(
-                        Button::new(gpui::ElementId::Name(
+                        Button::new(gpui_kit::ElementId::Name(
                             format!("delete-quick-action-{id}").into(),
                         ))
                         .danger()
@@ -499,7 +499,7 @@ impl AviaryApp {
                     .items_center()
                     .child(div().flex_1().child(tag.display_name))
                     .child(
-                        Button::new(gpui::ElementId::Name(
+                        Button::new(gpui_kit::ElementId::Name(
                             format!("quick-add-tag-{}", tag.id).into(),
                         ))
                         .xsmall()
@@ -518,7 +518,7 @@ impl AviaryApp {
                         })),
                     )
                     .child(
-                        Button::new(gpui::ElementId::Name(
+                        Button::new(gpui_kit::ElementId::Name(
                             format!("quick-remove-tag-{}", tag.id).into(),
                         ))
                         .xsmall()
@@ -878,7 +878,7 @@ impl AviaryApp {
 }
 
 fn set_input(
-    input: &gpui::Entity<InputState>,
+    input: &gpui_kit::Entity<InputState>,
     value: String,
     window: &mut Window,
     cx: &mut Context<AviaryApp>,
@@ -893,7 +893,7 @@ fn new_recipient_input(
     address_book: super::super::addresses::AddressBook,
     window: &mut Window,
     cx: &mut Context<AviaryApp>,
-) -> gpui::Entity<super::super::addresses::RecipientInput> {
+) -> gpui_kit::Entity<super::super::addresses::RecipientInput> {
     cx.new(|cx| {
         super::super::addresses::RecipientInput::new(initial, placeholder, address_book, window, cx)
             .tab_index(tab_index)
@@ -902,8 +902,8 @@ fn new_recipient_input(
 
 fn recipient_row(
     label: &str,
-    input: gpui::Entity<super::super::addresses::RecipientInput>,
-) -> gpui::AnyElement {
+    input: gpui_kit::Entity<super::super::addresses::RecipientInput>,
+) -> gpui_kit::AnyElement {
     h_flex()
         .w_full()
         .min_w_0()
@@ -924,7 +924,7 @@ fn quick_action_summary(action: &QuickAction) -> String {
     tr!("quick-actions-step-count", { count: count }).to_string()
 }
 
-fn quick_action_icon_label(icon: QuickActionIcon) -> gpui::SharedString {
+fn quick_action_icon_label(icon: QuickActionIcon) -> gpui_kit::SharedString {
     match icon {
         QuickActionIcon::Zap => tr!("quick-actions-icon-zap"),
         QuickActionIcon::Forward => tr!("quick-actions-icon-forward"),
@@ -947,7 +947,7 @@ fn tri_state_label(
     unchanged: &'static str,
     yes: &'static str,
     no: &'static str,
-) -> gpui::SharedString {
+) -> gpui_kit::SharedString {
     match value {
         None => tr!(unchanged),
         Some(true) => tr!(yes),
@@ -957,9 +957,9 @@ fn tri_state_label(
 
 fn tri_state_button(
     id: &'static str,
-    label: gpui::SharedString,
+    label: gpui_kit::SharedString,
     read: bool,
-    entity: gpui::Entity<AviaryApp>,
+    entity: gpui_kit::Entity<AviaryApp>,
 ) -> impl IntoElement {
     Button::new(id)
         .outline()

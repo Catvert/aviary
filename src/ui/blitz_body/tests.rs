@@ -436,7 +436,7 @@ fn navigation_cancels_only_reader_renders() {
 }
 
 fn drag_batch(y_from: f32, y_to: f32) -> Vec<DocOp> {
-    let mods = gpui::Modifiers::default();
+    let mods = gpui_kit::Modifiers::default();
     vec![
         DocOp::Ui(UiEvent::PointerDown(blitz_pointer(
             10.0,
@@ -499,7 +499,7 @@ fn html_fragment_height_tracks_signature_content() {
         .expect("signature present");
     let signature = doc.as_ref().get_node(signature).expect("signature node");
     let signature_bottom =
-        signature.absolute_position(0.0, 0.0).y + signature.final_layout.size.height;
+        signature.absolute_position(0.0, 0.0).y + signature.final_layout().size.height;
 
     assert!(
         render_height < 200,
@@ -534,7 +534,7 @@ fn outlook_split_fragment_does_not_reserve_a_browser_viewport() {
         .expect("selector")
         .expect("banner present");
     let banner = fragment_doc.as_ref().get_node(banner).expect("banner node");
-    let banner_bottom = banner.absolute_position(0.0, 0.0).y + banner.final_layout.size.height;
+    let banner_bottom = banner.absolute_position(0.0, 0.0).y + banner.final_layout().size.height;
 
     assert!(
         full_height >= 800,
@@ -599,8 +599,8 @@ fn zoom_reduces_css_viewport_and_reflows_document() {
     )
     .expect("zoomed render");
 
-    let normal_css_width = normal_doc.as_ref().root_element().final_layout.size.width;
-    let zoomed_css_width = zoomed_doc.as_ref().root_element().final_layout.size.width;
+    let normal_css_width = normal_doc.as_ref().root_element().final_layout().size.width;
+    let zoomed_css_width = zoomed_doc.as_ref().root_element().final_layout().size.width;
     let normal_height: f32 = normal.tiles.iter().map(|tile| tile.height).sum();
     let zoomed_height: f32 = zoomed.tiles.iter().map(|tile| tile.height).sum();
 
@@ -719,8 +719,8 @@ fn reused_zoom_matches_a_fresh_document() {
     assert_eq!(reused_scale.render, 1.5);
     assert_eq!(reused_h, fresh_h);
     assert_eq!(
-        reused_doc.as_ref().root_element().final_layout,
-        fresh_doc.as_ref().root_element().final_layout,
+        reused_doc.as_ref().root_element().final_layout(),
+        fresh_doc.as_ref().root_element().final_layout(),
         "reusing the DOM must produce the same zoomed layout"
     );
     assert_eq!(reused.tiles.len(), fresh.tiles.len());
@@ -836,7 +836,7 @@ fn zero_border_does_not_draw_email_tables() {
             .query_selector(selector)
             .expect("selector")
             .unwrap_or_else(|| panic!("{selector} present"));
-        let border = doc.as_ref().get_node(node).unwrap().final_layout.border;
+        let border = doc.as_ref().get_node(node).unwrap().final_layout().border;
         assert_eq!(
             (border.top, border.right, border.bottom, border.left),
             (0.0, 0.0, 0.0, 0.0),
@@ -1332,7 +1332,7 @@ fn image_outside_horizontal_drag_path_is_not_copied() {
         .expect("image");
     let image = doc.as_ref().get_node(logo).expect("image node");
     let position = image.absolute_position(0.0, 0.0);
-    let y = position.y + image.final_layout.size.height / 2.0;
+    let y = position.y + image.final_layout().size.height / 2.0;
 
     let mut state = PaintState::new(render_h, LIGHT_THEME.background_color());
     state.rich_anchor = Some(line);
@@ -1342,7 +1342,7 @@ fn image_outside_horizontal_drag_path_is_not_copied() {
     state.rich_dragged = true;
     assert!(selected_image_nodes(&doc, &state).is_empty());
 
-    state.rich_focus_point = Some((position.x + image.final_layout.size.width + 5.0, y));
+    state.rich_focus_point = Some((position.x + image.final_layout().size.width + 5.0, y));
     assert_eq!(selected_image_nodes(&doc, &state), vec![logo]);
 }
 
@@ -1372,7 +1372,11 @@ fn html_width_attribute_constrains_loaded_table_image() {
         .query_selector("#icon")
         .expect("selector")
         .expect("icon");
-    let layout = doc.as_ref().get_node(icon).expect("icon node").final_layout;
+    let layout = doc
+        .as_ref()
+        .get_node(icon)
+        .expect("icon node")
+        .final_layout();
 
     assert_eq!(layout.size.width, 27.0);
     assert_eq!(layout.size.height, 27.0);
@@ -1438,7 +1442,7 @@ fn inline_block_email_columns_keep_following_sections_in_flow() {
             .unwrap_or_else(|| panic!("{selector} present"));
         let node = doc.as_ref().get_node(id).expect("layout node");
         let position = node.absolute_position(0.0, 0.0);
-        (position.y, position.y + node.final_layout.size.height)
+        (position.y, position.y + node.final_layout().size.height)
     };
     let features = bounds("#features");
     let feature_a = bounds("#feature-a");
@@ -1446,7 +1450,7 @@ fn inline_block_email_columns_keep_following_sections_in_flow() {
     let benefits = bounds("#benefits");
     let benefit_action = bounds("#benefit-action");
     let footer = bounds("#footer");
-    let root_height = doc.as_ref().root_element().final_layout.size.height;
+    let root_height = doc.as_ref().root_element().final_layout().size.height;
 
     assert!(
         feature_a.1 > feature_a.0 && feature_a.1 >= feature_copy.1,
@@ -1550,7 +1554,7 @@ fn partial_repaint_preserves_tile_content() {
 fn simple_click_does_not_repaint() {
     let (_r, mut doc, render_h) =
         render_test_doc("<html><body><p style=\"font-size:16px\">Hello world</p></body></html>");
-    let mods = gpui::Modifiers::default();
+    let mods = gpui_kit::Modifiers::default();
     let down = DocOp::Ui(UiEvent::PointerDown(blitz_pointer(
         10.0,
         18.0,
@@ -1613,9 +1617,9 @@ fn click_on_image_is_detected_for_navigation_suppression() {
         .expect("preview image");
     let node = doc.as_ref().get_node(node_id).expect("preview node");
     let position = node.absolute_position(0.0, 0.0);
-    let x = position.x + node.final_layout.size.width / 2.0;
-    let y = position.y + node.final_layout.size.height / 2.0;
-    let modifiers = gpui::Modifiers::default();
+    let x = position.x + node.final_layout().size.width / 2.0;
+    let y = position.y + node.final_layout().size.height / 2.0;
+    let modifiers = gpui_kit::Modifiers::default();
     let down = DocOp::Ui(UiEvent::PointerDown(blitz_pointer(
         x,
         y,
@@ -1682,7 +1686,7 @@ fn click_on_link_navigates() {
     )
     .expect("Blitz render");
 
-    let mods = gpui::Modifiers::default();
+    let mods = gpui_kit::Modifiers::default();
     let down = DocOp::Ui(UiEvent::PointerDown(blitz_pointer(
         30.0,
         18.0,
@@ -1788,7 +1792,7 @@ fn wide_table_is_constrained_to_pane_width() {
         .as_ref()
         .get_node(table)
         .unwrap()
-        .final_layout
+        .final_layout()
         .size
         .width;
     assert!(
@@ -1827,7 +1831,7 @@ fn percentage_height_email_tables_do_not_create_viewport_sized_gaps() {
             .unwrap_or_else(|| panic!("{selector} present"));
         let node = doc.as_ref().get_node(id).expect("layout node");
         let position = node.absolute_position(0.0, 0.0);
-        (position.y, position.y + node.final_layout.size.height)
+        (position.y, position.y + node.final_layout().size.height)
     };
     let masthead = bounds("#masthead");
     let offer = bounds("#offer");
@@ -1862,7 +1866,7 @@ fn legacy_table_height_grows_to_fit_a_taller_banner() {
             .unwrap_or_else(|| panic!("{selector} present"));
         let node = doc.as_ref().get_node(id).expect("layout node");
         let position = node.absolute_position(0.0, 0.0);
-        (position.y, position.y + node.final_layout.size.height)
+        (position.y, position.y + node.final_layout().size.height)
     };
     let spacer = bounds("#spacer");
     let banner = bounds("#banner");
@@ -1881,7 +1885,7 @@ fn legacy_table_height_grows_to_fit_a_taller_banner() {
 fn floated_email_tables_form_a_two_column_grid() {
     // Marketing emails commonly build grids from sibling tables floated
     // left/right instead of using a single table row. Keep the structure
-    // close to MediaMarkt's category block: a 660 px container, 20 px cell
+    // synthetic: a 660 px container with no border spacing, 20 px cell
     // gutters and four 310 px outer tables wrapping 300 px cards.
     let (_r, doc, _h) = render_test_doc_at_width(
         r#"<html><head><style>
@@ -1889,7 +1893,7 @@ fn floated_email_tables_form_a_two_column_grid() {
             .category { padding-bottom: 20px; }
             .card { height: 250px; }
         </style></head><body>
-            <table align="center" width="660"><tr><td style="padding:0 20px 20px">
+            <table align="center" width="660" style="border-spacing:0"><tr><td style="padding:0 20px 20px">
                 <table id="category-1" class="category" align="left" width="310"
                     style="float:left"><tr><td><table class="card" width="300"><tr><td>One</td></tr></table></td></tr></table>
                 <table id="category-2" class="category" align="right" width="310"
@@ -1970,7 +1974,7 @@ fn outlook_row_height_does_not_overlap_following_content() {
     };
     let banner = node("#banner");
     let following = node("#following");
-    let banner_bottom = banner.absolute_position(0.0, 0.0).y + banner.final_layout.size.height;
+    let banner_bottom = banner.absolute_position(0.0, 0.0).y + banner.final_layout().size.height;
     let following_top = following.absolute_position(0.0, 0.0).y;
 
     assert!(
@@ -1995,7 +1999,7 @@ fn long_text_wraps_inside_its_cell() {
         .query_selector("td")
         .expect("selector")
         .expect("td present");
-    let l = doc.as_ref().get_node(td).unwrap().final_layout;
+    let l = doc.as_ref().get_node(td).unwrap().final_layout();
     assert!(
         l.size.height > 30.0,
         "text should wrap across multiple lines (h = {})",
@@ -2108,7 +2112,7 @@ fn wrapped_text_rows_expand_before_the_next_row() {
             .unwrap_or_else(|| panic!("{selector} present"));
         let node = doc.as_ref().get_node(id).expect("layout node");
         let position = node.absolute_position(0.0, 0.0);
-        (position.y, position.y + node.final_layout.size.height)
+        (position.y, position.y + node.final_layout().size.height)
     };
     let width = |selector: &str| {
         let id = doc
@@ -2119,7 +2123,7 @@ fn wrapped_text_rows_expand_before_the_next_row() {
         doc.as_ref()
             .get_node(id)
             .expect("layout node")
-            .final_layout
+            .final_layout()
             .size
             .width
     };
@@ -2180,13 +2184,13 @@ fn minified_html5_namespace_keeps_text_after_breaks() {
     let notice = node("#notice");
     let after = node("#after");
     let notice_top = notice.absolute_position(0.0, 0.0).y;
-    let notice_bottom = notice_top + notice.final_layout.size.height;
+    let notice_bottom = notice_top + notice.final_layout().size.height;
     let after_top = after.absolute_position(0.0, 0.0).y;
 
     assert!(
-        notice.final_layout.size.height >= 120.0,
+        notice.final_layout().size.height >= 120.0,
         "forced breaks should contribute to paragraph height (h = {})",
-        notice.final_layout.size.height
+        notice.final_layout().size.height
     );
     assert!(
         after_top >= notice_bottom,
@@ -2245,7 +2249,7 @@ fn complex_script_text_wraps_without_spaces() {
         .as_ref()
         .get_node(paragraph)
         .expect("Thai paragraph node")
-        .final_layout
+        .final_layout()
         .size
         .height;
     assert!(
@@ -2284,7 +2288,7 @@ fn incremental_hover_reflows_and_restores_layout() {
     let initial_y = position(&doc, "#following").y;
     let target = position(&doc, "#target");
     let mut state = PaintState::new(height, LIGHT_THEME.background_color());
-    let modifiers = gpui::Modifiers::default();
+    let modifiers = gpui_kit::Modifiers::default();
 
     process_batch(
         &mut doc,

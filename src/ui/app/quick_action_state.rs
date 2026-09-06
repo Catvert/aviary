@@ -11,7 +11,7 @@ use crate::runtime::{QuickActionExecution, QuickActionStep};
 use crate::ui::app::OptimisticMessageRemoval;
 use crate::ui::app::{AviaryApp, QuickActionMessageSnapshot, QuickActionOptimisticEffect};
 use crate::ui::state::{SenderHistoryState, ThreadBodyState};
-use gpui::Context;
+use gpui_kit::Context;
 
 impl AviaryApp {
     /// Apply a quick action containing only reversible mailbox mutations

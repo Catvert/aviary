@@ -390,7 +390,7 @@ impl BlockEditor {
         let spelling_style = HighlightStyle {
             underline: Some(UnderlineStyle {
                 thickness: px(1.),
-                color: Some(gpui::rgb(0xdc_26_26).into()),
+                color: Some(gpui_kit::rgb(0xdc_26_26).into()),
                 wavy: true,
             }),
             ..Default::default()
@@ -423,10 +423,10 @@ impl BlockEditor {
                     return None;
                 }
                 let color = match issue.category {
-                    ProofreadingCategory::Spelling => gpui::rgb(0xdc_26_26),
-                    ProofreadingCategory::Grammar => gpui::rgb(0x25_63_eb),
+                    ProofreadingCategory::Spelling => gpui_kit::rgb(0xdc_26_26),
+                    ProofreadingCategory::Grammar => gpui_kit::rgb(0x25_63_eb),
                     ProofreadingCategory::Typography | ProofreadingCategory::Style => {
-                        gpui::rgb(0xd9_77_06)
+                        gpui_kit::rgb(0xd9_77_06)
                     }
                 };
                 Some((

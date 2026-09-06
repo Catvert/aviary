@@ -20,14 +20,15 @@ use super::app::AviaryApp;
 use super::block_editor::BlockEditor;
 use super::settings::ThemeColorRole;
 use crate::model::{AccountId, IcalRefreshInterval};
-use gpui::{div, prelude::*, px, Context, Entity, Window};
-use gpui_component::{
+use gpui_kit::component::input::TextareaState;
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     color_picker::{ColorPickerEvent, ColorPickerState},
     input::{Input, InputEvent, InputState},
     menu::{DropdownMenu, PopupMenuItem},
     v_flex, ActiveTheme, IconName, Selectable, Sizable, StyledExt,
 };
+use gpui_kit::{div, prelude::*, px, Context, Entity, Window};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -67,11 +68,11 @@ pub struct SettingsUi {
     pub ai_local_base_url: Entity<InputState>,
     pub ai_local_api_key: Entity<InputState>,
     pub ai_local_model: Entity<InputState>,
-    pub ai_system_prompt: Entity<InputState>,
+    pub ai_system_prompt: Entity<TextareaState>,
     pub ai_reader_translation_target: Entity<InputState>,
-    pub ai_reader_translation_prompt: Entity<InputState>,
+    pub ai_reader_translation_prompt: Entity<TextareaState>,
     pub ai_prompt_name: Entity<InputState>,
-    pub ai_prompt_body: Entity<InputState>,
+    pub ai_prompt_body: Entity<TextareaState>,
     pub languagetool_java_path: Entity<InputState>,
     pub languagetool_directory: Entity<InputState>,
     pub languagetool_url: Entity<InputState>,
@@ -225,8 +226,8 @@ impl QuickActionEditorState {
 
 impl RichSnippetEditorState {
     fn new(
-        name_placeholder: gpui::SharedString,
-        body_placeholder: gpui::SharedString,
+        name_placeholder: gpui_kit::SharedString,
+        body_placeholder: gpui_kit::SharedString,
         options: super::settings::MailBodyOptions,
         window: &mut Window,
         cx: &mut Context<AviaryApp>,
@@ -397,15 +398,13 @@ impl SettingsUi {
             }),
             ai_local_model: mk(window, cx, g.ai.local_model.clone()),
             ai_system_prompt: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .multi_line(true)
+                TextareaState::new(window, cx)
                     .rows(6)
                     .default_value(g.ai.system_prompt.clone())
             }),
             ai_reader_translation_target: mk(window, cx, g.ai.reader_translation_target.clone()),
             ai_reader_translation_prompt: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .multi_line(true)
+                TextareaState::new(window, cx)
                     .rows(8)
                     .default_value(g.ai.reader_translation_prompt.clone())
             }),
@@ -413,8 +412,7 @@ impl SettingsUi {
                 InputState::new(window, cx).placeholder(tr!("settings-ai-prompt-name-placeholder"))
             }),
             ai_prompt_body: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .multi_line(true)
+                TextareaState::new(window, cx)
                     .rows(8)
                     .placeholder(tr!("settings-ai-prompt-body-placeholder"))
             }),
@@ -478,7 +476,7 @@ impl AviaryApp {
         &self,
         tab: SettingsTab,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let current = self.current_account_id.clone();
         let accounts: Vec<_> = self
             .ordered_accounts()
@@ -571,7 +569,7 @@ impl AviaryApp {
             .expect("settings UI initialized")
             .tab;
 
-        let content: gpui::AnyElement = match tab {
+        let content: gpui_kit::AnyElement = match tab {
             SettingsTab::Comptes => self.render_settings_accounts(cx).into_any_element(),
             SettingsTab::Signatures => self
                 .render_settings_signatures(window, cx)
@@ -783,12 +781,12 @@ impl AviaryApp {
                 if let Some(ui) = &mut this.settings_ui {
                     ui.tab = target;
                 }
-                this.focus_shortcuts(window);
+                this.focus_shortcuts(window, cx);
                 cx.notify();
             }))
     }
 
-    fn section(&self, title: &str, cx: &Context<Self>) -> gpui::Div {
+    fn section(&self, title: &str, cx: &Context<Self>) -> gpui_kit::Div {
         v_flex().gap_3().mb_6().child(
             div()
                 .text_lg()

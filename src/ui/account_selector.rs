@@ -1,11 +1,11 @@
 use crate::model::AccountId;
-use gpui::{prelude::*, px, Context, ElementId, Entity, Hsla};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     menu::{DropdownMenu, PopupMenuItem},
     Sizable,
 };
+use gpui_kit::{prelude::*, px, Context, ElementId, Entity, Hsla};
 use std::rc::Rc;
 
 #[derive(Clone)]
@@ -52,7 +52,7 @@ pub(super) fn account_selector<T, F>(
     tab_index: isize,
     entity: Entity<T>,
     on_select: F,
-) -> Option<gpui::AnyElement>
+) -> Option<gpui_kit::AnyElement>
 where
     T: 'static,
     F: Fn(&mut T, AccountId, &mut Context<T>) + 'static,
@@ -81,7 +81,7 @@ where
             .overflow_hidden()
             .tooltip(button_label.clone())
             .child(
-                gpui::div()
+                gpui_kit::div()
                     .flex_none()
                     .w(px(8.))
                     .h(px(8.))
@@ -89,7 +89,7 @@ where
                     .bg(selected_label.color),
             )
             .child(
-                gpui::div()
+                gpui_kit::div()
                     .min_w_0()
                     .max_w_full()
                     .truncate()
@@ -110,14 +110,14 @@ where
                                 .gap_2()
                                 .items_center()
                                 .child(
-                                    gpui::div()
+                                    gpui_kit::div()
                                         .flex_none()
                                         .w(px(8.))
                                         .h(px(8.))
                                         .rounded_full()
                                         .bg(color),
                                 )
-                                .child(gpui::div().min_w_0().truncate().child(label.clone()))
+                                .child(gpui_kit::div().min_w_0().truncate().child(label.clone()))
                         })
                         .on_click(move |_, _, cx| {
                             entity.update(cx, |view, cx| {

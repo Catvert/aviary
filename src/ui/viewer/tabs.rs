@@ -8,8 +8,8 @@ use super::super::app::AviaryApp;
 use super::super::icons;
 use super::super::state::{MainView, ViewerTab};
 use crate::model::Message;
-use gpui::{div, prelude::*, px, Context};
-use gpui_component::{h_flex, ActiveTheme, IconName, Sizable};
+use gpui_kit::component::{h_flex, ActiveTheme, IconName, Sizable};
+use gpui_kit::{div, prelude::*, px, Context};
 use std::rc::Rc;
 
 impl AviaryApp {
@@ -20,7 +20,7 @@ impl AviaryApp {
     /// Tab bar at the top of the reader pane. The selection chip returns
     /// to the message selected in the list. With no other tab, the bar is
     /// visuellement absente.
-    pub(super) fn render_message_tabs(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn render_message_tabs(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         if self.mailbox.open_tabs.is_empty() {
             return div().into_any_element();
         }
@@ -28,7 +28,7 @@ impl AviaryApp {
         let theme = cx.theme().clone();
         let active = self.mailbox.active_tab;
 
-        let chip = |el: gpui::Stateful<gpui::Div>, is_active: bool| {
+        let chip = |el: gpui_kit::Stateful<gpui_kit::Div>, is_active: bool| {
             el.px_2()
                 .py_1()
                 .rounded(theme.radius)
@@ -98,7 +98,7 @@ impl AviaryApp {
             row = row.child(
                 chip(
                     div()
-                        .id(gpui::ElementId::Name(format!("msg-tab-{ix}").into()))
+                        .id(gpui_kit::ElementId::Name(format!("msg-tab-{ix}").into()))
                         .flex()
                         .items_center()
                         .gap_1()
@@ -113,11 +113,11 @@ impl AviaryApp {
                 .child(div().max_w(px(180.)).truncate().child(title))
                 .child(
                     div()
-                        .id(gpui::ElementId::Name(format!("msg-tab-x-{ix}").into()))
+                        .id(gpui_kit::ElementId::Name(format!("msg-tab-x-{ix}").into()))
                         .cursor_pointer()
                         .rounded(theme.radius)
                         .hover(|s| s.bg(theme.accent))
-                        .child(gpui_component::Icon::new(IconName::Close).xsmall())
+                        .child(gpui_kit::component::Icon::new(IconName::Close).xsmall())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.close_viewer_tab(ix);

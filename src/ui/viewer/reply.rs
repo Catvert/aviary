@@ -16,8 +16,8 @@ use super::super::app::AviaryApp;
 use super::super::compose::{ComposeInit, ComposeView};
 use super::super::settings::InlineReplySession;
 use crate::model::{AccountId, Message};
-use gpui::{div, prelude::*, AnyElement, Context, Entity, Subscription, Window};
-use gpui_component::ActiveTheme;
+use gpui_kit::component::ActiveTheme;
+use gpui_kit::{div, prelude::*, AnyElement, Context, Entity, Subscription, Window};
 
 pub struct InlineReply {
     pub compose_id: u64,
@@ -118,7 +118,7 @@ impl AviaryApp {
         cx.notify();
     }
 
-    pub(crate) fn inline_reply_session(&self, cx: &gpui::App) -> Option<InlineReplySession> {
+    pub(crate) fn inline_reply_session(&self, cx: &gpui_kit::App) -> Option<InlineReplySession> {
         let reply = self.inline_reply.as_ref()?;
         Some(InlineReplySession {
             displayed_message_id: reply.message_id.clone(),
@@ -163,7 +163,7 @@ impl AviaryApp {
                 .min_w_0()
                 .when_some(self.viewer_layout_width, |el, width| {
                     // `.mx_2()` means 8 px on each side.
-                    let width = gpui::px((width - 16.0).max(40.0).floor());
+                    let width = gpui_kit::px((width - 16.0).max(40.0).floor());
                     el.w(width).min_w(width).max_w(width)
                 })
                 .mx_2()
@@ -230,7 +230,7 @@ impl AviaryApp {
     pub(crate) fn reply_panel_belongs_to(
         reply: &InlineReply,
         account_id: &AccountId,
-        cx: &gpui::App,
+        cx: &gpui_kit::App,
     ) -> bool {
         reply.view.read(cx).belongs_to_account(account_id)
     }

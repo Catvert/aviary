@@ -5,7 +5,7 @@
 //! `icons/mail.svg`, the same files referenced by
 //! composants gpui-component.
 
-use gpui_component::Icon;
+use gpui_kit::component::Icon;
 
 /// Icon by Lucide filename without an extension.
 pub fn app_icon(name: &str) -> Icon {

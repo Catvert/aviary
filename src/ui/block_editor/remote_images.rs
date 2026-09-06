@@ -20,7 +20,7 @@ use crate::blocks::BlockKind;
 use crate::model::InlineImage;
 use crate::runtime::Cmd;
 use crate::ui::inline_images;
-use gpui::{Context, Window};
+use gpui_kit::{Context, Window};
 use std::ops::Range;
 
 /// Cap on how many sources one paste may materialize. A page pasted whole can

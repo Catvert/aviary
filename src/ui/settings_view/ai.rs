@@ -3,16 +3,16 @@
 use super::super::app::AviaryApp;
 use super::labelled;
 use crate::ai::AiProvider;
-use gpui::{div, prelude::*, Context, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
-    input::Input,
+    input::Textarea,
     menu::{DropdownMenu, PopupMenuItem},
     v_flex, ActiveTheme, Sizable,
 };
+use gpui_kit::{div, prelude::*, Context, Window};
 
-fn provider_label(provider: AiProvider) -> gpui::SharedString {
+fn provider_label(provider: AiProvider) -> gpui_kit::SharedString {
     match provider {
         AiProvider::OpenAi => tr!("ai-provider-openai"),
         AiProvider::Anthropic => tr!("ai-provider-anthropic"),
@@ -54,7 +54,7 @@ impl AviaryApp {
                                     .text_color(cx.theme().muted_foreground)
                                     .child(tr!("settings-ai-system-prompt")),
                             )
-                            .child(Input::new(&ui.ai_system_prompt)),
+                            .child(Textarea::new(&ui.ai_system_prompt)),
                     )
                     .child(labelled(
                         &tr!("settings-ai-reader-translation-target"),
@@ -76,7 +76,7 @@ impl AviaryApp {
                                     .text_color(cx.theme().muted_foreground)
                                     .child(tr!("settings-ai-reader-translation-description")),
                             )
-                            .child(Input::new(&ui.ai_reader_translation_prompt)),
+                            .child(Textarea::new(&ui.ai_reader_translation_prompt)),
                     ),
             )
             .child(self.render_ai_save_button(cx))
@@ -240,11 +240,14 @@ impl AviaryApp {
                     .border_color(cx.theme().border)
                     .child(div().flex_1().child(preset.name))
                     .child(
-                        Button::new(gpui::ElementId::Name(format!("edit-ai-prompt-{id}").into()))
-                            .ghost()
-                            .xsmall()
-                            .label(tr!("templates-edit"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                        Button::new(gpui_kit::ElementId::Name(
+                            format!("edit-ai-prompt-{id}").into(),
+                        ))
+                        .ghost()
+                        .xsmall()
+                        .label(tr!("templates-edit"))
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
                                 let preset = this
                                     .settings
                                     .global
@@ -263,10 +266,11 @@ impl AviaryApp {
                                     });
                                 }
                                 cx.notify();
-                            })),
+                            },
+                        )),
                     )
                     .child(
-                        Button::new(gpui::ElementId::Name(
+                        Button::new(gpui_kit::ElementId::Name(
                             format!("delete-ai-prompt-{id}").into(),
                         ))
                         .danger()
@@ -374,7 +378,7 @@ impl AviaryApp {
                         .text_color(cx.theme().muted_foreground)
                         .child(tr!("settings-ai-prompt-template")),
                 )
-                .child(Input::new(&ui.ai_prompt_body).min_h(gpui::px(144.))),
+                .child(Textarea::new(&ui.ai_prompt_body).min_h(gpui_kit::px(144.))),
         )
         .child(
             h_flex()

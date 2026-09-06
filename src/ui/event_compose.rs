@@ -12,8 +12,8 @@ use super::util;
 use crate::model::{AccountId, CalendarEvent, Provider};
 use crate::runtime::Cmd;
 use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
-use gpui::{div, prelude::*, px, Context, Entity, WeakEntity, Window, WindowHandle};
-use gpui_component::{
+use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     date_picker::{DatePicker, DatePickerState},
@@ -21,6 +21,7 @@ use gpui_component::{
     input::{IndentInline, Input, InputState, OutdentInline},
     v_flex, ActiveTheme, Disableable, Root, Sizable, StyledExt,
 };
+use gpui_kit::{div, prelude::*, px, Context, Entity, WeakEntity, Window, WindowHandle};
 use tokio::sync::mpsc;
 
 pub struct EventComposeHandle {
@@ -32,7 +33,7 @@ pub struct EventComposeHandle {
 pub struct InlineEventCompose {
     pub id: u64,
     pub view: Entity<EventComposeView>,
-    _subscription: gpui::Subscription,
+    _subscription: gpui_kit::Subscription,
 }
 
 pub enum EventComposeEvent {
@@ -40,7 +41,7 @@ pub enum EventComposeEvent {
     Detach,
 }
 
-impl gpui::EventEmitter<EventComposeEvent> for EventComposeView {}
+impl gpui_kit::EventEmitter<EventComposeEvent> for EventComposeView {}
 
 #[derive(Clone)]
 enum EventComposeMode {
@@ -88,7 +89,7 @@ impl AviaryApp {
             .collect()
     }
 
-    pub(crate) fn refresh_event_compose_account_options(&mut self, cx: &mut gpui::App) {
+    pub(crate) fn refresh_event_compose_account_options(&mut self, cx: &mut gpui_kit::App) {
         let accounts = self.calendar_compose_accounts();
         for handle in &self.calendar.composes {
             let accounts = accounts.clone();
@@ -191,7 +192,7 @@ impl AviaryApp {
         self.register_inline_event_compose(id, view, window, cx);
     }
 
-    fn sync_calendar_inline_compose_selection(&mut self, cx: &gpui::App) {
+    fn sync_calendar_inline_compose_selection(&mut self, cx: &gpui_kit::App) {
         let selection = self.calendar.inline_compose.as_ref().and_then(|inline| {
             let compose = inline.view.read(cx);
             if compose.mode.is_edit() {
@@ -271,7 +272,6 @@ impl AviaryApp {
                 [
                     compose.subject.clone(),
                     compose.location.clone(),
-                    compose.description.clone(),
                     compose.start_time.clone(),
                     compose.end_time.clone(),
                 ],
@@ -288,6 +288,10 @@ impl AviaryApp {
             cx.observe(&input, |this, _, _| this.session_dirty = true)
                 .detach();
         }
+        cx.observe(&view.read(cx).description.clone(), |this, _, _| {
+            this.session_dirty = true
+        })
+        .detach();
         cx.observe(&attendees, |this, _, _| this.session_dirty = true)
             .detach();
         for date in dates {
@@ -359,11 +363,11 @@ impl AviaryApp {
             view.inline = false;
             cx.notify();
         });
-        let bounds = gpui::Bounds::centered(None, gpui::size(px(620.), px(650.)), cx);
+        let bounds = gpui_kit::Bounds::centered(None, gpui_kit::size(px(620.), px(650.)), cx);
         let window = cx.open_window(
-            gpui::WindowOptions {
-                window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
-                titlebar: Some(gpui::TitlebarOptions {
+            gpui_kit::WindowOptions {
+                window_bounds: Some(gpui_kit::WindowBounds::Windowed(bounds)),
+                titlebar: Some(gpui_kit::TitlebarOptions {
                     title: Some(title.into()),
                     ..Default::default()
                 }),
@@ -423,7 +427,7 @@ impl AviaryApp {
         }
     }
 
-    pub(crate) fn event_compose_sessions(&self, cx: &gpui::App) -> Vec<EventComposeSession> {
+    pub(crate) fn event_compose_sessions(&self, cx: &gpui_kit::App) -> Vec<EventComposeSession> {
         let mut sessions = self.pending_event_composes.clone();
         sessions.extend(self.calendar.composes.iter().filter_map(|handle| {
             let view = handle.view.upgrade()?;
@@ -498,7 +502,7 @@ pub struct EventComposeView {
     subject: Entity<InputState>,
     location: Entity<InputState>,
     attendees: Entity<RecipientInput>,
-    description: Entity<InputState>,
+    description: Entity<TextareaState>,
     start_date: Entity<DatePickerState>,
     start_time: Entity<InputState>,
     end_date: Entity<DatePickerState>,
@@ -524,7 +528,6 @@ impl EventComposeView {
         for (input, placeholder) in [
             (&self.subject, tr!("calendar-event-title-placeholder")),
             (&self.location, tr!("calendar-new-event-location")),
-            (&self.description, tr!("calendar-description-placeholder")),
             (&self.start_time, tr!("calendar-new-event-time-hint")),
             (&self.end_time, tr!("calendar-new-event-time-hint")),
         ] {
@@ -532,6 +535,9 @@ impl EventComposeView {
                 state.set_placeholder(placeholder.clone(), window, cx);
             });
         }
+        self.description.update(cx, |state, cx| {
+            state.set_placeholder(tr!("calendar-description-placeholder"), window, cx)
+        });
         self.attendees.update(cx, |input, cx| {
             input.set_placeholder(
                 tr!("calendar-attendees-placeholder").to_string(),
@@ -676,8 +682,7 @@ impl EventComposeView {
                 .tab_index(60)
             }),
             description: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .multi_line(true)
+                TextareaState::new(window, cx)
                     .rows(6)
                     .placeholder(tr!("calendar-description-placeholder"))
                     .default_value(description.clone())
@@ -719,7 +724,7 @@ impl EventComposeView {
         cx.notify();
     }
 
-    fn selected_date_range(&self, cx: &gpui::App) -> Option<(NaiveDate, NaiveDate)> {
+    fn selected_date_range(&self, cx: &gpui_kit::App) -> Option<(NaiveDate, NaiveDate)> {
         let start = self.start_date.read(cx).date().start()?;
         let end = self.end_date.read(cx).date().start()?;
         Some(if start <= end {
@@ -729,7 +734,7 @@ impl EventComposeView {
         })
     }
 
-    fn to_session(&self, detached: bool, cx: &gpui::App) -> Option<EventComposeSession> {
+    fn to_session(&self, detached: bool, cx: &gpui_kit::App) -> Option<EventComposeSession> {
         if self.submitting {
             return None;
         }
@@ -1058,11 +1063,11 @@ impl Render for EventComposeView {
                     .gap_1()
                     .capture_action(cx.listener(|_, _: &IndentInline, window, cx| {
                         cx.stop_propagation();
-                        window.focus_next();
+                        window.focus_next(cx);
                     }))
                     .capture_action(cx.listener(|_, _: &OutdentInline, window, cx| {
                         cx.stop_propagation();
-                        window.focus_prev();
+                        window.focus_prev(cx);
                     }))
                     .child(
                         div()
@@ -1070,7 +1075,7 @@ impl Render for EventComposeView {
                             .text_color(muted)
                             .child(tr!("calendar-new-event-description")),
                     )
-                    .child(Input::new(&self.description).tab_index(70).h(px(150.))),
+                    .child(Textarea::new(&self.description).tab_index(70).h(px(150.))),
             )
             .when_some(self.error.clone(), |form, error| {
                 form.child(

@@ -5,6 +5,7 @@ mod clip_path;
 mod form_controls;
 mod mask;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -15,13 +16,14 @@ use crate::filters::convert_filters;
 use crate::kurbo_css::NonUniformRoundedRectRadii;
 use crate::layers::LayerManager;
 use crate::sizing::compute_object_fit;
+use crate::text::DrawTextContext;
 use crate::{CustomWidgetSceneMap, SELECTION_COLOR};
 use anyrender::{PaintScene, Scene};
 use blitz_dom::node::{
     ListItemLayout, ListItemLayoutPosition, Marker, NodeData, RasterImageData, TextInputData,
     TextNodeData,
 };
-use blitz_dom::{BaseDocument, ElementData, Node, local_name};
+use blitz_dom::{BaseDocument, ElementData, Node, NodeId, local_name};
 use blitz_traits::devtools::DevtoolSettings;
 
 use style::values::computed::{BorderCornerRadius, ColorOrAuto};
@@ -32,7 +34,8 @@ use style::{
         style_structs::Font,
     },
     values::{
-        computed::{CSSPixelLength, Overflow},
+        computed::{CSSPixelLength, Contain, Overflow},
+        specified::box_::{DisplayInside, DisplayOutside},
         specified::image::ImageRendering,
     },
 };
@@ -41,6 +44,62 @@ use kurbo::{self, Affine, Insets, Point, Rect, Shape, Size, Stroke, Vec2};
 use peniko::{self, Fill, ImageData, ImageSampler};
 use style::values::generics::color::GenericColor;
 use taffy::Layout;
+
+/// A view of the track positions reported by taffy in physical (left-to-right /
+/// top-to-bottom) order. Taffy reports tracks in logical order, which for RTL grid
+/// containers is physically reversed.
+#[derive(Clone, Copy)]
+pub(crate) struct PhysicalTracks<'a> {
+    positions: &'a [taffy::Line<f32>],
+    reversed: bool,
+}
+
+impl<'a> PhysicalTracks<'a> {
+    pub(crate) fn from_tracks<S: taffy::CheapCloneStr>(
+        tracks: &'a taffy::DetailedGridTracksInfo<S>,
+    ) -> Self {
+        let positions = tracks.positions.as_slice();
+        let reversed = positions
+            .first()
+            .zip(positions.last())
+            .is_some_and(|(first, last)| first.start > last.start);
+        Self {
+            positions,
+            reversed,
+        }
+    }
+
+    fn get(self, index: usize) -> taffy::Line<f32> {
+        if self.reversed {
+            self.positions[self.positions.len() - 1 - index]
+        } else {
+            self.positions[index]
+        }
+    }
+
+    /// Iterate track positions in physical order
+    pub(crate) fn iter(self) -> impl ExactSizeIterator<Item = taffy::Line<f32>> + 'a {
+        (0..self.positions.len()).map(move |index| self.get(index))
+    }
+
+    /// The physical start position of the first track
+    pub(crate) fn origin(self) -> f32 {
+        if self.positions.is_empty() {
+            0.0
+        } else {
+            self.get(0).start
+        }
+    }
+
+    /// Total distance from the start of the first track to the end of the last track
+    pub(crate) fn span(self) -> f32 {
+        if self.positions.is_empty() {
+            0.0
+        } else {
+            self.get(self.positions.len() - 1).end - self.get(0).start
+        }
+    }
+}
 
 /// A short-lived struct which holds a bunch of parameters for rendering a scene so
 /// that we don't have to pass them down as parameters
@@ -53,15 +112,17 @@ pub struct BlitzDomPainter<'dom, 'a> {
     pub(crate) initial_x: f64,
     pub(crate) initial_y: f64,
     /// The id of the document's root element (cached to avoid re-resolving it for every element)
-    pub(crate) root_element_id: Option<usize>,
+    pub(crate) root_element_id: Option<NodeId>,
     /// Scrollbar hover/drag state, resolved once per scene like the root element
     #[cfg(feature = "scrollbars")]
     pub(crate) hovered_scrollbar: Option<blitz_dom::node::ScrollbarRef>,
     #[cfg(feature = "scrollbars")]
     pub(crate) scrollbar_drag_target: Option<blitz_dom::node::ScrollbarRef>,
     pub(crate) layer_manager: LayerManager,
+    /// Reusable scratch allocations shared by all text layouts painted for this document.
+    pub(crate) draw_text_context: RefCell<DrawTextContext>,
     /// Cached selection ranges for O(1) lookup: node_id -> (start_offset, end_offset)
-    pub(crate) selection_ranges: HashMap<usize, (usize, usize)>,
+    pub(crate) selection_ranges: HashMap<NodeId, (usize, usize)>,
 
     // Pre-computed `Scene`s for each CustomWidget
     pub(crate) custom_widget_scenes: &'a CustomWidgetSceneMap,
@@ -78,7 +139,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         initial_y: f64,
         custom_widget_scenes: &'a CustomWidgetSceneMap,
     ) -> Self {
-        let selection_ranges: HashMap<usize, (usize, usize)> = dom
+        let selection_ranges: HashMap<NodeId, (usize, usize)> = dom
             .get_text_selection_ranges()
             .into_iter()
             .map(|(node_id, start, end)| (node_id, (start, end)))
@@ -100,6 +161,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             #[cfg(feature = "scrollbars")]
             scrollbar_drag_target: dom.scrollbar_drag_target(),
             layer_manager,
+            draw_text_context: RefCell::new(DrawTextContext::default()),
             selection_ranges,
             custom_widget_scenes,
         }
@@ -119,10 +181,14 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // scene.reset();
         let viewport_scroll = self.dom.as_ref().viewport_scroll();
 
-        let root_element = self.dom.as_ref().root_element();
+        // A document without a root element (e.g. an empty iframe sub-document) has
+        // nothing to paint.
+        let Some(root_element) = self.dom.as_ref().try_root_element() else {
+            return;
+        };
         let root_id = root_element.id;
-        let bg_width = (self.width as f32).max(root_element.final_layout.size.width);
-        let bg_height = (self.height as f32).max(root_element.final_layout.size.height);
+        let bg_width = (self.width as f32).max(root_element.final_layout().size.width);
+        let bg_height = (self.height as f32).max(root_element.final_layout().size.height);
 
         let background_color = {
             let html_color = root_element
@@ -155,7 +221,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         if let Some(bg_color) = background_color {
             let bg_color = bg_color.as_srgb_color();
             let rect = Rect::from_origin_size(
-                (self.initial_x * self.scale, self.initial_y * self.scale),
+                (self.initial_x, self.initial_y),
                 (bg_width as f64, bg_height as f64),
             );
             scene.fill(Fill::NonZero, Affine::IDENTITY, bg_color, None, &rect);
@@ -189,6 +255,24 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 );
             }
         }
+        if let Some(node_id) = self.dom.devtools().highlight_node {
+            // Only nodes with element data have a layout to visualise
+            if self
+                .dom
+                .as_ref()
+                .get_node(node_id)
+                .is_some_and(|node| node.element_data().is_some())
+            {
+                render_debug_overlay(
+                    scene,
+                    self.dom,
+                    node_id,
+                    self.scale,
+                    self.initial_x,
+                    self.initial_y,
+                );
+            }
+        }
     }
 
     /// Renders a node, but is guaranteed that the node is an element
@@ -203,14 +287,14 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
     fn render_element(
         &self,
         scene: &mut impl PaintScene,
-        node_id: usize,
+        node_id: NodeId,
         parent_style_transform: Affine,
         clip_rect: Rect,
     ) {
         let node = &self.dom.as_ref().tree()[node_id];
 
         // Early return if the element is hidden
-        if matches!(node.style.display, taffy::Display::None) {
+        if matches!(node.style().display, taffy::Display::None) {
             return;
         }
 
@@ -240,6 +324,16 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // TODO: account for overflow_x vs overflow_y
         let overflow_x = styles.get_box().overflow_x;
         let overflow_y = styles.get_box().overflow_y;
+        // `contain: paint` (and stronger values like `strict`/`content`) clips the element's
+        // contents to its padding box. Paint containment does not apply to non-atomic inlines
+        // or internal table boxes other than table-cell.
+        let contain_paint = styles.get_box().clone_contain().contains(Contain::PAINT) && {
+            let display = styles.clone_display();
+            let is_internal_table_box_other_than_cell = display.outside()
+                == DisplayOutside::InternalTable
+                && display.inside() != DisplayInside::TableCell;
+            !display.is_inline_flow() && !is_internal_table_box_other_than_cell
+        };
         let is_image = node
             .element_data()
             .and_then(|e| e.raster_image_data())
@@ -259,6 +353,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             && (is_image
                 || is_sub_doc
                 || is_text_input
+                || contain_paint
                 || !matches!(overflow_x, Overflow::Visible)
                 || !matches!(overflow_y, Overflow::Visible));
 
@@ -269,7 +364,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             padding,
             location,
             ..
-        } = node.final_layout;
+        } = *node.final_layout();
         let box_position = Vec2::new(location.x as f64, location.y as f64) * self.scale;
         let box_size = Size::new(size.width as f64, size.height as f64);
         let border_box = Rect::from_origin_size(box_position.to_point(), box_size);
@@ -284,10 +379,10 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         };
 
         // Don't render things that are out of view
-        let overflow = node.scrollable_overflow;
+        let overflow = *node.scrollable_overflow();
         let transform = parent_style_transform
             * Affine::translate(box_position)
-            * node.transform.unwrap_or_default();
+            * node.transform().unwrap_or_default();
 
         let screen_transform = Affine::translate(Vec2 {
             x: -self.initial_x,
@@ -308,7 +403,8 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
         // Optimise zero-area (/very small area) clips by not rendering at all
         let clip_area = content_box_size.width * content_box_size.height;
-        let overflow_area = node.scrollable_overflow.width() * node.scrollable_overflow.height();
+        let overflow_area =
+            node.scrollable_overflow().width() * node.scrollable_overflow().height();
         if should_clip && clip_area < 0.01 && overflow_area < 0.01 {
             return;
         }
@@ -320,7 +416,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
         // Apply CSS transform property (where transforms are 2d)
 
-        let mut cx = self.element_cx(node, node.final_layout, transform, custom_widget_scene);
+        let mut cx = self.element_cx(node, *node.final_layout(), transform, custom_widget_scene);
 
         // If this element clips its overflow it establishes a scrollport: narrow the clip
         // rectangle passed to descendants to the visible (clipped) region so that content
@@ -423,13 +519,13 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                             |scene| {
                                 // Now that background has been drawn, offset pos and cx in order to draw our contents scrolled
                                 let content_position = Point {
-                                    x: content_position.x - node.scroll_offset.x,
-                                    y: content_position.y - node.scroll_offset.y,
+                                    x: content_position.x - node.scroll_offset().x,
+                                    y: content_position.y - node.scroll_offset().y,
                                 };
 
                                 cx.transform = cx.transform.then_translate(Vec2 {
-                                    x: -node.scroll_offset.x * self.scale,
-                                    y: -node.scroll_offset.y * self.scale,
+                                    x: -node.scroll_offset().x * self.scale,
+                                    y: -node.scroll_offset().y * self.scale,
                                 });
                                 cx.draw_image(scene);
                                 #[cfg(feature = "svg")]
@@ -465,7 +561,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
     fn render_node(
         &self,
         scene: &mut impl PaintScene,
-        node_id: usize,
+        node_id: NodeId,
         parent_style_transform: Affine,
         clip_rect: Rect,
     ) {
@@ -480,9 +576,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 // (they should always be rendered as part of an inline layout)
                 // unreachable!()
             }
-            NodeData::Document => {}
+            NodeData::Document(_) => {}
             // NodeData::Doctype => {}
-            NodeData::Comment => {} // NodeData::ProcessingInstruction { .. } => {}
+            NodeData::Comment { .. } => {} // NodeData::ProcessingInstruction { .. } => {}
         }
     }
 
@@ -494,13 +590,13 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         custom_widget_scene: Option<&'a Scene>,
     ) -> ElementCx<'dom, 'a> {
         let style = node
-            .stylo_element_data
+            .stylo_element_data()
             .primary_styles()
             .as_ref()
             .map(|styles| (*styles).clone())
-            .unwrap_or(
-                ComputedValues::initial_values_with_font_override(Font::initial_values()).to_arc(),
-            );
+            .unwrap_or_else(|| {
+                ComputedValues::initial_values_with_font_override(Font::initial_values()).to_arc()
+            });
 
         let scale = self.scale;
 
@@ -739,12 +835,15 @@ impl ElementCx<'_, '_> {
             }
 
             // Render text
+            let mut draw_text_context = self.context.draw_text_context.borrow_mut();
             crate::text::stroke_text(
                 scene,
                 text_layout.layout.lines(),
                 self.context.dom,
                 transform,
                 self.scale,
+                self.node.id,
+                &mut draw_text_context,
             );
         }
     }
@@ -802,12 +901,15 @@ impl ElementCx<'_, '_> {
             }
 
             // Render text
+            let mut draw_text_context = self.context.draw_text_context.borrow_mut();
             crate::text::stroke_text(
                 scene,
                 input_data.editor.try_layout().unwrap().lines(),
                 self.context.dom,
                 transform,
                 self.scale,
+                self.node.id,
+                &mut draw_text_context,
             );
         }
     }
@@ -847,12 +949,15 @@ impl ElementCx<'_, '_> {
             let transform =
                 self.transform * Affine::translate((pos.x * self.scale, pos.y * self.scale));
 
+            let mut draw_text_context = self.context.draw_text_context.borrow_mut();
             crate::text::stroke_text(
                 scene,
                 layout.lines(),
                 self.context.dom,
                 transform,
                 self.scale,
+                self.node.id,
+                &mut draw_text_context,
             );
         }
     }
@@ -1040,8 +1145,10 @@ impl ElementCx<'_, '_> {
             let shape = &self.frame.border_box;
             let stroke = Stroke::new(self.scale);
 
-            let stroke_color = match self.node.style.display {
-                taffy::Display::Block => Color::new([1.0, 0.0, 0.0, 1.0]),
+            let stroke_color = match self.node.style().display {
+                taffy::Display::Block | taffy::Display::FlowRoot => {
+                    Color::new([1.0, 0.0, 0.0, 1.0])
+                }
                 taffy::Display::Flex => Color::new([0.0, 1.0, 0.0, 1.0]),
                 taffy::Display::Grid => Color::new([0.0, 0.0, 1.0, 1.0]),
                 taffy::Display::None => Color::new([0.0, 0.0, 1.0, 1.0]),

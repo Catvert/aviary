@@ -6,13 +6,13 @@ use crate::ui::app::AviaryApp;
 use crate::ui::compose::ComposeInit;
 use crate::ui::settings::ThemeMode;
 use crate::ui::state::{AuthState, MainView};
-use gpui::{div, prelude::*, Context, Render, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonGroup, ButtonVariants},
     h_flex,
     menu::{DropdownMenu, PopupMenuItem},
     ActiveTheme, IconName, Root, Selectable, Sizable,
 };
+use gpui_kit::{div, prelude::*, Context, Render, Window};
 
 impl AviaryApp {
     pub(crate) fn render_topbar(
@@ -79,7 +79,7 @@ impl AviaryApp {
                         .on_click(move |_, window, cx| {
                             preferences_entity.update(cx, |this, cx| {
                                 this.enter_main_view(MainView::Settings, cx);
-                                this.focus_shortcuts(window);
+                                this.focus_shortcuts(window, cx);
                             });
                         }),
                 )
@@ -155,7 +155,7 @@ impl AviaryApp {
             MainView::Settings => div().into_any_element(),
         });
 
-        gpui_component::TitleBar::new()
+        gpui_kit::component::TitleBar::new()
             .child(
                 h_flex()
                     .gap_2()
@@ -296,7 +296,7 @@ impl AviaryApp {
                             _ => MainView::Settings,
                         };
                         this.enter_main_view(view, cx);
-                        this.focus_shortcuts(window);
+                        this.focus_shortcuts(window, cx);
                     })),
             )
     }
@@ -321,7 +321,7 @@ impl Render for AviaryApp {
                 MainView::Settings => self.render_settings(window, cx).into_any_element(),
             }
         };
-        gpui_component::v_flex()
+        gpui_kit::component::v_flex()
             .key_context(crate::ui::shortcuts::main_context(
                 self.settings.global.vim_keybindings,
             ))

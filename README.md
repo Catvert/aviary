@@ -1,9 +1,8 @@
 # Aviary
 
 Desktop email, calendar and kanban client for **Microsoft 365**, **Gmail** and
-**IMAP/SMTP**, written in Rust on [gpui](https://www.gpui.rs/) (Zed's UI
-framework) with [gpui-component](https://github.com/longbridge/gpui-component)
-widgets. Linux is the primary target; macOS and Windows build and run, with the
+**IMAP/SMTP**, written in Rust with [GPUI Kit](https://gpui-kit.com/) 0.6
+(GPUI and its styled component library). Linux is the primary target; macOS and Windows build and run, with the
 gaps listed under [Platforms](#platforms).
 
 - **Mail** — unified or per-account inbox, virtualized message list, folder
@@ -117,15 +116,15 @@ for any change.
 
 `patches/` holds four crates pinned through `[patch.crates-io]`. They are
 minimal buildable copies of upstream, not forks to develop in — see
-`patches/README.md` for the exact versions and the six modified files. The two
+`patches/README.md` for the exact versions and the modified files. The two
 non-obvious ones:
 
 - **`stylo_derive`** — gpui enables `log/kv_serde`, which pulls `serde_fmt` into
   the graph; its `impl From<serde_fmt::Error> for fmt::Error` makes the `?` in
   Stylo's `derive(ToCss)` output ambiguous. The vendored copy replaces those `?`
   with explicit `match`es.
-- **`fontique`** is a direct dependency purely to select `fontconfig-dlopen`,
-  matching the API gpui already selected through font-kit.
+- **`fontique`** shares Blitz's font collection and source cache. GPUI Kit 0.6
+  uses linked fontconfig; do not enable the former `fontconfig-dlopen` override.
 
 Bumping Blitz or Stylo means re-copying the new crate sources and re-applying
 those changes.

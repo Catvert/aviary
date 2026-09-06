@@ -19,7 +19,7 @@ pub(super) fn push_pointer(
     phase: PointerPhase,
     position: Point<Pixels>,
     primary_down: bool,
-    mods: &gpui::Modifiers,
+    mods: &gpui_kit::Modifiers,
 ) {
     let op = {
         let Some(e) = cx.default_global::<BlitzCache>().entries.get_mut(key) else {
@@ -51,7 +51,7 @@ pub(super) fn blitz_pointer(
     x: f32,
     y: f32,
     buttons: MouseEventButtons,
-    mods: &gpui::Modifiers,
+    mods: &gpui_kit::Modifiers,
 ) -> BlitzPointerEvent {
     BlitzPointerEvent {
         id: BlitzPointerId::Mouse,
@@ -73,7 +73,7 @@ pub(super) fn blitz_pointer(
     }
 }
 
-pub(super) fn kb_mods(m: &gpui::Modifiers) -> keyboard_types::Modifiers {
+pub(super) fn kb_mods(m: &gpui_kit::Modifiers) -> keyboard_types::Modifiers {
     let mut out = keyboard_types::Modifiers::empty();
     if m.control {
         out |= keyboard_types::Modifiers::CONTROL;
@@ -132,7 +132,7 @@ pub(super) fn pump(key: String, cx: &mut App) {
                 ))
             });
             let (live, batch) = match step {
-                Ok(Some(p)) => p,
+                Some(p) => p,
                 _ => break,
             };
             let (out_tx, out_rx) = oneshot::channel();
@@ -141,14 +141,14 @@ pub(super) fn pump(key: String, cx: &mut App) {
             let Some((actor_target, outcome)) = outcome else {
                 // Document thread ended (entry evicted or re-rendered): release
                 // the pump so a future event can restart it.
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     if let Some(e) = cx.default_global::<BlitzCache>().entries.get_mut(&key) {
                         e.pump_running = false;
                     }
                 });
                 break;
             };
-            let applied = cx.update(|cx| {
+            cx.update(|cx| {
                 let mut changed = false;
                 let mut images_to_drop = Vec::new();
                 let mut owner_to_notify = None;
@@ -228,9 +228,6 @@ pub(super) fn pump(key: String, cx: &mut App) {
                     }
                 }
             });
-            if applied.is_err() {
-                break;
-            }
         }
     })
     .detach();
@@ -392,7 +389,10 @@ pub(super) fn process_batch(
     }
 }
 
-pub(super) fn safe_link_from_node(doc: &HtmlDocument, mut node_id: usize) -> Option<String> {
+pub(super) fn safe_link_from_node(
+    doc: &HtmlDocument,
+    mut node_id: blitz_dom::NodeId,
+) -> Option<String> {
     loop {
         let node = doc.as_ref().get_node(node_id)?;
         if let Some(element) = node.element_data() {
@@ -412,8 +412,8 @@ pub(super) fn safe_link_from_node(doc: &HtmlDocument, mut node_id: usize) -> Opt
 
 pub(super) fn raster_image_from_node(
     doc: &HtmlDocument,
-    mut node_id: usize,
-) -> Option<(usize, &RasterImageData)> {
+    mut node_id: blitz_dom::NodeId,
+) -> Option<(blitz_dom::NodeId, &RasterImageData)> {
     loop {
         let node = doc.as_ref().get_node(node_id)?;
         if let Some(image) = node
@@ -430,12 +430,14 @@ pub(super) fn raster_image_at(
     doc: &HtmlDocument,
     x: f32,
     y: f32,
-) -> Option<(usize, &RasterImageData)> {
+) -> Option<(blitz_dom::NodeId, &RasterImageData)> {
     let node_id = doc.as_ref().hit(x, y)?.node_id;
     raster_image_from_node(doc, node_id)
 }
 
-pub(super) fn hovered_raster_image_node(doc: &HtmlDocument) -> Option<(usize, &RasterImageData)> {
+pub(super) fn hovered_raster_image_node(
+    doc: &HtmlDocument,
+) -> Option<(blitz_dom::NodeId, &RasterImageData)> {
     raster_image_from_node(doc, doc.as_ref().get_hover_node_id()?)
 }
 
@@ -514,7 +516,7 @@ pub(super) fn copy_selection(key: String, cx: &mut App) {
         }
         let content = out_rx.await.ok().flatten();
         if let Some(content) = content {
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 crate::ui::rich_clipboard::write(content.text, content.html, content.images, cx);
             });
         }

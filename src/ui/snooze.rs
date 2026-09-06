@@ -14,8 +14,8 @@
 use super::app::AviaryApp;
 use crate::model::{AccountId, MessageRef};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Utc, Weekday};
-use gpui::{prelude::*, Context, Window};
-use gpui_component::{notification::Notification, WindowExt};
+use gpui_kit::component::{notification::Notification, WindowExt};
+use gpui_kit::{prelude::*, Context, Window};
 
 /// How often deadlines are checked. A message put off until tomorrow morning
 /// needs no second precision, and a plain tick needs no re-arming when the
@@ -37,7 +37,7 @@ pub(crate) enum SnoozePreset {
 impl SnoozePreset {
     pub(crate) const ALL: [Self; 3] = [Self::ThisEvening, Self::Tomorrow, Self::NextWeek];
 
-    pub(crate) fn label(self) -> gpui::SharedString {
+    pub(crate) fn label(self) -> gpui_kit::SharedString {
         match self {
             Self::ThisEvening => tr!("snooze-this-evening"),
             Self::Tomorrow => tr!("snooze-tomorrow"),
@@ -119,12 +119,12 @@ pub(crate) fn morning_of(date: chrono::NaiveDate) -> Option<DateTime<Utc>> {
 /// the same deadlines — and so a preset that has passed disappears everywhere
 /// at once rather than in whichever of the three was written last.
 pub(super) fn append_snooze_menu(
-    mut menu: gpui_component::menu::PopupMenu,
-    entity: &gpui::Entity<AviaryApp>,
+    mut menu: gpui_kit::component::menu::PopupMenu,
+    entity: &gpui_kit::Entity<AviaryApp>,
     targets: &[MessageRef],
     offline: bool,
-) -> gpui_component::menu::PopupMenu {
-    use gpui_component::menu::PopupMenuItem;
+) -> gpui_kit::component::menu::PopupMenu {
+    use gpui_kit::component::menu::PopupMenuItem;
 
     let now = Local::now();
     for preset in SnoozePreset::ALL {
@@ -172,7 +172,7 @@ impl AviaryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use gpui_component::date_picker::{DatePicker, DatePickerState};
+        use gpui_kit::component::date_picker::{DatePicker, DatePickerState};
 
         if targets.is_empty() {
             return;
@@ -191,7 +191,11 @@ impl AviaryApp {
             let targets = targets.clone();
             dialog
                 .title(tr!("snooze-pick-date-title"))
-                .confirm()
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
                 .child(DatePicker::new(&picker))
                 .on_ok(move |_, window, cx| {
                     let Some(date) = picker.read(cx).date().start() else {

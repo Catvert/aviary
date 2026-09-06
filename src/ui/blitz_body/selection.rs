@@ -2,9 +2,10 @@
 
 use super::{PaintState, SelectedContent};
 use crate::{model::InlineImage, ui::util};
+use blitz_dom::NodeId;
 use blitz_html::HtmlDocument;
 
-fn dom_element_id(doc: &HtmlDocument, mut id: usize) -> Option<usize> {
+fn dom_element_id(doc: &HtmlDocument, mut id: NodeId) -> Option<NodeId> {
     loop {
         let node = doc.get_node(id)?;
         if node.is_element() {
@@ -14,7 +15,7 @@ fn dom_element_id(doc: &HtmlDocument, mut id: usize) -> Option<usize> {
     }
 }
 
-fn element_chain(doc: &HtmlDocument, id: usize) -> Vec<usize> {
+fn element_chain(doc: &HtmlDocument, id: NodeId) -> Vec<NodeId> {
     let Some(mut current) = dom_element_id(doc, id) else {
         return Vec::new();
     };
@@ -40,9 +41,9 @@ fn element_chain(doc: &HtmlDocument, id: usize) -> Vec<usize> {
 /// elements are included in full to retain their styles and images.
 fn selected_fragment_roots(
     doc: &HtmlDocument,
-    anchor: usize,
-    focus: usize,
-) -> Option<(usize, Vec<usize>)> {
+    anchor: NodeId,
+    focus: NodeId,
+) -> Option<(NodeId, Vec<NodeId>)> {
     let anchor_chain = element_chain(doc, anchor);
     let focus_chain = element_chain(doc, focus);
     let common_len = anchor_chain
@@ -73,9 +74,9 @@ fn selected_fragment_roots(
 
 pub(super) fn selected_html(
     doc: &HtmlDocument,
-    anchor: usize,
-    focus: usize,
-) -> Option<(String, Vec<usize>)> {
+    anchor: NodeId,
+    focus: NodeId,
+) -> Option<(String, Vec<NodeId>)> {
     let (common, roots) = selected_fragment_roots(doc, anchor, focus)?;
     if roots.len() == 1 && roots[0] == common {
         return Some((doc.get_node(common)?.outer_html(), roots));
@@ -140,7 +141,7 @@ fn selected_text_html(doc: &HtmlDocument) -> Option<String> {
     (!html.trim().is_empty()).then_some(html)
 }
 
-fn selection_endpoints(doc: &HtmlDocument, state: &PaintState) -> Option<(usize, usize)> {
+fn selection_endpoints(doc: &HtmlDocument, state: &PaintState) -> Option<(NodeId, NodeId)> {
     if state.rich_dragged {
         return Some((state.rich_anchor?, state.rich_focus?));
     }
@@ -148,8 +149,8 @@ fn selection_endpoints(doc: &HtmlDocument, state: &PaintState) -> Option<(usize,
     Some((ranges.first()?.0, ranges.last()?.0))
 }
 
-fn collect_image_nodes(doc: &HtmlDocument, roots: &[usize]) -> Vec<usize> {
-    fn visit(doc: &HtmlDocument, id: usize, images: &mut Vec<usize>) {
+fn collect_image_nodes(doc: &HtmlDocument, roots: &[NodeId]) -> Vec<NodeId> {
+    fn visit(doc: &HtmlDocument, id: NodeId, images: &mut Vec<NodeId>) {
         let Some(node) = doc.get_node(id) else {
             return;
         };
@@ -171,7 +172,7 @@ fn collect_image_nodes(doc: &HtmlDocument, roots: &[usize]) -> Vec<usize> {
     images
 }
 
-pub(super) fn selected_image_nodes(doc: &HtmlDocument, state: &PaintState) -> Vec<usize> {
+pub(super) fn selected_image_nodes(doc: &HtmlDocument, state: &PaintState) -> Vec<NodeId> {
     let Some((anchor, focus)) = selection_endpoints(doc, state) else {
         return Vec::new();
     };
@@ -193,8 +194,8 @@ pub(super) fn selected_image_nodes(doc: &HtmlDocument, state: &PaintState) -> Ve
             return false;
         };
         let position = node.absolute_position(0.0, 0.0);
-        let center_x = position.x + node.final_layout.size.width / 2.0;
-        let center_y = position.y + node.final_layout.size.height / 2.0;
+        let center_x = position.x + node.final_layout().size.width / 2.0;
+        let center_y = position.y + node.final_layout().size.height / 2.0;
         if (focus_y - anchor_y).abs() <= 8.0 {
             let (left, right) = if anchor_x <= focus_x {
                 (anchor_x, focus_x)
@@ -204,7 +205,7 @@ pub(super) fn selected_image_nodes(doc: &HtmlDocument, state: &PaintState) -> Ve
             center_x >= left
                 && center_x <= right
                 && anchor_y >= position.y - 4.0
-                && anchor_y <= position.y + node.final_layout.size.height + 4.0
+                && anchor_y <= position.y + node.final_layout().size.height + 4.0
         } else {
             let (top, bottom) = if anchor_y <= focus_y {
                 (anchor_y, focus_y)

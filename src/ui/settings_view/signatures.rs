@@ -2,7 +2,7 @@
 
 use super::super::app::AviaryApp;
 use super::rich_snippets::SnippetKind;
-use gpui::{prelude::*, Context, Window};
+use gpui_kit::{prelude::*, Context, Window};
 
 impl AviaryApp {
     pub(super) fn render_settings_signatures(

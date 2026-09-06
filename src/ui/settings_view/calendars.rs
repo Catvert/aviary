@@ -3,8 +3,7 @@
 use super::super::app::AviaryApp;
 use crate::model::{AccountId, IcalRefreshInterval, IcalSubscription};
 use crate::runtime::Cmd;
-use gpui::{div, prelude::*, Context, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     color_picker::ColorPicker,
     h_flex,
@@ -13,6 +12,7 @@ use gpui_component::{
     switch::Switch,
     v_flex, ActiveTheme, Disableable, Sizable, StyledExt, WindowExt,
 };
+use gpui_kit::{div, prelude::*, Context, Window};
 
 impl AviaryApp {
     pub(super) fn render_settings_calendars(
@@ -262,7 +262,11 @@ impl AviaryApp {
             let subscription_id = subscription_id.clone();
             dialog
                 .title(tr!("settings-ical-delete-title"))
-                .confirm()
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
                 .child(div().child(tr!("settings-ical-delete-confirm")))
                 .on_ok(move |_, window, cx| {
                     entity.update(cx, |this, cx| {
@@ -356,8 +360,8 @@ impl AviaryApp {
                             .items_center()
                             .child(
                                 div()
-                                    .w(gpui::px(10.))
-                                    .h(gpui::px(10.))
+                                    .w(gpui_kit::px(10.))
+                                    .h(gpui_kit::px(10.))
                                     .rounded_full()
                                     .bg(super::super::util::packed_color(subscription.color)),
                             )
@@ -380,7 +384,7 @@ impl AviaryApp {
                                     ),
                             )
                             .child(
-                                Button::new(gpui::ElementId::Name(
+                                Button::new(gpui_kit::ElementId::Name(
                                     format!("ical-refresh-{id}").into(),
                                 ))
                                 .ghost()
@@ -398,7 +402,7 @@ impl AviaryApp {
                                 )),
                             )
                             .child(
-                                Button::new(gpui::ElementId::Name(
+                                Button::new(gpui_kit::ElementId::Name(
                                     format!("ical-edit-{id}").into(),
                                 ))
                                 .ghost()
@@ -412,7 +416,7 @@ impl AviaryApp {
                                 )),
                             )
                             .child(
-                                Button::new(gpui::ElementId::Name(
+                                Button::new(gpui_kit::ElementId::Name(
                                     format!("ical-delete-{id}").into(),
                                 ))
                                 .ghost()
@@ -554,7 +558,7 @@ fn normalize_ical_url(raw: &str) -> Option<String> {
     .then(|| url.to_string())
 }
 
-fn ical_refresh_label(refresh: IcalRefreshInterval) -> gpui::SharedString {
+fn ical_refresh_label(refresh: IcalRefreshInterval) -> gpui_kit::SharedString {
     match refresh {
         IcalRefreshInterval::Manual => tr!("settings-ical-frequency-manual"),
         IcalRefreshInterval::FifteenMinutes => tr!("settings-ical-frequency-15m"),

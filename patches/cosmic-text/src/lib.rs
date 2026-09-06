@@ -4,7 +4,7 @@
 //!
 //! This library provides advanced text handling in a generic way. It provides abstractions for
 //! shaping, font discovery, font fallback, layout, rasterization, and editing. Shaping utilizes
-//! rustybuzz, font discovery utilizes fontdb, and the rasterization is optional and utilizes
+//! harfrust, font discovery utilizes fontdb, and the rasterization is optional and utilizes
 //! swash. The other features are developed internal to this library.
 //!
 //! It is recommended that you start by creating a [`FontSystem`], after which you can create a
@@ -29,17 +29,12 @@
 //! // Borrow buffer together with the font system for more convenient method calls
 //! let mut buffer = buffer.borrow_with(&mut font_system);
 //!
-//! // Set a size for the text buffer, in pixels
-//! buffer.set_size(Some(80.0), Some(25.0));
-//!
 //! // Attributes indicate what font to choose
 //! let attrs = Attrs::new();
 //!
-//! // Add some text!
-//! buffer.set_text("Hello, Rust! 🦀\n", &attrs, Shaping::Advanced);
-//!
-//! // Perform shaping as desired
-//! buffer.shape_until_scroll(true);
+//! // Set size and text
+//! buffer.set_size(Some(80.0), Some(25.0));
+//! buffer.set_text("Hello, Rust! 🦀\n", &attrs, Shaping::Advanced, None);
 //!
 //! // Inspect the output runs
 //! for run in buffer.layout_runs() {
@@ -128,6 +123,9 @@ mod layout;
 
 pub use self::line_ending::*;
 mod line_ending;
+
+pub use self::render::*;
+mod render;
 
 pub use self::shape::*;
 mod shape;

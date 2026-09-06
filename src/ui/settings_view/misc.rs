@@ -3,14 +3,14 @@
 use super::super::app::AviaryApp;
 use super::labelled;
 use crate::runtime::Cmd;
-use gpui::{div, prelude::*, Context};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::Input,
     switch::Switch,
     v_flex, ActiveTheme, Sizable,
 };
+use gpui_kit::{div, prelude::*, Context};
 
 impl AviaryApp {
     pub(super) fn render_settings_inbox(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -347,14 +347,16 @@ impl AviaryApp {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 let _ = this;
                                 let entity = cx.entity();
-                                gpui_component::WindowExt::open_dialog(
+                                gpui_kit::component::WindowExt::open_dialog(
                                     window,
                                     cx,
                                     move |dialog, _window, _cx| {
                                         let entity = entity.clone();
                                         dialog
                                             .title(tr!("settings-factory-reset-title"))
-                                            .confirm()
+                                            .button_props(gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true))
+                .overlay_closable(false)
+                .close_button(false)
                                             .child(
                                                 div().child(tr!(
                                                     "settings-factory-reset-confirm-short"
@@ -428,7 +430,7 @@ impl AviaryApp {
                     .items_center()
                     .child(div().flex_1().text_sm().child(address.clone()))
                     .child(
-                        Button::new(gpui::ElementId::Name(
+                        Button::new(gpui_kit::ElementId::Name(
                             format!("blocked-sender-remove-{address}").into(),
                         ))
                         .ghost()
@@ -448,7 +450,11 @@ impl AviaryApp {
 
     /// Typing an address that is not one leaves the field alone rather than
     /// storing something that can never match a `From` header.
-    fn add_blocked_sender_from_input(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+    fn add_blocked_sender_from_input(
+        &mut self,
+        window: &mut gpui_kit::Window,
+        cx: &mut Context<Self>,
+    ) {
         let input = self
             .settings_ui
             .as_ref()
@@ -466,7 +472,7 @@ impl AviaryApp {
 
     pub(super) fn perform_factory_reset(
         &mut self,
-        window: &mut gpui::Window,
+        window: &mut gpui_kit::Window,
         cx: &mut Context<Self>,
     ) {
         for a in self.accounts.clone() {

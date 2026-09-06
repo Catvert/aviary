@@ -20,11 +20,11 @@
 
 use super::{BlockEditor, InsertLink};
 use crate::ui::components::display_map::FoldableRange;
-use gpui::{prelude::*, Context, Entity, Window};
-use gpui_component::{
+use gpui_kit::component::{
     input::{Input, InputState as TextField},
     v_flex, ActiveTheme as _, WindowExt as _,
 };
+use gpui_kit::{prelude::*, Context, Entity, Window};
 use std::ops::Range;
 
 impl BlockEditor {
@@ -90,7 +90,11 @@ impl BlockEditor {
                     true => tr!("compose-link-edit-title"),
                     false => tr!("compose-link-title"),
                 })
-                .confirm()
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
                 .child(
                     v_flex()
                         .gap_2()
@@ -179,8 +183,8 @@ impl BlockEditor {
     }
 }
 
-fn field_label(text: impl Into<gpui::SharedString>, cx: &gpui::App) -> impl IntoElement {
-    gpui::div()
+fn field_label(text: impl Into<gpui_kit::SharedString>, cx: &gpui_kit::App) -> impl IntoElement {
+    gpui_kit::div()
         .text_xs()
         .text_color(cx.theme().muted_foreground)
         .child(text.into())

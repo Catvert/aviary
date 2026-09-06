@@ -6,15 +6,15 @@ use crate::proofreading::{
     LanguageToolCoverage, LanguageToolLocalSource, LanguageToolMode, LanguageToolState,
 };
 use crate::runtime::Cmd;
-use gpui::{div, prelude::*, Context, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     switch::Switch,
     v_flex, ActiveTheme, Disableable, Sizable, StyledExt,
 };
+use gpui_kit::{div, prelude::*, Context, Window};
 
-fn status_label(state: LanguageToolState) -> gpui::SharedString {
+fn status_label(state: LanguageToolState) -> gpui_kit::SharedString {
     match state {
         LanguageToolState::Disabled => tr!("languagetool-status-disabled"),
         LanguageToolState::NotInstalled => tr!("languagetool-status-not-installed"),
@@ -76,7 +76,7 @@ impl AviaryApp {
     }
 
     fn pick_languagetool_path(&mut self, java: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+        let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
             files: java,
             directories: true,
             multiple: false,

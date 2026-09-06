@@ -8,8 +8,8 @@
 use super::folders::folder_display_label;
 use crate::model::{AccountId, MailFolder, MessageHeader, MessageRef, Provider};
 use crate::ui::app::AviaryApp;
-use gpui::{Context, Entity, SharedString, Window};
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::{Context, Entity, SharedString, Window};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]

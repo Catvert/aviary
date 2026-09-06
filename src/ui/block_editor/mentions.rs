@@ -5,7 +5,7 @@
 
 use super::super::addresses::{mention_name, AddressBook, RecipientInput};
 use super::super::components::block_input::{BlockCompletionItem, BlockCompletionProvider};
-use gpui::Entity;
+use gpui_kit::Entity;
 use std::rc::Rc;
 
 const MAX_SUGGESTIONS: usize = 8;

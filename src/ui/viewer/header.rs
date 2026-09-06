@@ -32,7 +32,7 @@ impl AviaryApp {
         id: String,
         compact: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let raw = raw.trim();
         let email = util::extract_email(raw);
         let label = if let Some(email) = &email {
@@ -55,7 +55,7 @@ impl AviaryApp {
         let has_email = email.is_some();
         let app = cx.entity();
 
-        Button::new(gpui::ElementId::Name(id.into()))
+        Button::new(gpui_kit::ElementId::Name(id.into()))
             .outline()
             .rounded(px(999.))
             .xsmall()
@@ -65,7 +65,7 @@ impl AviaryApp {
                 let address = copy_value.clone();
                 menu = menu.item(PopupMenuItem::new(tr!("viewer-address-copy")).on_click(
                     move |_, window, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(address.clone()));
+                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(address.clone()));
                         window.push_notification(
                             tr!("viewer-address-copied", { address: address.clone() }),
                             cx,
@@ -109,12 +109,12 @@ impl AviaryApp {
 
     pub(super) fn render_viewer_address_row(
         &self,
-        label: gpui::SharedString,
+        label: gpui_kit::SharedString,
         addresses: &[String],
         id_prefix: &str,
         compact: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let mut pills = h_flex().flex_1().min_w_0().flex_wrap().gap_1().gap_y_1();
         for (index, address) in addresses.iter().enumerate() {
             pills = pills.child(self.render_viewer_address_pill(
@@ -334,7 +334,7 @@ impl AviaryApp {
         m: &Message,
         chrome: &ViewerChrome,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let compact_header = chrome.compact;
         // Actions have a substantial intrinsic width. If they stay on the same
         // row in a narrow pane, the `.flex_1()` subject is compressed until it

@@ -20,7 +20,7 @@
 //!     .with_hover_motion(cx, id, |view| &mut view.hover)
 //! ```
 
-use gpui::{
+use gpui_kit::{
     point, px, Context, Hsla, Pixels, ScrollDelta, ScrollHandle, ScrollWheelEvent,
     StatefulInteractiveElement, Window,
 };
@@ -238,7 +238,7 @@ impl WheelScrollMotion {
         }
 
         let now = Instant::now();
-        let max_offset = f32::from(handle.max_offset().height);
+        let max_offset = f32::from(handle.max_offset().y);
         let mut sample = motion.sample_at(now);
         let target = motion.target.clamp(-max_offset, 0.);
 
@@ -290,7 +290,7 @@ impl WheelScrollMotion {
 
         let dy = f32::from(dy);
         let jumped = f32::from(handle.offset().y);
-        let max_offset = f32::from(handle.max_offset().height);
+        let max_offset = f32::from(handle.max_offset().y);
         let clamp = |value: f32| value.clamp(-max_offset, 0.);
         let now = Instant::now();
 
@@ -337,11 +337,7 @@ impl WheelScrollMotion {
     pub fn target_y(&self, handle: &ScrollHandle) -> Pixels {
         self.motion
             .as_ref()
-            .map(|motion| {
-                px(motion
-                    .target
-                    .clamp(-f32::from(handle.max_offset().height), 0.))
-            })
+            .map(|motion| px(motion.target.clamp(-f32::from(handle.max_offset().y), 0.)))
             .unwrap_or(handle.offset().y)
     }
 }

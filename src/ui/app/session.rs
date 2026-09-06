@@ -13,8 +13,8 @@ use crate::ui::settings::{
     SessionViewerTab,
 };
 use crate::ui::state::{ContactsState, MailboxState, MainView, SenderHistoryState};
-use gpui::{div, prelude::*, App, Context, Window};
-use gpui_component::{resizable::ResizableState, WindowExt};
+use gpui_kit::component::{resizable::ResizableState, WindowExt};
+use gpui_kit::{div, prelude::*, App, Context, Window};
 use std::collections::{HashMap, HashSet};
 
 /// Lightweight session copy of reply/forward cards. Their message bodies and
@@ -234,7 +234,11 @@ impl AviaryApp {
             let entity = entity.clone();
             dialog
                 .title(tr!("reset-session-title"))
-                .confirm()
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
                 .child(div().child(tr!("reset-session-confirm")))
                 .on_ok(move |_, window, cx| {
                     entity.update(cx, |this, cx| {

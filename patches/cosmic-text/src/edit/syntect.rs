@@ -9,7 +9,7 @@ use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 
 use crate::{
     Action, AttrsList, BorrowedWithFontSystem, BufferRef, Change, Color, Cursor, Edit, Editor,
-    FontSystem, Selection, Shaping, Style, Weight,
+    FontSystem, Renderer, Selection, Shaping, Style, UnderlineStyle, Weight,
 };
 
 pub use syntect::highlighting::Theme as SyntaxTheme;
@@ -107,7 +107,7 @@ impl<'syntax_system, 'buffer> SyntaxEditor<'syntax_system, 'buffer> {
     #[cfg(feature = "std")]
     pub fn load_text<P: AsRef<Path>>(
         &mut self,
-        font_system: &mut FontSystem,
+        _font_system: &mut FontSystem,
         path: P,
         mut attrs: crate::Attrs,
     ) -> io::Result<()> {
@@ -123,26 +123,32 @@ impl<'syntax_system, 'buffer> SyntaxEditor<'syntax_system, 'buffer> {
             ));
         }
 
-        let text = fs::read_to_string(path)?;
+        // Clear buffer first (allows sane handling of non-existant files)
         self.editor.with_buffer_mut(|buffer| {
-            buffer.set_text(font_system, &text, &attrs, Shaping::Advanced);
+            buffer.set_text("", &attrs, Shaping::Advanced, None);
         });
 
-        //TODO: re-use text
+        // Update syntax based on file name
         self.syntax = match self.syntax_system.syntax_set.find_syntax_for_file(path) {
             Ok(Some(some)) => some,
             Ok(None) => {
-                log::warn!("no syntax found for {:?}", path);
+                log::warn!("no syntax found for {path:?}");
                 self.syntax_system.syntax_set.find_syntax_plain_text()
             }
             Err(err) => {
-                log::warn!("failed to determine syntax for {:?}: {:?}", path, err);
+                log::warn!("failed to determine syntax for {path:?}: {err:?}");
                 self.syntax_system.syntax_set.find_syntax_plain_text()
             }
         };
 
         // Clear syntax cache
         self.syntax_cache.clear();
+
+        // Set text
+        let text = fs::read_to_string(path)?;
+        self.editor.with_buffer_mut(|buffer| {
+            buffer.set_text(&text, &attrs, Shaping::Advanced, None);
+        });
 
         Ok(())
     }
@@ -156,7 +162,7 @@ impl<'syntax_system, 'buffer> SyntaxEditor<'syntax_system, 'buffer> {
         {
             Some(some) => some,
             None => {
-                log::warn!("no syntax found for {}", extension);
+                log::warn!("no syntax found for {extension:?}");
                 self.syntax_system.syntax_set.find_syntax_plain_text()
             }
         };
@@ -212,17 +218,17 @@ impl<'syntax_system, 'buffer> SyntaxEditor<'syntax_system, 'buffer> {
     }
 
     /// Draw the editor
+    ///
+    /// Automatically resolves any pending dirty state before drawing.
     #[cfg(feature = "swash")]
-    pub fn draw<F>(&self, font_system: &mut FontSystem, cache: &mut crate::SwashCache, mut f: F)
-    where
+    pub fn draw<F>(
+        &mut self,
+        font_system: &mut FontSystem,
+        cache: &mut crate::SwashCache,
+        callback: F,
+    ) where
         F: FnMut(i32, i32, u32, u32, Color),
     {
-        let size = self.with_buffer(|buffer| buffer.size());
-        if let Some(width) = size.0 {
-            if let Some(height) = size.1 {
-                f(0, 0, width as u32, height as u32, self.background_color());
-            }
-        }
         self.editor.draw(
             font_system,
             cache,
@@ -230,7 +236,27 @@ impl<'syntax_system, 'buffer> SyntaxEditor<'syntax_system, 'buffer> {
             self.cursor_color(),
             self.selection_color(),
             self.foreground_color(),
-            f,
+            callback,
+        );
+    }
+
+    /// Render the editor using the provided renderer.
+    ///
+    /// The caller is responsible for calling [`Edit::shape_as_needed`] first
+    /// to ensure layout is up to date.
+    pub fn render<R: Renderer>(&self, renderer: &mut R) {
+        let size = self.with_buffer(|buffer| buffer.size());
+        if let Some(width) = size.0 {
+            if let Some(height) = size.1 {
+                renderer.rectangle(0, 0, width as u32, height as u32, self.background_color());
+            }
+        }
+        self.editor.render(
+            renderer,
+            self.foreground_color(),
+            self.cursor_color(),
+            self.selection_color(),
+            self.foreground_color(),
         );
     }
 }
@@ -272,8 +298,8 @@ impl<'buffer> Edit<'buffer> for SyntaxEditor<'_, 'buffer> {
         self.editor.tab_width()
     }
 
-    fn set_tab_width(&mut self, font_system: &mut FontSystem, tab_width: u16) {
-        self.editor.set_tab_width(font_system, tab_width);
+    fn set_tab_width(&mut self, tab_width: u16) {
+        self.editor.set_tab_width(tab_width);
     }
 
     fn shape_as_needed(&mut self, font_system: &mut FontSystem, prune: bool) {
@@ -353,7 +379,12 @@ impl<'buffer> Edit<'buffer> for SyntaxEditor<'_, 'buffer> {
                             Weight::BOLD
                         } else {
                             Weight::NORMAL
-                        }); //TODO: underline
+                        })
+                        .underline(if style.font_style.contains(FontStyle::UNDERLINE) {
+                            UnderlineStyle::Single
+                        } else {
+                            UnderlineStyle::None
+                        });
                     if span_attrs != original_attrs {
                         attrs_list.add_span(range, &span_attrs);
                     }

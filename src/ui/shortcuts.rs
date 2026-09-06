@@ -10,7 +10,7 @@ use super::app::AviaryApp;
 use super::compose::ComposeInit;
 use super::state::{AuthState, MainView};
 use crate::model::{MessageHeader, MessageRef};
-use gpui::{actions, App, Context, KeyBinding, KeyContext, Window};
+use gpui_kit::{actions, App, Context, KeyBinding, KeyContext, Window};
 
 actions!(
     aviary_shortcuts,
@@ -210,7 +210,7 @@ pub(crate) fn blur_search(
     window: &mut Window,
     cx: &mut Context<AviaryApp>,
 ) {
-    this.focus_shortcuts(window);
+    this.focus_shortcuts(window, cx);
     cx.notify();
 }
 
@@ -222,7 +222,7 @@ fn show_view(
 ) {
     if view == MainView::Settings || authenticated(this) {
         this.enter_main_view(view, cx);
-        this.focus_shortcuts(window);
+        this.focus_shortcuts(window, cx);
     }
 }
 
@@ -613,7 +613,7 @@ pub(crate) fn close_current(
         .map(|(_, reply)| reply.compose_id);
     if let Some(compose_id) = visible_reply {
         this.close_compose(compose_id, cx);
-        this.focus_shortcuts(window);
+        this.focus_shortcuts(window, cx);
         cx.notify();
         return;
     }
@@ -623,14 +623,14 @@ pub(crate) fn close_current(
     // `close_viewer_tab` checks the index and also releases the entity for the
     // composer inline.
     this.close_viewer_tab(index);
-    this.focus_shortcuts(window);
+    this.focus_shortcuts(window, cx);
     cx.notify();
 }
 
 #[cfg(test)]
 mod tests {
     use super::{main_context, shortcut_uses_reply_all, LIST_SAFE, MAIL_SAFE, SAFE, VIM_SAFE};
-    use gpui::{KeyBindingContextPredicate, KeyContext, Keystroke};
+    use gpui_kit::{KeyBindingContextPredicate, KeyContext, Keystroke};
 
     #[test]
     fn built_in_shortcut_syntaxes_are_valid() {

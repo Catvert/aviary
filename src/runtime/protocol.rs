@@ -278,6 +278,7 @@ pub enum Cmd {
         conversation_id: String,
     },
     Search {
+        request_id: u64,
         account_id: AccountId,
         query: String,
         scope: SearchScope,
@@ -741,6 +742,7 @@ pub enum Evt {
         messages: Vec<MessageHeader>,
     },
     SearchResults {
+        request_id: u64,
         account_id: AccountId,
         query: String,
         messages: Vec<MessageHeader>,

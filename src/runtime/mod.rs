@@ -531,6 +531,7 @@ async fn run(
                     .await;
             }
             Cmd::Search {
+                request_id,
                 account_id,
                 query,
                 scope,
@@ -538,7 +539,7 @@ async fn run(
             } => {
                 global
                     .spawn_on(&account_id, |acc| {
-                        mailbox::search_messages(acc, query, scope, limit)
+                        mailbox::search_messages(acc, request_id, query, scope, limit)
                     })
                     .await;
             }

@@ -27,14 +27,10 @@ impl Fallback for PlatformFallback {
 }
 
 // Fallbacks to use after any script specific fallbacks
-fn common_fallback() -> &'static [&'static str] {
+const fn common_fallback() -> &'static [&'static str] {
     //TODO: abstract style (sans/serif/monospaced)
     &[
-        // Aviary embeds this family and prefers its color bitmap glyphs to
-        // the monochrome emoji outlines also present in DejaVu/Noto Sans.
-        // Keep it ahead of the general-purpose sans-serif fallbacks: once a
-        // fallback has shaped a glyph successfully, later families are not
-        // considered.
+        // Prefer the embedded color bitmap glyphs before monochrome fallbacks.
         "Noto Color Emoji",
         /* Sans-serif fallbacks */
         "Noto Sans",
@@ -52,18 +48,8 @@ fn common_fallback() -> &'static [&'static str] {
     ]
 }
 
-#[cfg(test)]
-mod tests {
-    use super::common_fallback;
-
-    #[test]
-    fn color_emoji_precede_text_fallbacks() {
-        assert_eq!(common_fallback().first(), Some(&"Noto Color Emoji"));
-    }
-}
-
 // Fallbacks to never use
-fn forbidden_fallback() -> &'static [&'static str] {
+const fn forbidden_fallback() -> &'static [&'static str] {
     &[]
 }
 

@@ -4,13 +4,13 @@ use super::super::app::AviaryApp;
 use super::super::settings::{
     BodyViewMode, LanguageChoice, ThemeColorRole, ThemeMode, ThemePreset,
 };
-use gpui::{div, prelude::*, px, Context, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::Button, color_picker::ColorPicker, h_flex, switch::Switch, v_flex, ActiveTheme,
     Sizable, StyledExt,
 };
+use gpui_kit::{div, prelude::*, px, Context, Window};
 
-fn preset_label(preset: ThemePreset) -> gpui::SharedString {
+fn preset_label(preset: ThemePreset) -> gpui_kit::SharedString {
     match preset {
         ThemePreset::Manual => tr!("settings-theme-preset-manual"),
         ThemePreset::OneDark => tr!("settings-theme-preset-one-dark"),
@@ -38,7 +38,7 @@ fn preset_label(preset: ThemePreset) -> gpui::SharedString {
     }
 }
 
-fn color_role_label(role: ThemeColorRole) -> gpui::SharedString {
+fn color_role_label(role: ThemeColorRole) -> gpui_kit::SharedString {
     match role {
         ThemeColorRole::Background => tr!("settings-theme-color-background"),
         ThemeColorRole::Surface => tr!("settings-theme-color-surface"),
@@ -75,7 +75,7 @@ impl AviaryApp {
                 ] {
                     row = row.child(
                         super::choice_button(
-                            Button::new(gpui::ElementId::Name(format!("scale-{label}").into()))
+                            Button::new(gpui_kit::ElementId::Name(format!("scale-{label}").into()))
                                 .small()
                                 .label(label),
                             (g.ui_scale - scale).abs() < 0.01,
@@ -97,7 +97,7 @@ impl AviaryApp {
                 for size in [12.0f32, 13.0, 14.0, 16.0, 18.0] {
                     row = row.child(
                         super::choice_button(
-                            Button::new(gpui::ElementId::Name(format!("bfs-{size}").into()))
+                            Button::new(gpui_kit::ElementId::Name(format!("bfs-{size}").into()))
                                 .small()
                                 .label(format!("{size:.0} px")),
                             (g.body_font_size - size).abs() < 0.1,
@@ -153,6 +153,9 @@ impl AviaryApp {
     fn sync_theme_color_editors(&self, window: &mut Window, cx: &mut Context<Self>) {
         let palette = self.settings.global.custom_theme_palette;
         if let Some(ui) = &self.settings_ui {
+            ui.ai_prompt_body.update(cx, |state, cx| {
+                state.set_placeholder(tr!("settings-ai-prompt-body-placeholder"), window, cx)
+            });
             for editor in &ui.theme_colors {
                 editor.picker.update(cx, |state, cx| {
                     state.set_value(
@@ -211,20 +214,12 @@ impl AviaryApp {
             state.set_placeholder(tr!("viewer-translation-target-placeholder"), window, cx);
         });
         if let Some(ui) = &self.settings_ui {
-            for (input, placeholder) in [
-                (
-                    &ui.ai_prompt_name,
-                    tr!("settings-ai-prompt-name-placeholder"),
-                ),
-                (
-                    &ui.ai_prompt_body,
-                    tr!("settings-ai-prompt-body-placeholder"),
-                ),
-            ] {
-                input.update(cx, |state, cx| {
-                    state.set_placeholder(placeholder.clone(), window, cx);
-                });
-            }
+            ui.ai_prompt_body.update(cx, |state, cx| {
+                state.set_placeholder(tr!("settings-ai-prompt-body-placeholder"), window, cx)
+            });
+            ui.ai_prompt_name.update(cx, |state, cx| {
+                state.set_placeholder(tr!("settings-ai-prompt-name-placeholder"), window, cx);
+            });
         }
         self.refresh_rich_snippet_i18n(window, cx);
         if let Some(form) = &self.imap_form {
@@ -570,7 +565,7 @@ impl AviaryApp {
                         for &preset in ThemePreset::for_mode(g.theme_mode) {
                             row = row.child(
                                 super::choice_button(
-                                    Button::new(gpui::ElementId::Name(
+                                    Button::new(gpui_kit::ElementId::Name(
                                         format!("theme-preset-{preset:?}").into(),
                                     ))
                                     .xsmall()

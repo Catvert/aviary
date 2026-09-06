@@ -988,6 +988,22 @@ impl CacheDb {
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
         for header in headers {
+            // Flags and folder membership do not affect the FTS document. Avoid
+            // loading/parsing a cached body just to rebuild an identical index.
+            let old_json: Option<String> = tx
+                .prepare_cached(
+                    "SELECT header_json FROM messages WHERE account_id=?1 AND message_id=?2",
+                )?
+                .query_row(params![account_id.0, header.id], |row| row.get(0))
+                .optional()?;
+            let old_header = old_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<MessageHeader>(json).ok());
+            let reindex = old_header.as_ref().is_none_or(|old| {
+                old.subject != header.subject
+                    || old.from != header.from
+                    || old.preview != header.preview
+            });
             let json = serde_json::to_string(header)?;
             let json_len = json.len() as i64;
             tx.execute(
@@ -1024,6 +1040,9 @@ impl CacheDb {
             // Listing a folder is what makes the bulk of the mailbox
             // searchable: most messages are never opened, so this is the only
             // chance to index their subject and sender.
+            if !reindex {
+                continue;
+            }
             let indexed: Option<(i64, Option<String>)> = tx
                 .query_row(
                     "SELECT rowid,body_json FROM messages
@@ -2304,6 +2323,79 @@ mod tests {
             .into_iter()
             .map(|header| header.id)
             .collect()
+    }
+
+    #[test]
+    fn metadata_only_refresh_skips_fts_writes_and_preserves_body_search() {
+        let mut db = test_db();
+        let mut message = message();
+        message.body = "bodytoken".into();
+        let account = message.header.account_id.clone();
+        db.store_message(&account, &message).unwrap();
+        let mut header = message.header.clone();
+        header.is_read = false;
+        header.is_flagged = true;
+        header.tags = vec!["tag-a".into()];
+        let before = db.conn.total_changes();
+        db.store_headers(&account, Some("folder-a"), &[header.clone()])
+            .unwrap();
+        // Only the header and folder membership are written, no FTS shadow tables.
+        assert_eq!(db.conn.total_changes() - before, 2);
+        assert_eq!(search_ids(&mut db, "bodytoken"), vec![header.id.clone()]);
+        assert_eq!(
+            search_ids(&mut db, "to:contact-b@example.test"),
+            vec![header.id.clone()]
+        );
+        let restored = db.load_header(&account, &header.id).unwrap().unwrap();
+        assert!(!restored.is_read);
+        assert!(restored.is_flagged);
+        assert_eq!(restored.tags, header.tags);
+
+        header.subject = "updatedsubject".into();
+        db.store_headers(&account, Some("folder-a"), &[header.clone()])
+            .unwrap();
+        assert_eq!(
+            search_ids(&mut db, "updatedsubject"),
+            vec![header.id.clone()]
+        );
+        assert_eq!(search_ids(&mut db, "bodytoken"), vec![header.id]);
+    }
+
+    #[test]
+    fn indexed_header_fields_are_refreshed_without_a_cached_body() {
+        for field in 0..3 {
+            let mut db = test_db();
+            let mut header = header(
+                "message-a",
+                "subjecttoken",
+                "contact-a@example.test",
+                "previewtoken",
+            );
+            let account = header.account_id.clone();
+            db.store_headers(&account, None, &[header.clone()]).unwrap();
+            let previous = match field {
+                0 => {
+                    header.subject = "replacementtoken".into();
+                    "subjecttoken"
+                }
+                1 => {
+                    header.from = "contact-b@example.test".into();
+                    "from:contact-a@example.test"
+                }
+                _ => {
+                    header.preview = "replacementtoken".into();
+                    "previewtoken"
+                }
+            };
+            db.store_headers(&account, None, &[header.clone()]).unwrap();
+            assert!(search_ids(&mut db, previous).is_empty());
+            let query = if field == 1 {
+                "from:contact-b@example.test"
+            } else {
+                "replacementtoken"
+            };
+            assert_eq!(search_ids(&mut db, query), vec![header.id]);
+        }
     }
 
     /// Link targets would otherwise flood the index: a single tracking URL

@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::boxed::Box;
+#[cfg(feature = "no_std")]
+use core_maths::CoreFloat;
+
 use core::fmt;
 use swash::scale::{image::Content, ScaleContext};
 use swash::scale::{Render, Source, StrikeWith};
@@ -17,24 +20,39 @@ fn swash_image(
     context: &mut ScaleContext,
     cache_key: CacheKey,
 ) -> Option<SwashImage> {
-    let font = match font_system.get_font(cache_key.font_id) {
-        Some(some) => some,
-        None => {
-            log::warn!("did not find font {:?}", cache_key.font_id);
-            return None;
-        }
+    let Some(font) = font_system.get_font(cache_key.font_id, cache_key.font_weight) else {
+        log::warn!("did not find font {:?}", cache_key.font_id);
+        return None;
     };
+
+    let variable_width = font
+        .as_swash()
+        .variations()
+        .find_by_tag(swash::Tag::from_be_bytes(*b"wght"));
 
     // Build the scaler
     let mut scaler = context
         .builder(font.as_swash())
         .size(f32::from_bits(cache_key.font_size_bits))
-        .hint(true)
-        .build();
+        .hint(!cache_key.flags.contains(CacheKeyFlags::DISABLE_HINTING));
+    if let Some(variation) = variable_width {
+        scaler = scaler.normalized_coords(font.as_swash().variations().normalized_coords([(
+            swash::Tag::from_be_bytes(*b"wght"),
+            f32::from(cache_key.font_weight.0).clamp(variation.min_value(), variation.max_value()),
+        )]));
+    }
+    let mut scaler = scaler.build();
 
     // Compute the fractional offset-- you'll likely want to quantize this
     // in a real renderer
-    let offset = Vector::new(cache_key.x_bin.as_float(), cache_key.y_bin.as_float());
+    let offset = if cache_key.flags.contains(CacheKeyFlags::PIXEL_FONT) {
+        Vector::new(
+            cache_key.x_bin.as_float().round(),
+            cache_key.y_bin.as_float().round(),
+        )
+    } else {
+        Vector::new(cache_key.x_bin.as_float(), cache_key.y_bin.as_float())
+    };
 
     // Select our source order
     Render::new(&[
@@ -68,25 +86,40 @@ fn swash_outline_commands(
 ) -> Option<Box<[swash::zeno::Command]>> {
     use swash::zeno::PathData as _;
 
-    let font = match font_system.get_font(cache_key.font_id) {
-        Some(some) => some,
-        None => {
-            log::warn!("did not find font {:?}", cache_key.font_id);
-            return None;
-        }
+    let Some(font) = font_system.get_font(cache_key.font_id, cache_key.font_weight) else {
+        log::warn!("did not find font {:?}", cache_key.font_id);
+        return None;
     };
+
+    let variable_width = font
+        .as_swash()
+        .variations()
+        .find_by_tag(swash::Tag::from_be_bytes(*b"wght"));
 
     // Build the scaler
     let mut scaler = context
         .builder(font.as_swash())
         .size(f32::from_bits(cache_key.font_size_bits))
-        .hint(true)
-        .build();
+        .hint(!cache_key.flags.contains(CacheKeyFlags::DISABLE_HINTING));
+    if let Some(variation) = variable_width {
+        scaler = scaler.normalized_coords(font.as_swash().variations().normalized_coords([(
+            swash::Tag::from_be_bytes(*b"wght"),
+            f32::from(cache_key.font_weight.0).clamp(variation.min_value(), variation.max_value()),
+        )]));
+    }
+    let mut scaler = scaler.build();
 
     // Scale the outline
-    let outline = scaler
+    let mut outline = scaler
         .scale_outline(cache_key.glyph_id)
         .or_else(|| scaler.scale_color_outline(cache_key.glyph_id))?;
+
+    if cache_key.flags.contains(CacheKeyFlags::FAKE_ITALIC) {
+        outline.transform(&Transform::skew(
+            Angle::from_degrees(14.0),
+            Angle::from_degrees(0.0),
+        ));
+    }
 
     // Get the path information of the outline
     let path = outline.path();
@@ -180,7 +213,7 @@ impl SwashCache {
                             f(
                                 x + off_x,
                                 y + off_y,
-                                Color(((image.data[i] as u32) << 24) | base.0 & 0xFF_FF_FF),
+                                Color((u32::from(image.data[i]) << 24) | base.0 & 0xFF_FF_FF),
                             );
                             i += 1;
                         }
@@ -210,5 +243,62 @@ impl SwashCache {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use swash::{FontRef, Setting, Tag};
+
+    // variations() resizes context.coords in place (stale values persist),
+    // whereas using normalized_coords() clears and replaces them.
+    #[test]
+    fn no_coord_leakage_across_fonts() {
+        let [Ok(sfns), Ok(sfns_italic)] = [
+            "/System/Library/Fonts/SFNS.ttf",
+            "/System/Library/Fonts/SFNSItalic.ttf",
+        ]
+        .map(std::fs::read) else {
+            return;
+        };
+        let regular = FontRef::from_index(&sfns, 0).unwrap();
+        let italic = FontRef::from_index(&sfns_italic, 0).unwrap();
+        let wght = Tag::from_be_bytes(*b"wght");
+
+        let render = |ctx: &mut ScaleContext, font: FontRef, weight: f32, use_normalized| {
+            let mut b = ctx.builder(font).size(16.0).hint(true);
+            if use_normalized {
+                b = b.normalized_coords(font.variations().normalized_coords([(wght, weight)]));
+            } else {
+                b = b.variations(std::iter::once(Setting {
+                    tag: wght,
+                    value: weight,
+                }));
+            }
+            Render::new(&[Source::Outline])
+                .format(Format::Alpha)
+                .render(&mut b.build(), 36)
+        };
+
+        // reference: regular@400 with no prior context
+        let mut ctx = ScaleContext::new();
+        let reference = render(&mut ctx, regular, 400.0, false).map(|i| i.data);
+
+        // variations(): pollute ctx with italic@700, then render regular@400
+        let mut ctx = ScaleContext::new();
+        render(&mut ctx, italic, 700.0, false);
+        let not_normalized = render(&mut ctx, regular, 400.0, false).map(|i| i.data);
+
+        // normalized_coords(): same sequence
+        let mut ctx = ScaleContext::new();
+        render(&mut ctx, italic, 700.0, true);
+        let normalized = render(&mut ctx, regular, 400.0, true).map(|i| i.data);
+
+        assert_ne!(not_normalized, reference, "variations leak across fonts");
+        assert_eq!(
+            normalized, reference,
+            "normalized_coords match clean render"
+        );
     }
 }

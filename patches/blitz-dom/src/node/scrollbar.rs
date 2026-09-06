@@ -2,6 +2,7 @@
 //! [`Node`]. Geometry is shared between painting (blitz-paint) and thumb
 //! hit-testing so the two cannot drift.
 
+use blitz_traits::node_id::NodeId;
 use kurbo::Rect as KurboRect;
 use taffy::AbsoluteAxis;
 use web_time::Duration;
@@ -27,24 +28,15 @@ pub(crate) fn opacity_at(elapsed: Duration) -> f32 {
 /// A specific scrollbar: one axis of one scroll container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollbarRef {
-    pub node_id: usize,
+    pub node_id: NodeId,
     pub axis: AbsoluteAxis,
 }
 
-/// The computed value of `scrollbar-width` (css-scrollbars-1). A local
-/// mirror of the stylo type, which isn't exposed to the servo engine yet
-/// (servo/stylo#413).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ScrollbarWidth {
-    #[default]
-    Auto,
-    Thin,
-    None,
-}
+/// The computed value of `scrollbar-width` (css-scrollbars-1).
+pub use style::properties::generated::longhands::scrollbar_width::computed_value::T as ScrollbarWidth;
 
-/// The computed value of `scrollbar-color` (css-scrollbars-1). A local
-/// mirror of the stylo type, which isn't exposed to the servo engine yet
-/// (servo/stylo#413). Colors are fully resolved (no `currentColor`).
+/// The computed value of `scrollbar-color` (css-scrollbars-1), with colors
+/// fully resolved (no `currentColor`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum ScrollbarColor {
     #[default]
@@ -56,21 +48,29 @@ pub enum ScrollbarColor {
 }
 
 impl Node {
-    /// The node's used `scrollbar-width`.
+    /// The node's computed `scrollbar-width`.
     pub fn scrollbar_width(&self) -> ScrollbarWidth {
-        // TODO: read the computed style once stylo exposes scrollbar-width
-        // to the servo engine (servo/stylo#413):
-        // match self.primary_styles().map(|s| s.clone_scrollbar_width()) { .. }
-        ScrollbarWidth::Auto
+        self.primary_styles()
+            .map(|style| style.clone_scrollbar_width())
+            .unwrap_or(ScrollbarWidth::Auto)
     }
 
-    /// The node's used `scrollbar-color`.
+    /// The node's computed `scrollbar-color`, with colors resolved against
+    /// the element's computed `color`.
     pub fn scrollbar_color(&self) -> ScrollbarColor {
-        // TODO: read the computed style once stylo exposes scrollbar-color
-        // to the servo engine (servo/stylo#413), resolving the colors
-        // against the element's `color`:
-        // self.primary_styles().map(|s| s.clone_scrollbar_color()) { .. }
-        ScrollbarColor::Auto
+        let Some(style) = self.primary_styles() else {
+            return ScrollbarColor::Auto;
+        };
+        let current_color = style.clone_color();
+        match style.clone_scrollbar_color() {
+            style::values::computed::ScrollbarColor::Auto => ScrollbarColor::Auto,
+            style::values::computed::ScrollbarColor::Colors { thumb, track } => {
+                ScrollbarColor::Colors {
+                    thumb: thumb.resolve_to_absolute(&current_color),
+                    track: track.resolve_to_absolute(&current_color),
+                }
+            }
+        }
     }
 
     /// Whether the node shows an overlay scrollbar in the given axis:
@@ -88,11 +88,11 @@ impl Node {
         let (overflow, scroll_extent) = match axis {
             AbsoluteAxis::Horizontal => (
                 style.clone_overflow_x(),
-                self.final_layout.scroll_width() as f64,
+                self.final_layout().scroll_width() as f64,
             ),
             AbsoluteAxis::Vertical => (
                 style.clone_overflow_y(),
-                self.final_layout.scroll_height() as f64,
+                self.final_layout().scroll_height() as f64,
             ),
         };
         match overflow {
@@ -106,7 +106,7 @@ impl Node {
     /// node's border-box origin. Taffy has content-box helpers but none for
     /// the padding box.
     fn scrollport(&self) -> KurboRect {
-        let layout = &self.final_layout;
+        let layout = self.final_layout();
         KurboRect::new(
             layout.border.left as f64,
             layout.border.top as f64,
@@ -125,7 +125,7 @@ impl Node {
         const THUMB_MARGIN: f64 = 2.0;
         const MIN_THUMB_LENGTH: f64 = 32.0;
 
-        let layout = &self.final_layout;
+        let layout = self.final_layout();
         let scroll_extent = match axis {
             AbsoluteAxis::Horizontal => layout.scroll_width() as f64,
             AbsoluteAxis::Vertical => layout.scroll_height() as f64,
@@ -141,8 +141,8 @@ impl Node {
 
         let port = self.scrollport();
         let (viewport_len, scroll_offset) = match axis {
-            AbsoluteAxis::Horizontal => (port.width(), self.scroll_offset.x),
-            AbsoluteAxis::Vertical => (port.height(), self.scroll_offset.y),
+            AbsoluteAxis::Horizontal => (port.width(), self.scroll_offset().x),
+            AbsoluteAxis::Vertical => (port.height(), self.scroll_offset().y),
         };
         let thumb_len = (viewport_len * viewport_len / (viewport_len + scroll_extent))
             .max(MIN_THUMB_LENGTH)
@@ -179,12 +179,12 @@ impl Node {
         let port = self.scrollport();
         let (scroll_extent, viewport_len, thumb_len) = match axis {
             AbsoluteAxis::Horizontal => (
-                self.final_layout.scroll_width() as f64,
+                self.final_layout().scroll_width() as f64,
                 port.width(),
                 thumb.width(),
             ),
             AbsoluteAxis::Vertical => (
-                self.final_layout.scroll_height() as f64,
+                self.final_layout().scroll_height() as f64,
                 port.height(),
                 thumb.height(),
             ),

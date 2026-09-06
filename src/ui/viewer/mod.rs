@@ -30,8 +30,7 @@ use crate::model::{
     MessageRef, Provider,
 };
 use crate::runtime::Cmd;
-use gpui::{div, prelude::*, px, rems, App, Context, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonGroup, ButtonVariants},
     h_flex,
     input::Input,
@@ -41,6 +40,7 @@ use gpui_component::{
     tooltip::Tooltip,
     v_flex, ActiveTheme, Disableable, IconName, Selectable, Sizable, StyledExt, WindowExt as _,
 };
+use gpui_kit::{div, prelude::*, px, rems, App, Context, Window};
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -164,7 +164,7 @@ fn markdown_to_source_preview(md: &str) -> String {
 }
 
 fn copy_markdown_to_clipboard(markdown: &str, window: &mut Window, cx: &mut App) {
-    cx.write_to_clipboard(gpui::ClipboardItem::new_string(markdown.to_string()));
+    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(markdown.to_string()));
     window.push_notification(tr!("viewer-markdown-copied"), cx);
 }
 
@@ -200,7 +200,7 @@ pub fn body_element(
     fallback_width: Option<f32>,
     window: &mut Window,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     body_element_with_height(m, mode, options, fallback_width, false, window, cx)
 }
 
@@ -214,7 +214,7 @@ fn body_fragment_element(
     fallback_width: Option<f32>,
     window: &mut Window,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     body_element_with_height(m, mode, options, fallback_width, true, window, cx)
 }
 
@@ -227,9 +227,9 @@ fn body_element_with_height(
     fragment: bool,
     window: &mut Window,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let font_size = px(options.font_size);
-    let text_style = gpui_component::text::TextViewStyle {
+    let text_style = gpui_kit::component::text::TextViewStyle {
         heading_base_font_size: font_size,
         ..Default::default()
     };
@@ -276,7 +276,7 @@ fn body_element_with_height(
                 .text_size(font_size)
                 .child(
                     h_flex().justify_end().child(
-                        Button::new(gpui::ElementId::Name(
+                        Button::new(gpui_kit::ElementId::Name(
                             format!("copy-md-{}", m.header.id).into(),
                         ))
                         .ghost()
@@ -309,7 +309,7 @@ fn body_element_with_height(
                 .text_size(font_size)
                 .child(
                     h_flex().justify_end().child(
-                        Button::new(gpui::ElementId::Name(
+                        Button::new(gpui_kit::ElementId::Name(
                             format!("copy-src-{}", m.header.id).into(),
                         ))
                         .ghost()
@@ -317,7 +317,7 @@ fn body_element_with_height(
                         .icon(super::icons::app_icon("copy"))
                         .label(tr!("viewer-copy-source"))
                         .on_click(move |_, window, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
                                 copy_src.clone(),
                             ));
                             window.push_notification(tr!("viewer-source-copied"), cx);
@@ -326,10 +326,8 @@ fn body_element_with_height(
                 )
                 .child(
                     TextView::markdown(
-                        gpui::ElementId::Name(format!("body-src-{}", m.header.id).into()),
+                        gpui_kit::ElementId::Name(format!("body-src-{}", m.header.id).into()),
                         md,
-                        window,
-                        cx,
                     )
                     .style(text_style)
                     .selectable(true),
@@ -345,7 +343,7 @@ impl AviaryApp {
         message: &Message,
         invitation: &CalendarInvitation,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let theme = cx.theme().clone();
         let reference = MessageRef::from(message);
         let responding = self.invitation_responses_in_flight.contains(&reference);
@@ -381,7 +379,7 @@ impl AviaryApp {
             let account_id = message.header.account_id.clone();
             let message_id = message.header.id.clone();
             let event_id = invitation.event_id.clone();
-            Button::new(gpui::ElementId::Name(
+            Button::new(gpui_kit::ElementId::Name(
                 format!("invitation-{suffix}-{message_id}").into(),
             ))
             .outline()
@@ -684,7 +682,7 @@ impl AviaryApp {
                     // animates its line-sized jump.
                     .on_scroll_wheel(cx.listener({
                         let handle = viewer_scroll_handle;
-                        move |this, event: &gpui::ScrollWheelEvent, window, cx| {
+                        move |this, event: &gpui_kit::ScrollWheelEvent, window, cx| {
                             if this.scrolls.viewer.motion.on_wheel(&handle, event, window) {
                                 cx.notify();
                             }
@@ -754,7 +752,7 @@ impl AviaryApp {
         fallback_width: Option<f32>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         if let Some(translation) = self
             .viewer_translation
             .result
@@ -811,7 +809,9 @@ impl AviaryApp {
             let quoted_date = quoted.received().map(|date| util::short_date(&date));
             let can_reply = quoted.can_reply();
             let header = h_flex()
-                .id(gpui::ElementId::Name(format!("quoted-head-{key}").into()))
+                .id(gpui_kit::ElementId::Name(
+                    format!("quoted-head-{key}").into(),
+                ))
                 .w_full()
                 .min_w_0()
                 .gap_2()
@@ -825,7 +825,7 @@ impl AviaryApp {
                 .cursor_pointer()
                 .hover(|style| style.bg(theme.list_hover))
                 .child(
-                    gpui_component::Icon::new(if expanded {
+                    gpui_kit::component::Icon::new(if expanded {
                         IconName::ChevronDown
                     } else {
                         IconName::ChevronRight
@@ -864,7 +864,7 @@ impl AviaryApp {
                                 })
                                 .when_some(jump_target, |row, target| {
                                     row.child(
-                                        Button::new(gpui::ElementId::Name(
+                                        Button::new(gpui_kit::ElementId::Name(
                                             format!("quoted-jump-{key}").into(),
                                         ))
                                         .ghost()
@@ -884,7 +884,7 @@ impl AviaryApp {
                                     )
                                 })
                                 .child(
-                                    Button::new(gpui::ElementId::Name(
+                                    Button::new(gpui_kit::ElementId::Name(
                                         format!("quoted-reply-{key}").into(),
                                     ))
                                     .ghost()
@@ -921,7 +921,7 @@ impl AviaryApp {
                                     })),
                                 )
                                 .child(
-                                    Button::new(gpui::ElementId::Name(
+                                    Button::new(gpui_kit::ElementId::Name(
                                         format!("quoted-forward-{key}").into(),
                                     ))
                                     .ghost()

@@ -7,8 +7,8 @@
 //! `ui::events::compose`.
 
 use super::*;
-use gpui::Entity;
-use gpui_component::input::InputState;
+use gpui_kit::component::input::InputState;
+use gpui_kit::Entity;
 
 /// The reader's translation panel.
 pub struct ViewerTranslationState {
@@ -36,7 +36,7 @@ pub(super) fn translated_body_element(
     fallback_width: Option<f32>,
     window: &mut Window,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     if translation.html.is_empty() {
         return div()
             .text_color(cx.theme().muted_foreground)
@@ -80,15 +80,13 @@ pub(super) fn translated_body_element(
     let fence = "`".repeat(max_run.max(2) + 1);
     let markdown = format!("{fence}text\n{source}\n{fence}");
     let font_size = px(options.font_size);
-    let text_style = gpui_component::text::TextViewStyle {
+    let text_style = gpui_kit::component::text::TextViewStyle {
         heading_base_font_size: font_size,
         ..Default::default()
     };
     TextView::markdown(
-        gpui::ElementId::Name(format!("translated-body-{}", translation.request_id).into()),
+        gpui_kit::ElementId::Name(format!("translated-body-{}", translation.request_id).into()),
         markdown,
-        window,
-        cx,
     )
     .style(text_style)
     .selectable(true)
@@ -120,7 +118,7 @@ impl AviaryApp {
         message: &Message,
         _window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> Option<gpui_kit::AnyElement> {
         if !self.viewer_translation.open {
             return None;
         }

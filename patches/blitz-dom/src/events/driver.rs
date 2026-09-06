@@ -3,12 +3,13 @@ use blitz_traits::events::{
     BlitzPointerEvent, BlitzPointerId, DomEvent, DomEventData, EventState, Point, PointerCoords,
     UiEvent,
 };
+use blitz_traits::node_id::NodeId;
 use std::collections::VecDeque;
 
 pub trait EventHandler {
     fn handle_event(
         &mut self,
-        chain: &[usize],
+        chain: &[NodeId],
         event: &mut DomEvent,
         doc: &mut dyn Document,
         event_state: &mut EventState,
@@ -19,7 +20,7 @@ pub struct NoopEventHandler;
 impl EventHandler for NoopEventHandler {
     fn handle_event(
         &mut self,
-        _chain: &[usize],
+        _chain: &[NodeId],
         _event: &mut DomEvent,
         _doc: &mut dyn Document,
         _event_state: &mut EventState,
@@ -43,7 +44,7 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
         }
     }
 
-    pub fn handle_pointer_move(&mut self, event: &BlitzPointerEvent) -> Option<usize> {
+    pub fn handle_pointer_move(&mut self, event: &BlitzPointerEvent) -> Option<NodeId> {
         let mut doc = self.doc.inner_mut();
 
         let prev_hover_node_id = doc.hover_node_id;
@@ -195,7 +196,12 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
             UiEvent::Ime(_) => focussed_node_id,
             UiEvent::AppleStandardKeybinding(_) => focussed_node_id,
         };
-        let target = target.unwrap_or_else(|| self.doc.inner().root_element().id);
+        // Fall back to the root element. A document without a root element (e.g. an
+        // empty iframe sub-document) has no event target, so there is nothing to do.
+        let Some(target) = target.or_else(|| self.doc.inner().try_root_element().map(|el| el.id))
+        else {
+            return;
+        };
 
         match event {
             UiEvent::PointerMove(data) => {
@@ -252,6 +258,7 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
                 let mut dom_event =
                     DomEvent::new(target, DomEventData::AppleStandardKeybinding(data));
                 self.run_default_action(&mut dom_event);
+                self.process_queue();
             }
         };
 
@@ -268,7 +275,7 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
 
     fn handle_pointer_event(
         &mut self,
-        target: usize,
+        target: NodeId,
         data: BlitzPointerEvent,
         make_ptr_data: impl FnOnce(BlitzPointerEvent) -> DomEventData,
         make_mouse_data: Option<impl FnOnce(BlitzPointerEvent) -> DomEventData>,
@@ -314,7 +321,7 @@ impl<'doc, Handler: EventHandler> EventDriver<'doc, Handler> {
 
     fn adjust_element_coords(
         &self,
-        target: usize,
+        target: NodeId,
         coords: &PointerCoords,
         element: &mut Point<f32>,
     ) {

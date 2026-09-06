@@ -1,3 +1,4 @@
+use blitz_traits::node_id::NodeId;
 use parley::layout::PositionedLayoutItem;
 
 use crate::BaseDocument;
@@ -7,13 +8,13 @@ impl BaseDocument {
         taffy::print_tree(self, taffy::NodeId::from(0usize));
     }
 
-    pub fn debug_log_node(&self, node_id: usize) {
+    pub fn debug_log_node(&self, node_id: NodeId) {
         let node = &self.nodes[node_id];
 
         #[cfg(feature = "tracing")]
         {
-            tracing::info!("Layout: {:?}", &node.final_layout);
-            tracing::info!("Style: {:?}", &node.style);
+            tracing::info!("Layout: {:?}", node.final_layout());
+            tracing::info!("Style: {:?}", node.style());
         }
 
         println!("\nNode {} {}", node.id, node.node_debug_str());
@@ -77,16 +78,18 @@ impl BaseDocument {
             }
         }
 
-        let layout = &node.final_layout;
+        let layout = node.final_layout();
         println!("Layout:");
         println!(
-            "  x: {x} y: {y} w: {width} h: {height} content_w: {content_width} content_h: {content_height}",
+            "  x: {x} y: {y} w: {width} h: {height} overflow: l:{ol} r:{or} t:{ot} b:{ob}",
             x = layout.location.x,
             y = layout.location.y,
             width = layout.size.width,
             height = layout.size.height,
-            content_width = layout.content_size.width,
-            content_height = layout.content_size.height,
+            ol = layout.scrollable_overflow_rect.left,
+            or = layout.scrollable_overflow_rect.right,
+            ot = layout.scrollable_overflow_rect.top,
+            ob = layout.scrollable_overflow_rect.bottom,
         );
         println!(
             "  border: l:{l} r:{r} t:{t} b:{b}",

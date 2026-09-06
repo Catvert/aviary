@@ -493,7 +493,7 @@ impl AviaryApp {
             let context_message = message_id.clone();
             let context_entity = cx.entity();
             let card = h_flex()
-                .id(gpui::ElementId::Name(format!("att-{ix}").into()))
+                .id(gpui_kit::ElementId::Name(format!("att-{ix}").into()))
                 .flex_1()
                 .min_w_0()
                 .h(px(52.))

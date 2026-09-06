@@ -6,8 +6,8 @@ use super::super::state::{SenderHistoryState, ThreadBodyState, ViewerTab};
 use super::super::util;
 use crate::model::{AccountId, Message, MessageHeader};
 use crate::runtime::Cmd;
-use gpui::{Context, Window};
-use gpui_component::notification::Notification;
+use gpui_kit::component::notification::Notification;
+use gpui_kit::{Context, Window};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -534,14 +534,19 @@ impl AviaryApp {
 
     pub(super) fn on_search_results(
         &mut self,
+        request_id: u64,
         account_id: AccountId,
         query: String,
         messages: Vec<MessageHeader>,
     ) {
-        if !self.event_relevant(&account_id) || query != self.mailbox.search.query {
+        if !self.event_relevant(&account_id)
+            || !self.mailbox.search.accepts_results(request_id, &query)
+        {
             return;
         }
-        let results = self.mailbox.search.results.get_or_insert_with(Vec::new);
+        let Some(results) = self.mailbox.search.results.as_mut() else {
+            return;
+        };
         util::dedup_append(results, messages);
         self.sort_search_results();
     }

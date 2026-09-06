@@ -17,7 +17,7 @@ pub(super) fn measure_and_render(
     key: String,
     job: Arc<Job>,
     fallback_width: Option<f32>,
-    bounds: gpui::Bounds<Pixels>,
+    bounds: gpui_kit::Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -75,14 +75,12 @@ pub(super) fn measure_and_render(
         if !debounce.is_zero() {
             cx.background_executor().timer(debounce).await;
         }
-        let still_current = cx
-            .update(|cx| {
-                cx.default_global::<BlitzCache>()
-                    .entries
-                    .get(&key)
-                    .is_some_and(|entry| entry.target_generation == generation)
-            })
-            .unwrap_or(false);
+        let still_current = cx.update(|cx| {
+            cx.default_global::<BlitzCache>()
+                .entries
+                .get(&key)
+                .is_some_and(|entry| entry.target_generation == generation)
+        });
         if !still_current {
             cancellation.cancel();
             return;
@@ -148,7 +146,7 @@ pub(super) fn measure_and_render(
             };
             RenderAttempt::Replace(result)
         };
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             let mut images_to_drop = Vec::new();
             let mut owner_to_notify = None;
             match cx.default_global::<BlitzCache>().entries.get_mut(&key) {
@@ -326,7 +324,7 @@ pub(super) fn pump_bands(key: String, cx: &mut App) {
                 Some((e.live.clone().expect("live document checked above"), bands))
             });
             let (live, bands) = match step {
-                Ok(Some(p)) => p,
+                Some(p) => p,
                 _ => break,
             };
             let (out_tx, out_rx) = oneshot::channel();
@@ -336,14 +334,14 @@ pub(super) fn pump_bands(key: String, cx: &mut App) {
                 .is_ok();
             let outcome = if sent { out_rx.await.ok() } else { None };
             let Some((actor_target, band_tiles)) = outcome else {
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     if let Some(e) = cx.default_global::<BlitzCache>().entries.get_mut(&key) {
                         e.band_pump_running = false;
                     }
                 });
                 break;
             };
-            let applied = cx.update(|cx| {
+            cx.update(|cx| {
                 let mut images_to_drop = Vec::new();
                 let mut owner_to_notify = None;
                 if let Some(e) = cx.default_global::<BlitzCache>().entries.get_mut(&key) {
@@ -392,9 +390,6 @@ pub(super) fn pump_bands(key: String, cx: &mut App) {
                     cx.notify(owner);
                 }
             });
-            if applied.is_err() {
-                break;
-            }
         }
     })
     .detach();
@@ -448,7 +443,7 @@ pub(super) fn pump_resources(key: String, cx: &mut App) {
                 ))
             });
             let (live, visible) = match step {
-                Ok(Some(step)) => step,
+                Some(step) => step,
                 _ => break,
             };
             let (out_tx, out_rx) = oneshot::channel();
@@ -464,7 +459,7 @@ pub(super) fn pump_resources(key: String, cx: &mut App) {
             } else {
                 None
             };
-            let applied = cx.update(|cx| {
+            cx.update(|cx| {
                 let mut images_to_drop = Vec::new();
                 let mut owner_to_notify = None;
                 if let Some(e) = cx.default_global::<BlitzCache>().entries.get_mut(&key) {
@@ -501,11 +496,11 @@ pub(super) fn pump_resources(key: String, cx: &mut App) {
                     cx.notify(owner);
                 }
             });
-            if applied.is_err() || !sent {
+            if !sent {
                 break;
             }
         }
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             if let Some(e) = cx.default_global::<BlitzCache>().entries.get_mut(&key) {
                 e.resource_pump_running = false;
             }

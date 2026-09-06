@@ -1,3 +1,4 @@
+use blitz_traits::node_id::NodeId;
 use selectors::context::QuirksMode;
 use std::sync::atomic::Ordering as Ao;
 use std::{
@@ -5,9 +6,7 @@ use std::{
     sync::{Arc, atomic::AtomicUsize, mpsc::Sender},
 };
 use style::{
-    font_face::{
-        FontFaceSourceFormat, FontFaceSourceFormatKeyword, FontStyle as StyloFontStyle, Source,
-    },
+    font_face::{FontFaceSourceFormat, FontFaceSourceFormatKeyword, FontStyleRange, Source},
     media_queries::MediaList,
     servo_arc::Arc as ServoArc,
     shared_lock::SharedRwLock,
@@ -62,13 +61,15 @@ pub enum Resource {
     Svg(ImageType, crate::node::SvgImageData),
     Css(DocumentStyleSheet),
     Font(Bytes, FontFaceOverrides),
+    /// HTML fetched for an `<iframe>` element's `src`
+    DocumentSrc(String),
     None,
 }
 
 pub(crate) struct ResourceHandler<T: Send + Sync + 'static> {
     doc_id: usize,
     request_id: usize,
-    node_id: Option<usize>,
+    node_id: Option<NodeId>,
     tx: Sender<DocumentEvent>,
     shell_provider: Arc<dyn ShellProvider>,
     data: T,
@@ -78,7 +79,7 @@ impl<T: Send + Sync + 'static> ResourceHandler<T> {
     pub(crate) fn new(
         tx: Sender<DocumentEvent>,
         doc_id: usize,
-        node_id: Option<usize>,
+        node_id: Option<NodeId>,
         shell_provider: Arc<dyn ShellProvider>,
         data: T,
     ) -> Self {
@@ -96,7 +97,7 @@ impl<T: Send + Sync + 'static> ResourceHandler<T> {
     pub(crate) fn boxed(
         tx: Sender<DocumentEvent>,
         doc_id: usize,
-        node_id: Option<usize>,
+        node_id: Option<NodeId>,
         shell_provider: Arc<dyn ShellProvider>,
         data: T,
     ) -> Box<dyn NetHandler>
@@ -125,7 +126,7 @@ impl<T: Send + Sync + 'static> ResourceHandler<T> {
 #[allow(unused)]
 pub struct ResourceLoadResponse {
     pub request_id: usize,
-    pub node_id: Option<usize>,
+    pub node_id: Option<NodeId>,
     pub resolved_url: Option<String>,
     pub result: Result<Resource, String>,
 }
@@ -367,7 +368,7 @@ impl FontFaceHandler {
 pub(crate) fn fetch_font_face(
     tx: Sender<DocumentEvent>,
     doc_id: usize,
-    node_id: Option<usize>,
+    node_id: Option<NodeId>,
     sheet: &Stylesheet,
     network_provider: &Arc<dyn NetProvider>,
     shell_provider: &Arc<dyn ShellProvider>,
@@ -453,7 +454,14 @@ pub(crate) fn fetch_font_face(
                         return None;
                     }
 
-                    let url = url_source.url.url().unwrap().as_ref().clone();
+                    // A relative url with no base url to resolve against
+                    // yields None; skip the source instead of panicking
+                    let Some(url) = url_source.url.url() else {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!("Skipping @font-face source with unresolvable url");
+                        return None;
+                    };
+                    let url = url.as_ref().clone();
                     Some((url, format))
                 });
 
@@ -478,11 +486,11 @@ pub(crate) fn fetch_font_face(
 /// angle distinctly; CSS's bare `normal` is parsed as `Oblique(0deg, 0deg)`
 /// by stylo (see the `FontStyle::parse` impl in stylo's `font_face.rs`), so
 /// that pattern is treated as `Normal` here.
-fn stylo_to_fontique_style(style: &StyloFontStyle) -> parley::fontique::FontStyle {
+fn stylo_to_fontique_style(style: &FontStyleRange) -> parley::fontique::FontStyle {
     use parley::fontique::FontStyle as Fq;
     match style {
-        StyloFontStyle::Italic => Fq::Italic,
-        StyloFontStyle::Oblique(min, max) => {
+        FontStyleRange::Italic => Fq::Italic,
+        FontStyleRange::Oblique(min, max) => {
             let angle = min.degrees();
             // Stylo emits `Oblique(0deg, 0deg)` for the literal CSS `normal`
             // keyword. Map that back to `Normal` so parley's font matching
@@ -493,6 +501,16 @@ fn stylo_to_fontique_style(style: &StyloFontStyle) -> parley::fontique::FontStyl
                 Fq::Oblique(angle)
             }
         }
+    }
+}
+
+/// Handles HTML fetched for an `<iframe>` element's `src`
+pub(crate) struct DocumentSrcHandler;
+
+impl NetHandler for ResourceHandler<DocumentSrcHandler> {
+    fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes) {
+        let html = String::from_utf8_lossy(&bytes).into_owned();
+        self.respond(resolved_url, Ok(Resource::DocumentSrc(html)));
     }
 }
 
@@ -555,13 +573,13 @@ mod tests {
     use parley::fontique::FontStyle as Fq;
     use style::values::specified::Angle;
 
-    fn oblique(min_deg: f32, max_deg: f32) -> StyloFontStyle {
-        StyloFontStyle::Oblique(Angle::from_degrees(min_deg), Angle::from_degrees(max_deg))
+    fn oblique(min_deg: f32, max_deg: f32) -> FontStyleRange {
+        FontStyleRange::Oblique(Angle::from_degrees(min_deg), Angle::from_degrees(max_deg))
     }
 
     #[test]
     fn italic_maps_to_italic() {
-        assert_eq!(stylo_to_fontique_style(&StyloFontStyle::Italic), Fq::Italic,);
+        assert_eq!(stylo_to_fontique_style(&FontStyleRange::Italic), Fq::Italic,);
     }
 
     #[test]

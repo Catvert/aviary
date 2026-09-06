@@ -10,11 +10,7 @@ use crate::model::{AccountId, Contact, MessageHeader, MessageRef, Provider};
 use crate::runtime::Cmd;
 use crate::ui::settings::{MailSearchScope, MailSearchSort};
 use chrono::{Local, NaiveDate};
-use gpui::{
-    div, prelude::*, px, App, AvailableSpace, Context, MouseButton, ScrollStrategy,
-    ScrollWheelEvent, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     avatar::Avatar,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
@@ -23,6 +19,10 @@ use gpui_component::{
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     spinner::Spinner,
     v_flex, v_virtual_list, ActiveTheme, Disableable, IconName, Selectable, Sizable, StyledExt,
+};
+use gpui_kit::{
+    div, prelude::*, px, App, AvailableSpace, Context, MouseButton, ScrollStrategy,
+    ScrollWheelEvent, Window,
 };
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -33,10 +33,10 @@ use super::super::components::overlay_popover::OverlayPopover;
 
 /// Starts fetching the next page before the user reaches the exact bottom of
 /// the list, keeping scrolling fluid.
-const LOAD_MORE_THRESHOLD: gpui::Pixels = px(320.);
+const LOAD_MORE_THRESHOLD: gpui_kit::Pixels = px(320.);
 /// Keep the shortcut out of the way while the first couple of rows are still
 /// visible; after that, returning to the list's beginning becomes useful.
-const SCROLL_TO_TOP_THRESHOLD: gpui::Pixels = px(180.);
+const SCROLL_TO_TOP_THRESHOLD: gpui_kit::Pixels = px(180.);
 const SEARCH_CONTACT_SUGGESTIONS: usize = 4;
 const SEARCH_HISTORY_SUGGESTIONS: usize = 4;
 
@@ -394,9 +394,10 @@ struct MessageListCacheKey {
 }
 
 pub(crate) struct MessageListCache {
+    header_positions: HashMap<MessageRef, usize>,
     key: MessageListCacheKey,
     entries: Rc<Vec<MsgEntry>>,
-    sizes: Rc<Vec<gpui::Size<gpui::Pixels>>>,
+    sizes: Rc<Vec<gpui_kit::Size<gpui_kit::Pixels>>>,
 }
 
 fn neighbor_index_after_removal(len: usize, removed: usize) -> Option<usize> {
@@ -473,7 +474,7 @@ impl AviaryApp {
             .min_w_0()
             .w_full()
             .cleanable(true)
-            .prefix(gpui_component::Icon::new(IconName::Search).small());
+            .prefix(gpui_kit::component::Icon::new(IconName::Search).small());
         let contact_count = contacts.len();
         let mut panel = OverlayPopover::new(
             "mail-search-suggestions-scroll",
@@ -919,7 +920,7 @@ impl AviaryApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (Rc<Vec<MsgEntry>>, Rc<Vec<gpui::Size<gpui::Pixels>>>) {
+    ) -> (Rc<Vec<MsgEntry>>, Rc<Vec<gpui_kit::Size<gpui_kit::Pixels>>>) {
         let key = self.message_list_cache_key();
         if self
             .message_list_cache
@@ -935,25 +936,44 @@ impl AviaryApp {
         // representative per visual variant only when the model changes —
         // keyed by `MsgEntryVariant`, so a new variant measures itself
         // instead of silently borrowing another one's height.
-        let available = gpui::size(AvailableSpace::MinContent, AvailableSpace::MinContent);
-        let mut measured: HashMap<MsgEntryVariant, gpui::Pixels> = HashMap::new();
+        let available = gpui_kit::size(AvailableSpace::MinContent, AvailableSpace::MinContent);
+        let mut measured: HashMap<MsgEntryVariant, gpui_kit::Pixels> = HashMap::new();
         for entry in &entries {
             measured.entry(entry.variant()).or_insert_with(|| {
                 let mut element = self.message_list_item(entry, true, cx);
                 element.layout_as_root(available, window, cx).height
             });
         }
-        let sizes: Rc<Vec<gpui::Size<gpui::Pixels>>> = Rc::new(
+        let sizes: Rc<Vec<gpui_kit::Size<gpui_kit::Pixels>>> = Rc::new(
             entries
                 .iter()
                 .map(|entry| {
                     let height = measured.get(&entry.variant()).copied().unwrap_or_default();
-                    gpui::size(px(0.), height)
+                    gpui_kit::size(px(0.), height)
                 })
                 .collect(),
         );
         let entries = Rc::new(entries);
+        let mut header_positions = HashMap::new();
+        for (position, header) in self
+            .mailbox
+            .search
+            .results
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .chain(self.mailbox.messages.iter())
+            .enumerate()
+        {
+            header_positions
+                .entry(MessageRef {
+                    account_id: header.account_id.clone(),
+                    id: header.id.clone(),
+                })
+                .or_insert(position);
+        }
         self.message_list_cache = Some(MessageListCache {
+            header_positions,
             key,
             entries: entries.clone(),
             sizes: sizes.clone(),
@@ -961,7 +981,7 @@ impl AviaryApp {
         (entries, sizes)
     }
 
-    fn render_bulk_message_toolbar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_bulk_message_toolbar(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let theme = cx.theme().clone();
         let states = self.selected_message_states();
         let references: Vec<_> = states
@@ -1090,7 +1110,7 @@ impl AviaryApp {
                             .border_color(cx.theme().primary)
                             .bg(cx.theme().primary.opacity(0.08))
                             .child(
-                                gpui_component::Icon::new(IconName::Search)
+                                gpui_kit::component::Icon::new(IconName::Search)
                                     .xsmall()
                                     .flex_none()
                                     .text_color(cx.theme().primary),
@@ -1204,6 +1224,19 @@ impl AviaryApp {
     /// for offscreen height measurement, so rendering must remain a constant
     /// height for each entry type.
     fn message_header_for_reference(&self, reference: &MessageRef) -> Option<&MessageHeader> {
+        if let Some(cache) = self
+            .message_list_cache
+            .as_ref()
+            .filter(|cache| cache.key == self.message_list_cache_key())
+        {
+            let position = *cache.header_positions.get(reference)?;
+            let results = self.mailbox.search.results.as_deref().unwrap_or_default();
+            return if position < results.len() {
+                results.get(position)
+            } else {
+                self.mailbox.messages.get(position - results.len())
+            };
+        }
         self.mailbox
             .search
             .results
@@ -1221,7 +1254,7 @@ impl AviaryApp {
         entry: &MsgEntry,
         show_account: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         match entry {
             MsgEntry::Header {
                 key,
@@ -1278,7 +1311,7 @@ impl AviaryApp {
         in_group: bool,
         show_account: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let Some(header) = self.message_header_for_reference(reference) else {
             return div().into_any_element();
         };
@@ -1333,7 +1366,7 @@ impl AviaryApp {
         pinned: bool,
         collapsed: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let theme = cx.theme().clone();
         let section_key = key.to_string();
 
@@ -1343,7 +1376,7 @@ impl AviaryApp {
             .when(pinned && collapsed, |el| el.pb_0p5())
             .child(
                 h_flex()
-                    .id(gpui::ElementId::Name(
+                    .id(gpui_kit::ElementId::Name(
                         format!("message-section-{key}").into(),
                     ))
                     .gap_1p5()
@@ -1379,7 +1412,7 @@ impl AviaryApp {
                         el.rounded_bl(px(0.)).rounded_br(px(0.))
                     })
                     .child(
-                        gpui_component::Icon::new(if collapsed {
+                        gpui_kit::component::Icon::new(if collapsed {
                             IconName::ChevronRight
                         } else {
                             IconName::ChevronDown
@@ -1518,7 +1551,7 @@ impl AviaryApp {
             });
 
         let row = div()
-            .id(gpui::ElementId::Name(
+            .id(gpui_kit::ElementId::Name(
                 format!("msg-{context_scope}-{}-{}", aid.0, m.id).into(),
             ))
             .flex()
@@ -1567,13 +1600,13 @@ impl AviaryApp {
                         let expanded = group.expanded;
                         row.child(
                             div()
-                                .id(gpui::ElementId::Name(
+                                .id(gpui_kit::ElementId::Name(
                                     format!("conversation-toggle-{}-{}", aid.0, group.key.1).into(),
                                 ))
                                 .flex_none()
                                 .cursor_pointer()
                                 .child(
-                                    gpui_component::Icon::new(if expanded {
+                                    gpui_kit::component::Icon::new(if expanded {
                                         IconName::ChevronDown
                                     } else {
                                         IconName::ChevronRight
@@ -1597,13 +1630,13 @@ impl AviaryApp {
                     .when(bulk_selection_active, |row| {
                         row.child(
                             div()
-                                .id(gpui::ElementId::Name(
+                                .id(gpui_kit::ElementId::Name(
                                     format!("message-select-wrapper-{}-{}", aid.0, m.id).into(),
                                 ))
                                 .flex_none()
                                 .on_click(|_, _, cx| cx.stop_propagation())
                                 .child(
-                                    Checkbox::new(gpui::ElementId::Name(
+                                    Checkbox::new(gpui_kit::ElementId::Name(
                                         format!("message-select-{}-{}", aid.0, m.id).into(),
                                     ))
                                     .xsmall()
@@ -1681,7 +1714,9 @@ impl AviaryApp {
                     .children(quick_actions)
                     .child(
                         div()
-                            .id(gpui::ElementId::Name(format!("pin-top-{}", m.id).into()))
+                            .id(gpui_kit::ElementId::Name(
+                                format!("pin-top-{}", m.id).into(),
+                            ))
                             .cursor_pointer()
                             .child(
                                 crate::ui::icons::app_icon(if is_pinned {
@@ -1717,10 +1752,10 @@ impl AviaryApp {
                     )
                     .child(
                         div()
-                            .id(gpui::ElementId::Name(format!("star-{}", m.id).into()))
+                            .id(gpui_kit::ElementId::Name(format!("star-{}", m.id).into()))
                             .cursor_pointer()
                             .child(
-                                gpui_component::Icon::new(if is_flagged {
+                                gpui_kit::component::Icon::new(if is_flagged {
                                     IconName::Star
                                 } else {
                                     IconName::StarOff
@@ -1807,9 +1842,9 @@ impl AviaryApp {
                 let aid = aid.clone();
                 let mid = mid.clone();
                 let reference = reference.clone();
-                move |event: &gpui::ClickEvent, window, cx| {
+                move |event: &gpui_kit::ClickEvent, window, cx| {
                     entity.update(cx, |this, cx| {
-                        this.focus_shortcuts(window);
+                        this.focus_shortcuts(window, cx);
                         let modifiers = event.modifiers();
                         if bulk_selectable && modifiers.shift {
                             this.select_message_range(reference.clone());
@@ -1843,7 +1878,7 @@ impl AviaryApp {
         // extremely heavy and slowing hover. This host makes the global ID
         // path unique.
         div()
-            .id(gpui::ElementId::Name(
+            .id(gpui_kit::ElementId::Name(
                 format!("msg-context-host-{context_scope}-{}", m.id).into(),
             ))
             .w_full()
@@ -1855,7 +1890,7 @@ impl AviaryApp {
         m: &MessageHeader,
         context_scope: &'static str,
         cx: &Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
+    ) -> Vec<gpui_kit::AnyElement> {
         if m.tags.is_empty() {
             return Vec::new();
         }
@@ -1898,7 +1933,7 @@ impl AviaryApp {
                 let entity = entity.clone();
                 let account_id = account_id.clone();
                 div()
-                    .id(gpui::ElementId::Name(
+                    .id(gpui_kit::ElementId::Name(
                         format!("tag-filter-{context_scope}-{}-{tag_id}", m.id).into(),
                     ))
                     .px_1p5()
@@ -1952,7 +1987,7 @@ impl AviaryApp {
                 .font_semibold()
                 .text_color(theme.muted_foreground)
                 .child(
-                    gpui_component::Icon::new(IconName::User)
+                    gpui_kit::component::Icon::new(IconName::User)
                         .xsmall()
                         .text_color(theme.muted_foreground),
                 )
@@ -2161,7 +2196,7 @@ impl AviaryApp {
                             .font_semibold()
                             .text_color(theme.muted_foreground)
                             .child(
-                                gpui_component::Icon::new(IconName::Folder)
+                                gpui_kit::component::Icon::new(IconName::Folder)
                                     .xsmall()
                                     .text_color(theme.muted_foreground),
                             )
@@ -2258,7 +2293,7 @@ impl AviaryApp {
                             .font_semibold()
                             .text_color(theme.muted_foreground)
                             .child(
-                                gpui_component::Icon::new(IconName::Search)
+                                gpui_kit::component::Icon::new(IconName::Search)
                                     .xsmall()
                                     .text_color(theme.muted_foreground),
                             )
@@ -2286,7 +2321,7 @@ impl AviaryApp {
         states: Vec<(MessageRef, bool, bool)>,
         offline: bool,
         cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
+    ) -> Vec<gpui_kit::AnyElement> {
         vec![
             Button::new("bulk-mark-read")
                 .ghost()
@@ -2373,7 +2408,7 @@ impl AviaryApp {
         single_account: Option<AccountId>,
         offline: bool,
         cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
+    ) -> Vec<gpui_kit::AnyElement> {
         let theme = cx.theme().clone();
         let entity = cx.entity();
         // One folder is on screen at a time, so a selection spanning accounts
@@ -2387,7 +2422,7 @@ impl AviaryApp {
         let has_junk_folder = references
             .iter()
             .all(|reference| self.junk_folder_available(&reference.account_id));
-        let mut actions: Vec<gpui::AnyElement> = vec![
+        let mut actions: Vec<gpui_kit::AnyElement> = vec![
             Button::new("bulk-move")
                 .ghost()
                 .xsmall()
@@ -2681,7 +2716,7 @@ impl AviaryApp {
                                     ),
                                 );
                             }
-                            menu.check_side(gpui_component::Side::Right)
+                            menu.check_side(gpui_kit::component::Side::Right)
                         }
                     }),
             )
@@ -2724,7 +2759,7 @@ impl AviaryApp {
     fn render_message_list(
         &self,
         entries: std::rc::Rc<Vec<MsgEntry>>,
-        sizes: std::rc::Rc<Vec<gpui::Size<gpui::Pixels>>>,
+        sizes: std::rc::Rc<Vec<gpui_kit::Size<gpui_kit::Pixels>>>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let show_account = true;
@@ -2745,7 +2780,7 @@ impl AviaryApp {
                     // During wheel animation, the offset
                     // actual position lags behind the target, so
                     // preload relative to where it is heading.
-                    let remaining = handle.max_offset().height
+                    let remaining = handle.max_offset().y
                         + app.read(cx).scrolls.messages.motion.target_y(&handle);
                     if remaining <= LOAD_MORE_THRESHOLD {
                         app.update(cx, |this, cx| this.load_more_messages(cx));
@@ -2800,7 +2835,7 @@ impl AviaryApp {
                             this.scrolls.messages.motion.cancel();
                             let handle = this.scrolls.messages.handle.base_handle().clone();
                             let offset = handle.offset();
-                            handle.set_offset(gpui::point(offset.x, px(0.)));
+                            handle.set_offset(gpui_kit::point(offset.x, px(0.)));
                             cx.notify();
                         })),
                 )

@@ -17,11 +17,11 @@ use super::{quoted_body, snapshot_covers, subject_adds_context};
 use crate::model::{AccountId, LastAction, Message, MessageRef};
 use crate::runtime::Cmd;
 use crate::ui::settings::{BodyViewMode, MailBodyOptions};
-use gpui::{div, prelude::*, rems, AnyElement, Context, ElementId, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex, v_flex, ActiveTheme, Icon, IconName, Sizable, StyledExt,
 };
+use gpui_kit::{div, prelude::*, rems, AnyElement, Context, ElementId, Window};
 use std::collections::HashSet;
 
 /// Where an expanded card takes its body from.

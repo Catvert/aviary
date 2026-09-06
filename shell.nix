@@ -12,7 +12,7 @@ let
     libxi
     libxrandr
     libxcb
-    # gpui rend via blade (Vulkan)
+    # gpui rend via WGPU (Vulkan)
     vulkan-loader
   ];
 in

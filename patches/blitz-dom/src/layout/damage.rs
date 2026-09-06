@@ -1,3 +1,4 @@
+use blitz_traits::node_id::NodeId;
 use std::ops::Range;
 
 use crate::Node;
@@ -16,6 +17,7 @@ use style::values::specified::align::AlignFlags;
 use style::values::specified::box_::DisplayInside;
 use style::values::specified::box_::DisplayOutside;
 use taffy::Rect;
+use thin_vec::ThinVec;
 
 pub(crate) const CONSTRUCT_BOX: RestyleDamage =
     RestyleDamage::from_bits_retain(0b_0000_0000_0001_0000);
@@ -33,21 +35,29 @@ pub(crate) const ALL_DAMAGE: RestyleDamage =
 impl BaseDocument {
     pub(crate) fn propagate_damage_flags(
         &mut self,
-        node_id: usize,
+        node_id: NodeId,
         damage_from_parent: RestyleDamage,
     ) -> RestyleDamage {
-        let mut damage = if let Some(data) = self.nodes[node_id].stylo_element_data.get_mut() {
+        let mut damage = if let Some(data) = self.nodes[node_id]
+            .stylo_element_data_opt_mut()
+            .and_then(|s| s.get_mut())
+        {
             data.damage
         } else {
             return RestyleDamage::empty();
         };
         damage |= damage_from_parent;
 
-        // Flush updated pseudo-element styles to their anonymous nodes so that
-        // style changes which don't trigger box construction still take effect.
-        //
-        // TODO: see if this can be made more efficient (/run less often)
-        self.sync_pseudo_element_styles(node_id);
+        // Skip subtrees which contain no damage. Anonymous nodes are never
+        // skipped themselves because damage marking walks the DOM parent
+        // chain, which bypasses anonymous boxes: a damaged node's flagged
+        // ancestors may reach it only through an unflagged anonymous wrapper.
+        {
+            let node = &self.nodes[node_id];
+            if damage.is_empty() && !node.has_damaged_descendants() && !node.is_anonymous() {
+                return RestyleDamage::empty();
+            }
+        }
 
         let damage_for_children = RestyleDamage::empty();
         let children = std::mem::take(&mut self.nodes[node_id].children);
@@ -62,10 +72,10 @@ impl BaseDocument {
             for child in children.iter() {
                 damage |= self.propagate_damage_flags(*child, damage_for_children);
             }
-            if let Some(before_id) = self.nodes[node_id].before {
+            if let Some(before_id) = self.nodes[node_id].before() {
                 damage |= self.propagate_damage_flags(before_id, damage_for_children);
             }
-            if let Some(after_id) = self.nodes[node_id].after {
+            if let Some(after_id) = self.nodes[node_id].after() {
                 damage |= self.propagate_damage_flags(after_id, damage_for_children);
             }
         }
@@ -86,7 +96,7 @@ impl BaseDocument {
         // If the node or any of it's children have been mutated or their layout styles
         // have changed, then we should clear it's layout cache.
         if damage.intersects(ONLY_RELAYOUT | CONSTRUCT_BOX) {
-            node.cache.clear();
+            node.cache_mut().clear();
             if let Some(inline_layout) = node
                 .data
                 .downcast_element_mut()
@@ -121,63 +131,44 @@ impl BaseDocument {
         damage_for_parent
     }
 
-    /// Flush updated pseudo-element (`::before`/`::after`) styles from the owning
-    /// element's stylo data to the pseudo-element's anonymous node.
-    ///
-    /// Pseudo-element styles are normally flushed to the pseudo-element's node
-    /// during box construction (see `flush_pseudo_elements`), but in incremental
-    /// mode box construction only runs for nodes with construction damage.
-    /// Pseudo-element style changes which don't require reconstruction (e.g.
-    /// animations/transitions of repaint- or relayout-only properties) must still
-    /// be flushed to the pseudo-element's node - along with the damage they imply -
-    /// so that layout and paint see the new style.
-    fn sync_pseudo_element_styles(&mut self, node_id: usize) {
-        let node = &self.nodes[node_id];
-
-        let before_node_id = node.before;
-        let after_node_id = node.after;
-        if before_node_id.is_none() && after_node_id.is_none() {
-            return;
-        }
-
-        let (before_style, after_style) = {
-            let style_data = node.stylo_element_data.get();
-            let Some(style_data) = style_data.as_ref() else {
-                return;
-            };
-            // Note: yes these are kinda backwards (see `flush_pseudo_elements`)
-            let pseudos = style_data.styles.pseudos.as_array();
-            (pseudos[1].clone(), pseudos[0].clone())
-        };
-
-        // Creation and removal of pseudo-elements is handled during box construction
-        // (Stylo generates construction damage for those cases), so only the case
-        // where the pseudo-element both was and remains present is handled here.
-        for (pe_node_id, pe_style) in [(before_node_id, before_style), (after_node_id, after_style)]
+    /// Clear damage and the `damaged_descendants`/`dirty_descendants` flags
+    /// on all nodes which may carry them, using the `damaged_descendants`
+    /// flags to skip clean subtrees (mirroring `propagate_damage_flags`).
+    pub(crate) fn clear_damage_and_dirty_flags(&mut self, node_id: NodeId) {
         {
-            let (Some(pe_node_id), Some(pe_style)) = (pe_node_id, pe_style) else {
-                continue;
-            };
-            let mut pe_data = self.nodes[pe_node_id].stylo_element_data.get_mut();
-            let Some(pe_data) = pe_data.as_mut() else {
-                continue;
-            };
-            let Some(old_style) = pe_data.styles.primary.clone() else {
-                continue;
-            };
-            if std::ptr::eq(&*old_style, &*pe_style) {
-                continue;
+            let node = &self.nodes[node_id];
+            let has_damage = node.damage().is_some_and(|d| !d.is_empty());
+            if !has_damage && !node.has_damaged_descendants() && !node.is_anonymous() {
+                return;
             }
-
-            let diff = RestyleDamage::compute_style_difference::<&Node>(&old_style, &pe_style);
-            pe_data.damage.insert(diff.damage);
-            pe_data.styles.primary = Some(pe_style);
-            pe_data.set_restyled();
         }
+
+        let children = std::mem::take(&mut self.nodes[node_id].children);
+        let layout_children = std::mem::take(self.nodes[node_id].layout_children.get_mut());
+        for child in children.iter() {
+            self.clear_damage_and_dirty_flags(*child);
+        }
+        if let Some(layout_children) = layout_children.as_ref() {
+            for child in layout_children.iter() {
+                self.clear_damage_and_dirty_flags(*child);
+            }
+        }
+        if let Some(before_id) = self.nodes[node_id].before() {
+            self.clear_damage_and_dirty_flags(before_id);
+        }
+        if let Some(after_id) = self.nodes[node_id].after() {
+            self.clear_damage_and_dirty_flags(after_id);
+        }
+
+        let node = &mut self.nodes[node_id];
+        node.children = children;
+        *node.layout_children.get_mut() = layout_children;
+        node.clear_damage_mut();
+        node.unset_damaged_descendants();
+        node.unset_dirty_descendants();
     }
 }
 
-// #[cfg(feature = "incremental")]
 // fn is_fc_root(style: &ComputedValues) -> bool {
 //     let display = style.clone_display();
 //     let display_inside = display.inside();
@@ -213,6 +204,7 @@ pub(crate) fn compute_layout_damage(old: &ComputedValues, new: &ComputedValues) 
         if old_box.display != new_box.display
             || old_box.float != new_box.float
             || old_box.position != new_box.position
+            || old_box.contain != new_box.contain
             || old.clone_visibility() != new.clone_visibility()
         {
             return true;
@@ -303,7 +295,7 @@ pub(crate) fn compute_layout_damage(old: &ComputedValues, new: &ComputedValues) 
 /// A child with a z_index that is hoisted up to it's containing Stacking Context for paint purposes
 #[derive(Debug, Clone)]
 pub struct HoistedPaintChild {
-    pub node_id: usize,
+    pub node_id: NodeId,
     pub z_index: i32,
     pub position: taffy::Point<f32>,
 }
@@ -334,10 +326,10 @@ impl HoistedPaintChildren {
     pub fn compute_content_size(&mut self, doc: &BaseDocument) {
         fn child_pos(child: &HoistedPaintChild, doc: &BaseDocument) -> Rect<f32> {
             let node = &doc.nodes[child.node_id];
-            let left = child.position.x + node.final_layout.location.x;
-            let top = child.position.y + node.final_layout.location.y;
-            let right = left + node.final_layout.size.width;
-            let bottom = top + node.final_layout.size.height;
+            let left = child.position.x + node.final_layout().location.x;
+            let top = child.position.y + node.final_layout().location.y;
+            let right = left + node.final_layout().size.width;
+            let bottom = top + node.final_layout().size.height;
 
             taffy::Rect {
                 top,
@@ -426,21 +418,44 @@ impl BaseDocument {
         }
     }
 
-    pub fn flush_styles_to_layout(&mut self, node_id: usize) {
+    pub fn flush_styles_to_layout(&mut self, node_id: NodeId) {
         self.flush_styles_to_layout_impl(node_id, None);
+    }
+
+    /// Flush the image layers of nodes whose style changed during the last
+    /// style traversal (or whose pseudo-element boxes were (re)constructed).
+    pub(crate) fn flush_pending_style_images(&mut self) {
+        let mut pending = std::mem::take(&mut self.pending_style_image_nodes);
+        pending.sort_unstable();
+        pending.dedup();
+        for node_id in pending {
+            // Anonymous boxes (including pseudo-elements) can be removed from
+            // the slab between queueing and flushing; skip stale IDs.
+            if !self.nodes.contains_key(node_id) {
+                continue;
+            }
+            self.flush_image_layers_from_style(node_id, ImageLayerKind::Background);
+            self.flush_image_layers_from_style(node_id, ImageLayerKind::Mask);
+        }
     }
 
     /// Flush a CSS image layer list (`background-image` or `mask-image`) from style
     /// to dedicated storage on the node, fetching any images which are not yet loaded.
-    fn flush_image_layers_from_style(&mut self, node_id: usize, kind: ImageLayerKind) {
+    fn flush_image_layers_from_style(&mut self, node_id: NodeId, kind: ImageLayerKind) {
         let doc_id = self.id();
         let node = self.nodes.get_mut(node_id).unwrap();
-        let stylo_element_data = node.stylo_element_data.get();
-        let primary_styles = stylo_element_data
-            .as_ref()
-            .and_then(|data| data.styles.get_primary());
-        let Some(style) = primary_styles else {
-            return;
+        // Clone the primary style `Arc` into an owned value so the immutable
+        // borrow of `node` (held by the stylo element data guard) is released
+        // before we take a mutable borrow of `node.data` below.
+        let style = {
+            let stylo_element_data = node.stylo_element_data_opt().and_then(|s| s.get());
+            let primary_styles = stylo_element_data
+                .as_ref()
+                .and_then(|data| data.styles.get_primary());
+            let Some(style) = primary_styles else {
+                return;
+            };
+            style.clone()
         };
         let Some(elem) = node.data.downcast_element_mut() else {
             return;
@@ -464,7 +479,7 @@ impl BaseDocument {
                     let old_image = elem_images[idx].as_ref();
                     let old_image_url = old_image.map(|data| &data.url);
                     if old_image_url.is_some_and(|old_url| **new_url == **old_url) {
-                        break;
+                        continue;
                     }
 
                     // Check cache first
@@ -519,38 +534,46 @@ impl BaseDocument {
     /// Walk the whole tree, converting styles to layout
     fn flush_styles_to_layout_impl(
         &mut self,
-        node_id: usize,
+        node_id: NodeId,
         parent_stacking_context: Option<&mut HoistedPaintChildren>,
     ) {
         let mut new_stacking_context: HoistedPaintChildren = HoistedPaintChildren::new();
         let stacking_context = &mut new_stacking_context;
 
-        // Flush background/mask images from style to dedicated storage on the node
-        self.flush_image_layers_from_style(node_id, ImageLayerKind::Background);
-        self.flush_image_layers_from_style(node_id, ImageLayerKind::Mask);
-
         let incremental = self.incremental_layout;
         let display = {
             let node = self.nodes.get_mut(node_id).unwrap();
             let _damage = node.damage().unwrap_or(ALL_DAMAGE);
-            let stylo_element_data = node.stylo_element_data.get();
-            let primary_styles = stylo_element_data
-                .as_ref()
-                .and_then(|data| data.styles.get_primary());
 
-            let Some(style) = primary_styles else {
-                return;
+            // Compute the owned taffy style and display in an inner scope so the
+            // immutable borrow of `node` (held by the stylo element data guard)
+            // is released before we mutably access `node` below.
+            let (mut taffy_style, display_constructed_as) = {
+                let stylo_element_data = node.stylo_element_data_opt().and_then(|s| s.get());
+                let primary_styles = stylo_element_data
+                    .as_ref()
+                    .and_then(|data| data.styles.get_primary());
+
+                let Some(style) = primary_styles else {
+                    return;
+                };
+
+                (stylo_taffy::to_taffy_style(style), style.clone_display())
             };
+            taffy_style.item_is_replaced = node
+                .data
+                .downcast_element()
+                .is_some_and(|el| crate::layout::replaced::is_replaced_element(&el.name.local));
 
             // if damage.intersects(RestyleDamage::RELAYOUT | CONSTRUCT_BOX) {
-            node.style = stylo_taffy::to_taffy_style(style);
-            node.display_constructed_as = style.clone_display();
+            *node.style_mut() = taffy_style;
+            *node.display_constructed_as_mut() = display_constructed_as;
             // }
 
             // In non-incremental mode we unconditionally clear the Taffy cache.
             // In incremental mode this is handled as part of damage propagation.
             if !incremental {
-                node.cache.clear();
+                node.cache_mut().clear();
                 if let Some(inline_layout) = node
                     .data
                     .downcast_element_mut()
@@ -560,7 +583,7 @@ impl BaseDocument {
                 }
             }
 
-            node.style.display
+            node.style().display
         };
 
         // If the node has children, then take those children and...
@@ -591,7 +614,7 @@ impl BaseDocument {
             // Reserve space for paint_children
             let mut paint_children = self.nodes[node_id].paint_children.borrow_mut();
             if paint_children.is_none() {
-                *paint_children = Some(Vec::new());
+                *paint_children = Some(ThinVec::new());
             }
             let paint_children = paint_children.as_mut().unwrap();
             paint_children.clear();
@@ -636,8 +659,8 @@ impl BaseDocument {
         }
 
         if let Some(parent_stacking_context) = parent_stacking_context {
-            let position = self.nodes[node_id].final_layout.location;
-            let scroll_offset = self.nodes[node_id].scroll_offset;
+            let position = self.nodes[node_id].final_layout().location;
+            let scroll_offset = *self.nodes[node_id].scroll_offset();
             for hoisted in stacking_context.children.iter_mut() {
                 hoisted.position.x += position.x - scroll_offset.x as f32;
                 hoisted.position.y += position.y - scroll_offset.y as f32;

@@ -7,9 +7,9 @@ use super::app::AviaryApp;
 use super::{icons, util};
 use crate::model::{AccountId, Provider, Tag};
 use crate::runtime::Cmd;
-use gpui::{Entity, Hsla, Styled};
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
-use gpui_component::Side;
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::Side;
+use gpui_kit::{Entity, Hsla, Styled};
 
 /// Provider color when available, otherwise Aviary's stable name-derived
 /// color. Pills, menus, and filter controls all use this same resolution.

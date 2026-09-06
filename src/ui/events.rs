@@ -16,8 +16,8 @@ use super::app::AviaryApp;
 use super::state::{AuthState, MainView};
 use crate::model::{AccountId, MessageRef};
 use crate::runtime::Evt;
-use gpui::{Context, Window};
-use gpui_component::notification::Notification;
+use gpui_kit::component::notification::Notification;
+use gpui_kit::{Context, Window};
 
 impl AviaryApp {
     pub(super) fn handle_notification_action(
@@ -64,7 +64,10 @@ impl AviaryApp {
 
     /// Every block editor the main window can route a runtime reply to, by
     /// `editor_id`: grammar results and downloaded pasted images both land here.
-    fn block_editors(&self, cx: &gpui::App) -> Vec<gpui::Entity<super::block_editor::BlockEditor>> {
+    fn block_editors(
+        &self,
+        cx: &gpui_kit::App,
+    ) -> Vec<gpui_kit::Entity<super::block_editor::BlockEditor>> {
         let mut editors: Vec<_> = self
             .composes
             .iter()
@@ -538,10 +541,11 @@ impl AviaryApp {
                 messages,
             } => self.on_thread(conversation_id, messages),
             Evt::SearchResults {
+                request_id,
                 account_id,
                 query,
                 messages,
-            } => self.on_search_results(account_id, query, messages),
+            } => self.on_search_results(request_id, account_id, query, messages),
             Evt::CalendarEvents {
                 account_id,
                 from,

@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "stylo_derive"
-version = "0.19.0"
+version = "0.20.0"
 authors = ["The Servo Project Developers"]
 build = false
 autolib = false

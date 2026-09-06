@@ -4,8 +4,8 @@ use super::super::app::AviaryApp;
 use super::super::state::ThreadBodyState;
 use crate::model::{AccountId, CalendarEvent, InvitationResponse, Message, MessageRef};
 use chrono::{DateTime, Utc};
-use gpui::{Context, Window};
-use gpui_component::notification::Notification;
+use gpui_kit::component::notification::Notification;
+use gpui_kit::{Context, Window};
 
 impl AviaryApp {
     pub(super) fn on_invitation_responded(

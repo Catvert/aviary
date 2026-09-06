@@ -6,14 +6,13 @@ use super::super::settings::MailBodyOptions;
 use super::{labelled, SettingsTab, SettingsUi};
 use crate::blocks::{BlockKind, TEMPLATE_CURSOR_PLACEHOLDER};
 use crate::model::{AccountId, InlineImage};
-use gpui::{div, prelude::*, px, Context, Entity, Window};
-use gpui_component::{
+use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
-    h_flex,
-    input::{Input, InputState},
-    v_flex, ActiveTheme, IconName, Sizable, WindowExt,
+    h_flex, v_flex, ActiveTheme, IconName, Sizable, WindowExt,
 };
+use gpui_kit::{div, prelude::*, px, Context, Entity, Window};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SnippetKind {
@@ -38,14 +37,14 @@ impl SnippetKind {
         }
     }
 
-    fn body_placeholder(self) -> gpui::SharedString {
+    fn body_placeholder(self) -> gpui_kit::SharedString {
         match self {
             Self::Signature => tr!("signatures-body-placeholder"),
             Self::Template => tr!("templates-body-placeholder"),
         }
     }
 
-    fn name_placeholder(self) -> gpui::SharedString {
+    fn name_placeholder(self) -> gpui_kit::SharedString {
         match self {
             Self::Signature => tr!("settings-signatures-name-hint"),
             Self::Template => tr!("templates-name-placeholder"),
@@ -87,7 +86,7 @@ impl SnippetKind {
         }
     }
 
-    fn form_title(self, editing: bool) -> gpui::SharedString {
+    fn form_title(self, editing: bool) -> gpui_kit::SharedString {
         match (self, editing) {
             (Self::Signature, true) => tr!("signatures-edit-title"),
             (Self::Signature, false) => tr!("signatures-new-title"),
@@ -284,7 +283,7 @@ impl AviaryApp {
         kind: SnippetKind,
         _window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let theme = cx.theme().clone();
         let account_selector = self.render_settings_account_selector(kind.tab(), cx);
         let Some(account_id) = self.current_account_id.clone() else {
@@ -336,7 +335,7 @@ impl AviaryApp {
                         )
                     })
                     .child(
-                        Button::new(gpui::ElementId::Name(
+                        Button::new(gpui_kit::ElementId::Name(
                             format!("edit-{}-{id}", kind.id_prefix()).into(),
                         ))
                         .ghost()
@@ -349,7 +348,7 @@ impl AviaryApp {
                         )),
                     )
                     .child(
-                        Button::new(gpui::ElementId::Name(
+                        Button::new(gpui_kit::ElementId::Name(
                             format!("delete-{}-{id}", kind.id_prefix()).into(),
                         ))
                         .danger()
@@ -583,8 +582,7 @@ impl AviaryApp {
             return;
         };
         let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .rows(12)
                 .placeholder(kind.html_placeholder())
         });
@@ -593,8 +591,12 @@ impl AviaryApp {
             let editor = editor.clone();
             dialog
                 .title(kind.html_dialog_title())
-                .confirm()
-                .child(Input::new(&input).h(px(260.)))
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
+                .child(Textarea::new(&input).h(px(260.)))
                 .on_ok(move |_, window, cx| {
                     let html = input.read(cx).value().trim().to_string();
                     if html.is_empty() {

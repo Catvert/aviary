@@ -1794,7 +1794,7 @@ Contenu du rapport.\r\n\
 /// alias can only be resolved against the account's own folder list. `inbox` is
 /// absent on purpose: `resolve_folders` already maps it to `INBOX`, which every
 /// server has.
-fn well_known_move_alias(target: &str) -> Option<(&'static str, gpui::SharedString)> {
+fn well_known_move_alias(target: &str) -> Option<(&'static str, gpui_kit::SharedString)> {
     if target.eq_ignore_ascii_case(crate::providers::ARCHIVE_FOLDER_ALIAS) {
         Some(("archive", tr!("notify-archive-unavailable")))
     } else if target.eq_ignore_ascii_case(crate::providers::JUNK_FOLDER_ALIAS) {

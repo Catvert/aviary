@@ -3,8 +3,8 @@
 use super::super::app::AviaryApp;
 use crate::model::{AccountId, Message, SentMessage};
 use crate::runtime::Cmd;
-use gpui::{Context, Window};
-use gpui_component::notification::Notification;
+use gpui_kit::component::notification::Notification;
+use gpui_kit::{Context, Window};
 
 impl AviaryApp {
     pub(super) fn on_mail_sent(

@@ -1,3 +1,4 @@
+use blitz_traits::node_id::NodeId;
 use core::str;
 use std::sync::Arc;
 
@@ -6,7 +7,6 @@ use parley::{
     FontContext, InlineBox, InlineBoxKind, LayoutContext, StyleProperty, TreeBuilder,
     WhiteSpaceCollapse,
 };
-use slab::Slab;
 use style::{
     computed_values::position::T as PositionProperty,
     data::ElementData as StyloElementData,
@@ -16,6 +16,7 @@ use style::{
         specified::box_::{DisplayInside, DisplayOutside},
     },
 };
+use thin_vec::ThinVec;
 
 use crate::{
     BaseDocument, ElementData, Node, NodeData,
@@ -28,7 +29,12 @@ use crate::{
     traversal::{iter_children, iter_children_and_pseudos},
 };
 
-use super::{damage::ALL_DAMAGE, list::collect_list_item_children, table::build_table_context};
+use super::{
+    damage::ALL_DAMAGE,
+    list::{BULLET_FONT_FAMILY, collect_list_item_children},
+    replaced::is_replaced_element,
+    table::build_table_context,
+};
 
 const DUMMY_NAME: QualName = qual_name!("div", html);
 
@@ -84,12 +90,12 @@ fn push_text_preserving_nbsp(
 
 #[derive(Clone)]
 pub(crate) struct ConstructionTask {
-    pub(crate) node_id: usize,
+    pub(crate) node_id: NodeId,
     pub(crate) data: ConstructionTaskData,
 }
 
 pub(crate) struct ConstructionTaskResult {
-    pub(crate) node_id: usize,
+    pub(crate) node_id: NodeId,
     pub(crate) data: ConstructionTaskResultData,
 }
 
@@ -109,25 +115,30 @@ pub(crate) enum ConstructionTaskResultData {
 /// any) that wrapping children are being appended to.
 #[derive(Default)]
 pub(crate) struct LayoutChildren {
-    pub(crate) children: Vec<usize>,
-    pub(crate) anonymous_block_id: Option<usize>,
+    pub(crate) children: ThinVec<NodeId>,
+    pub(crate) anonymous_block_id: Option<NodeId>,
+    /// All anonymous blocks created while collecting these layout children.
+    ///
+    /// These are recorded on the container node so they can be deallocated the
+    /// next time it is reconstructed.
+    pub(crate) anonymous_blocks: ThinVec<NodeId>,
 }
 
 impl LayoutChildren {
     /// Append a single layout child.
-    fn push(&mut self, child_id: usize, doc: &mut BaseDocument) {
+    fn push(&mut self, child_id: NodeId, doc: &mut BaseDocument) {
         self.maybe_push_anon_block(doc);
         self.children.push(child_id);
     }
 
     /// Append all layout children in `slice`.
-    fn extend(&mut self, slice: &[usize], doc: &mut BaseDocument) {
+    fn extend(&mut self, slice: &[NodeId], doc: &mut BaseDocument) {
         self.maybe_push_anon_block(doc);
         self.children.extend_from_slice(slice);
     }
 
     fn maybe_push_anon_block(&mut self, doc: &mut BaseDocument) {
-        fn block_is_only_whitespace(doc: &BaseDocument, node_id: usize) -> bool {
+        fn block_is_only_whitespace(doc: &BaseDocument, node_id: NodeId) -> bool {
             for child_id in doc.nodes[node_id].children.iter().copied() {
                 let child = &doc.nodes[child_id];
                 if !child.is_whitespace_node() {
@@ -146,14 +157,20 @@ impl LayoutChildren {
                 if let Some(pos) = self.children.iter().rposition(|id| *id == anon_id) {
                     self.children.remove(pos);
                 }
-                doc.nodes.remove(anon_id);
+                self.anonymous_blocks.retain(|id| *id != anon_id);
+                doc.remove_node_from_tree(anon_id);
             }
         }
 
         self.anonymous_block_id = None;
     }
 
-    fn push_wrapped(&mut self, container_node_id: usize, child_id: usize, doc: &mut BaseDocument) {
+    fn push_wrapped(
+        &mut self,
+        container_node_id: NodeId,
+        child_id: NodeId,
+        doc: &mut BaseDocument,
+    ) {
         if self.anonymous_block_id.is_none() {
             self.create_anonymous_block(container_node_id, doc);
         }
@@ -162,7 +179,7 @@ impl LayoutChildren {
             .push(child_id);
     }
 
-    fn create_anonymous_block(&mut self, container_node_id: usize, doc: &mut BaseDocument) {
+    fn create_anonymous_block(&mut self, container_node_id: NodeId, doc: &mut BaseDocument) {
         use style::selector_parser::PseudoElement;
 
         const NAME: QualName = QualName {
@@ -170,7 +187,10 @@ impl LayoutChildren {
             ns: ns!(html),
             local: local_name!("div"),
         };
-        let node_id = doc.create_node(NodeData::AnonymousBlock(ElementData::new(NAME, Vec::new())));
+        let node_id = doc.create_node(NodeData::AnonymousBlock(Box::new(ElementData::new(
+            NAME,
+            Vec::new(),
+        ))));
 
         // Set style data
         let parent_style = doc.nodes[container_node_id].primary_styles().unwrap();
@@ -190,7 +210,9 @@ impl LayoutChildren {
         stylo_element_data.styles.primary = Some(style);
         stylo_element_data.set_restyled();
 
-        *doc.nodes[node_id].stylo_element_data.ensure_init_mut() = stylo_element_data;
+        *doc.nodes[node_id]
+            .stylo_element_data_mut()
+            .ensure_init_mut() = stylo_element_data;
 
         if doc.nodes[container_node_id]
             .flags
@@ -205,20 +227,73 @@ impl LayoutChildren {
 
         self.children.push(node_id);
         self.anonymous_block_id = Some(node_id);
+        self.anonymous_blocks.push(node_id);
     }
 }
 
-fn push_children_and_pseudos(layout_children: &mut Vec<usize>, node: &Node) {
-    if let Some(before) = node.before {
+fn push_children_and_pseudos(layout_children: &mut ThinVec<NodeId>, node: &Node) {
+    if let Some(before) = node.before() {
         layout_children.push(before);
     }
     layout_children.extend(node.children.iter().copied().filter(|child_id| {
         let child_node = node.with(*child_id);
         child_node.data.kind() != NodeKind::Comment
     }));
-    if let Some(after) = node.after {
+    if let Some(after) = node.after() {
         layout_children.push(after);
     }
+}
+
+/// Wrapping policy of the nearest non-contents ancestor container. Children
+/// hoisted out of display:contents nodes must be wrapped in anonymous blocks
+/// exactly as if they were direct children of that container: without this,
+/// a bare text node could end up as the layout child of a block/flex/grid
+/// container, which cannot be laid out (text nodes carry no style).
+#[derive(Copy, Clone)]
+struct WrapContext {
+    /// The container whose style anonymous blocks inherit from.
+    container_node_id: NodeId,
+    needs_wrap: fn(NodeKind, DisplayOutside) -> bool,
+}
+
+fn block_item_needs_wrap(child_node_kind: NodeKind, display_outside: DisplayOutside) -> bool {
+    child_node_kind == NodeKind::Text || display_outside == DisplayOutside::Inline
+}
+
+/// Used for flex/grid containers, and for flow containers whose in-flow
+/// children are all out-of-flow (where inline elements are pushed raw, but
+/// bare text still cannot be laid out directly).
+fn text_item_needs_wrap(child_node_kind: NodeKind, _display_outside: DisplayOutside) -> bool {
+    child_node_kind == NodeKind::Text
+}
+
+/// Push a single hoisted child, recursing through display:contents nodes and
+/// wrapping text/inline children per the ancestor container's `WrapContext`.
+fn push_hoisted_child(
+    doc: &mut BaseDocument,
+    child_id: NodeId,
+    out: &mut LayoutChildren,
+    wrap: Option<WrapContext>,
+) {
+    let child = &doc.nodes[child_id];
+    let child_display = child.display_style().unwrap_or(Display::inline());
+    if matches!(child_display.inside(), DisplayInside::Contents) {
+        collect_layout_children_with_wrap(doc, child_id, out, wrap);
+        return;
+    }
+    if let Some(wrap_ctx) = wrap {
+        let child_node_kind = child.data.kind();
+        let display_outside = if child.is_or_contains_block() {
+            DisplayOutside::Block
+        } else {
+            child_display.outside()
+        };
+        if (wrap_ctx.needs_wrap)(child_node_kind, display_outside) {
+            out.push_wrapped(wrap_ctx.container_node_id, child_id, doc);
+            return;
+        }
+    }
+    out.push(child_id, doc);
 }
 
 /// Push the container's children (and ::before/::after pseudos) as layout
@@ -226,11 +301,12 @@ fn push_children_and_pseudos(layout_children: &mut Vec<usize>, node: &Node) {
 /// filtering out comments and whitespace.
 fn push_hoisted_children_and_pseudos(
     doc: &mut BaseDocument,
-    container_node_id: usize,
+    container_node_id: NodeId,
     out: &mut LayoutChildren,
+    wrap: Option<WrapContext>,
 ) {
-    if let Some(before) = doc.nodes[container_node_id].before {
-        out.push(before, doc);
+    if let Some(before) = doc.nodes[container_node_id].before() {
+        push_hoisted_child(doc, before, out, wrap);
     }
     // Take children array from node to avoid borrow checker issues.
     let children = std::mem::take(&mut doc.nodes[container_node_id].children);
@@ -239,28 +315,23 @@ fn push_hoisted_children_and_pseudos(
         if child.data.kind() == NodeKind::Comment || child.is_whitespace_node() {
             continue;
         }
-        let child_display = child.display_style().unwrap_or(Display::inline());
-        if matches!(child_display.inside(), DisplayInside::Contents) {
-            collect_layout_children(doc, child_id, out);
-        } else {
-            out.push(child_id, doc);
-        }
+        push_hoisted_child(doc, child_id, out, wrap);
     }
     doc.nodes[container_node_id].children = children;
-    if let Some(after) = doc.nodes[container_node_id].after {
-        out.push(after, doc);
+    if let Some(after) = doc.nodes[container_node_id].after() {
+        push_hoisted_child(doc, after, out, wrap);
     }
 }
 
-fn push_non_whitespace_children_and_pseudos(layout_children: &mut Vec<usize>, node: &Node) {
-    if let Some(before) = node.before {
+fn push_non_whitespace_children_and_pseudos(layout_children: &mut ThinVec<NodeId>, node: &Node) {
+    if let Some(before) = node.before() {
         layout_children.push(before);
     }
     layout_children.extend(node.children.iter().copied().filter(|child_id| {
         let child_node = node.with(*child_id);
         !child_node.is_whitespace_node() && child_node.data.kind() != NodeKind::Comment
     }));
-    if let Some(after) = node.after {
+    if let Some(after) = node.after() {
         layout_children.push(after);
     }
 }
@@ -294,15 +365,33 @@ impl Default for FlowClassification {
     }
 }
 
-/// Classify `children` for inline-vs-block layout, recursing transparently
+/// Classify a flow container's children (including its ::before/::after
+/// pseudo-elements) for inline-vs-block layout, recursing transparently
 /// through display:contents nodes (whose children participate in the
 /// container's formatting context).
 fn classify_flow_children(
     doc: &BaseDocument,
-    children: &[usize],
+    container_node_id: NodeId,
     classification: &mut FlowClassification,
 ) {
-    for child_id in children.iter().copied() {
+    let node = &doc.nodes[container_node_id];
+    // ::before/::after pseudos with display:contents are transparent for box
+    // generation, so their children (e.g. generated text) participate in the
+    // container's formatting context and vote in the classification. Pseudos
+    // with any other display value generate their own box, which every
+    // construction arm already pushes explicitly, so they cast no vote.
+    let pseudo_ids = node
+        .before()
+        .into_iter()
+        .chain(node.after())
+        .filter(|pe_id| {
+            let display = doc.nodes[*pe_id]
+                .display_style()
+                .unwrap_or(Display::inline());
+            matches!(display.inside(), DisplayInside::Contents)
+        });
+    let child_ids = node.children.iter().copied().chain(pseudo_ids);
+    for child_id in child_ids {
         let child = &doc.nodes[child_id];
 
         // Comment nodes generate no boxes and must not affect the
@@ -325,7 +414,10 @@ fn classify_flow_children(
             // Transparent for box generation: the contents node casts
             // no vote itself — its children decide.
             classification.has_contents = true;
-            classify_flow_children(doc, &child.children, classification);
+            classify_flow_children(doc, child_id, classification);
+        } else if matches!(display.inside(), DisplayInside::None) {
+            // display:none children generate no boxes and cast no vote.
+            continue;
         } else {
             let position = style
                 .map(|s| s.clone_position())
@@ -334,6 +426,11 @@ fn classify_flow_children(
 
             // Ignore nodes that are entirely whitespace
             if child.is_whitespace_node() {
+                continue;
+            }
+
+            // display:none children generate no boxes and cast no vote
+            if matches!(display.outside(), DisplayOutside::None) {
                 continue;
             }
 
@@ -367,8 +464,17 @@ fn classify_flow_children(
 
 pub(crate) fn collect_layout_children(
     doc: &mut BaseDocument,
-    container_node_id: usize,
+    container_node_id: NodeId,
     out: &mut LayoutChildren,
+) {
+    collect_layout_children_with_wrap(doc, container_node_id, out, None)
+}
+
+fn collect_layout_children_with_wrap(
+    doc: &mut BaseDocument,
+    container_node_id: NodeId,
+    out: &mut LayoutChildren,
+    wrap: Option<WrapContext>,
 ) {
     // Reset construction flags
     // TODO: make incremental and only remove this if the element is no longer an inline root
@@ -416,7 +522,7 @@ pub(crate) fn collect_layout_children(
             }
 
             // Remove contruction damage from subtree
-            doc.iter_subtree_mut(container_node_id, |id: usize, doc: &mut BaseDocument| {
+            doc.iter_subtree_mut(container_node_id, |id: NodeId, doc: &mut BaseDocument| {
                 doc.nodes[id].remove_damage(CONSTRUCT_BOX | CONSTRUCT_DESCENDENT | CONSTRUCT_FC);
             });
 
@@ -432,7 +538,7 @@ pub(crate) fn collect_layout_children(
                 Err(err) => {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(
-                        node_id = container_node_id,
+                        node_id = ?container_node_id,
                         html = outer_html,
                         error = ?err,
                         "SVG parse failed",
@@ -461,7 +567,7 @@ pub(crate) fn collect_layout_children(
     // Skip further construction if the node has no children or psuedo-children
     {
         let node = &doc.nodes[container_node_id];
-        if node.children.is_empty() && node.before.is_none() && node.after.is_none() {
+        if node.children.is_empty() && node.before().is_none() && node.after().is_none() {
             return;
         }
     }
@@ -481,24 +587,82 @@ pub(crate) fn collect_layout_children(
             // display:contents is transparent for box generation: hoist the
             // children THEMSELVES (not their layout children) into the
             // parent, recursing only through nested contents nodes.
-            push_hoisted_children_and_pseudos(doc, container_node_id, out);
+            push_hoisted_children_and_pseudos(doc, container_node_id, out, wrap);
         }
-        DisplayInside::Flow | DisplayInside::FlowRoot | DisplayInside::TableCell => {
-            // display:contents children are transparent for box generation:
-            // their children participate in this container's formatting
-            // context, so classification must recurse into them.
-            let mut classification = FlowClassification::default();
-            classify_flow_children(
+        DisplayInside::Flex | DisplayInside::Grid => {
+            // ::before/::after pseudos must be checked too: a pseudo with
+            // display:contents hoists its text content into the container.
+            let container = &doc.nodes[container_node_id];
+            let has_text_node_or_contents = container
+                .children
+                .iter()
+                .copied()
+                .chain(container.before())
+                .chain(container.after())
+                .map(|child_id| &doc.nodes[child_id])
+                .any(|child| {
+                    let display = child.display_style().unwrap_or(Display::inline());
+                    let node_kind = child.data.kind();
+                    display.inside() == DisplayInside::Contents || node_kind == NodeKind::Text
+                });
+
+            if !has_text_node_or_contents {
+                return push_non_whitespace_children_and_pseudos(
+                    &mut out.children,
+                    &doc.nodes[container_node_id],
+                );
+            }
+
+            collect_complex_layout_children(
                 doc,
-                &doc.nodes[container_node_id].children,
-                &mut classification,
+                container_node_id,
+                out,
+                true,
+                text_item_needs_wrap,
             );
+        }
+
+        DisplayInside::Table => {
+            let (table_context, tlayout_children) = build_table_context(doc, container_node_id);
+            #[allow(clippy::arc_with_non_send_sync)]
+            let data = SpecialElementData::TableRoot(Arc::new(table_context));
+            doc.nodes[container_node_id]
+                .flags
+                .insert(NodeFlags::IS_TABLE_ROOT);
+            doc.nodes[container_node_id]
+                .data
+                .downcast_element_mut()
+                .unwrap()
+                .special_data = data;
+            if let Some(before) = doc.nodes[container_node_id].before() {
+                out.push(before, doc);
+            }
+            out.extend(&tlayout_children, doc);
+            if let Some(after) = doc.nodes[container_node_id].after() {
+                out.push(after, doc);
+            }
+        }
+
+        // Flow, FlowRoot and TableCell, plus internal table displays (row,
+        // row group, column, ...) occurring outside of a table. Blitz does
+        // not yet generate anonymous table wrapper boxes for the latter, so
+        // they are laid out as flow containers, which crucially ensures
+        // their text children get wrapped rather than being pushed as bare
+        // layout children (text nodes carry no style and cannot be laid out
+        // as block/flex/grid items).
+        _ => {
+            let mut classification = FlowClassification::default();
+            classify_flow_children(doc, container_node_id, &mut classification);
 
             if classification.all_out_of_flow {
                 // Contents-transparent: a display:contents child may be
                 // holding the out-of-flow elements (otherwise the contents
                 // node itself would be pushed as a layout box).
-                return push_hoisted_children_and_pseudos(doc, container_node_id, out);
+                let wrap = Some(WrapContext {
+                    container_node_id,
+                    needs_wrap: text_item_needs_wrap,
+                });
+                return push_hoisted_children_and_pseudos(doc, container_node_id, out, wrap);
             }
 
             // TODO: fix display:contents
@@ -533,79 +697,12 @@ pub(crate) fn collect_layout_children(
                 return push_children_and_pseudos(&mut out.children, &doc.nodes[container_node_id]);
             }
 
-            fn block_item_needs_wrap(
-                child_node_kind: NodeKind,
-                display_outside: DisplayOutside,
-            ) -> bool {
-                child_node_kind == NodeKind::Text || display_outside == DisplayOutside::Inline
-            }
             collect_complex_layout_children(
                 doc,
                 container_node_id,
                 out,
                 false,
                 block_item_needs_wrap,
-            );
-        }
-        DisplayInside::Flex | DisplayInside::Grid => {
-            let has_text_node_or_contents = doc.nodes[container_node_id]
-                .children
-                .iter()
-                .copied()
-                .map(|child_id| &doc.nodes[child_id])
-                .any(|child| {
-                    let display = child.display_style().unwrap_or(Display::inline());
-                    let node_kind = child.data.kind();
-                    display.inside() == DisplayInside::Contents || node_kind == NodeKind::Text
-                });
-
-            if !has_text_node_or_contents {
-                return push_non_whitespace_children_and_pseudos(
-                    &mut out.children,
-                    &doc.nodes[container_node_id],
-                );
-            }
-
-            fn flex_or_grid_item_needs_wrap(
-                child_node_kind: NodeKind,
-                _display_outside: DisplayOutside,
-            ) -> bool {
-                child_node_kind == NodeKind::Text
-            }
-            collect_complex_layout_children(
-                doc,
-                container_node_id,
-                out,
-                true,
-                flex_or_grid_item_needs_wrap,
-            );
-        }
-
-        DisplayInside::Table => {
-            let (table_context, tlayout_children) = build_table_context(doc, container_node_id);
-            #[allow(clippy::arc_with_non_send_sync)]
-            let data = SpecialElementData::TableRoot(Arc::new(table_context));
-            doc.nodes[container_node_id]
-                .flags
-                .insert(NodeFlags::IS_TABLE_ROOT);
-            doc.nodes[container_node_id]
-                .data
-                .downcast_element_mut()
-                .unwrap()
-                .special_data = data;
-            if let Some(before) = doc.nodes[container_node_id].before {
-                out.push(before, doc);
-            }
-            out.extend(&tlayout_children, doc);
-            if let Some(after) = doc.nodes[container_node_id].after {
-                out.push(after, doc);
-            }
-        }
-
-        _ => {
-            push_non_whitespace_children_and_pseudos(
-                &mut out.children,
-                &doc.nodes[container_node_id],
             );
         }
     }
@@ -629,15 +726,15 @@ fn pe_content_text(style: &style::properties::ComputedValues) -> Option<&str> {
     }
 }
 
-fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: usize) {
+fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
     let (before_style, after_style, before_node_id, after_node_id) = {
         let node = &doc.nodes[node_id];
 
-        let before_node_id = node.before;
-        let after_node_id = node.after;
+        let before_node_id = node.before();
+        let after_node_id = node.after();
 
         // Note: yes these are kinda backwards
-        let style_data = node.stylo_element_data.get();
+        let style_data = node.stylo_element_data_opt().and_then(|s| s.get());
         let before_style = style_data
             .as_ref()
             .and_then(|d| d.styles.pseudos.as_array()[1].clone());
@@ -664,9 +761,8 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: usize) {
 
         // Create pseudo element if it should exist but doesn't
         if let (None, Some(pe_style)) = (pe_node_id, &pe_style) {
-            let new_node_id = doc.create_node(NodeData::AnonymousBlock(ElementData::new(
-                DUMMY_NAME,
-                Vec::new(),
+            let new_node_id = doc.create_node(NodeData::AnonymousBlock(Box::new(
+                ElementData::new(DUMMY_NAME, Vec::new()),
             )));
             doc.nodes[new_node_id].parent = Some(node_id);
             doc.nodes[new_node_id].layout_parent.set(Some(node_id));
@@ -687,11 +783,15 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: usize) {
             element_data.styles.primary = Some(pe_style.clone());
             element_data.set_restyled();
             element_data.damage = ALL_DAMAGE;
-            *doc.nodes[new_node_id].stylo_element_data.ensure_init_mut() = element_data;
+            *doc.nodes[new_node_id]
+                .stylo_element_data_mut()
+                .ensure_init_mut() = element_data;
 
             let node = &mut doc.nodes[node_id];
             node.set_pe_by_index(idx, Some(new_node_id));
             node.insert_damage(ALL_DAMAGE);
+
+            doc.pending_style_image_nodes.push(new_node_id);
         }
 
         // Else: Update psuedo element
@@ -701,8 +801,8 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: usize) {
             //
             // Note: this deliberately compares the text itself rather than relying on
             // the style-pointer comparison below, as the pseudo-element's style may
-            // already have been updated by `sync_pseudo_element_styles` during damage
-            // propagation without the text having been updated.
+            // already have been updated by `sync_pseudo_element_styles` during the
+            // style traversal without the text having been updated.
             let new_text = pe_content_text(&pe_style).map(str::to_string);
             let existing_text_node_id = doc.nodes[pe_node_id]
                 .children
@@ -727,13 +827,15 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: usize) {
                     doc.nodes[pe_node_id]
                         .children
                         .retain(|&child_id| child_id != text_node_id);
-                    doc.nodes.try_remove(text_node_id);
+                    doc.remove_node_from_tree(text_node_id);
                     doc.nodes[node_id].insert_damage(ALL_DAMAGE);
                 }
                 (None, None) => {}
             }
 
-            let mut node_styles = doc.nodes[pe_node_id].stylo_element_data.get_mut();
+            let mut node_styles = doc.nodes[pe_node_id]
+                .stylo_element_data_opt_mut()
+                .and_then(|s| s.get_mut());
             let node_styles = &mut node_styles.as_mut().unwrap();
             node_styles.damage.insert(ALL_DAMAGE);
             let primary_styles = &mut node_styles.styles.primary;
@@ -741,6 +843,7 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: usize) {
             if !std::ptr::eq(&**primary_styles.as_ref().unwrap(), &*pe_style) {
                 *primary_styles = Some(pe_style);
                 node_styles.set_restyled();
+                doc.pending_style_image_nodes.push(pe_node_id);
             }
         }
     }
@@ -749,10 +852,10 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: usize) {
 /// Handles the cases where there are text nodes or inline nodes that need to be wrapped in an anonymous block node
 fn collect_complex_layout_children(
     doc: &mut BaseDocument,
-    container_node_id: usize,
+    container_node_id: NodeId,
     out: &mut LayoutChildren,
     hide_whitespace: bool,
-    needs_wrap: impl Fn(NodeKind, DisplayOutside) -> bool,
+    needs_wrap: fn(NodeKind, DisplayOutside) -> bool,
 ) {
     doc.iter_children_and_pseudos_mut(container_node_id, |child_id, doc| {
         // Get node kind (text, element, comment, etc)
@@ -779,9 +882,14 @@ fn collect_complex_layout_children(
         if child_node_kind == NodeKind::Comment || (hide_whitespace && is_whitespace_node) {
             // return;
         }
-        // Recurse into `Display::Contents` nodes
+        // Recurse into `Display::Contents` nodes, wrapping hoisted text and
+        // inline children as if they were direct children of this container
         else if display_inside == DisplayInside::Contents {
-            collect_layout_children(doc, child_id, out)
+            let wrap = Some(WrapContext {
+                container_node_id,
+                needs_wrap,
+            });
+            collect_layout_children_with_wrap(doc, child_id, out, wrap)
         }
         // Push nodes that need wrapping into the current "anonymous block container".
         // If there is not an open one then we create one.
@@ -798,7 +906,7 @@ fn collect_complex_layout_children(
     out.maybe_push_anon_block(doc);
 }
 
-fn create_text_editor(doc: &mut BaseDocument, input_element_id: usize, is_multiline: bool) {
+fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multiline: bool) {
     let node = &mut doc.nodes[input_element_id];
     let parley_style = node
         .primary_styles()
@@ -810,7 +918,7 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: usize, is_multil
     if !matches!(element.special_data, SpecialElementData::TextInput(_)) {
         let mut text_input_data = TextInputData::new(is_multiline);
         let editor = &mut text_input_data.editor;
-        editor.set_text(element.attr(local_name!("value")).unwrap_or(" "));
+        editor.set_text(element.attr(local_name!("value")).unwrap_or(""));
         element.special_data = SpecialElementData::TextInput(text_input_data);
     }
 
@@ -831,13 +939,14 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: usize, is_multil
     editor.refresh_layout(&mut doc.font_ctx.lock().unwrap(), &mut doc.layout_ctx);
 }
 
-fn create_checkbox_input(doc: &mut BaseDocument, input_element_id: usize) {
+fn create_checkbox_input(doc: &mut BaseDocument, input_element_id: NodeId) {
     let node = &mut doc.nodes[input_element_id];
 
     let element = &mut node.data.downcast_element_mut().unwrap();
     if !matches!(element.special_data, SpecialElementData::CheckboxInput(_)) {
         let checked = element.has_attr(local_name!("checked"));
         element.special_data = SpecialElementData::CheckboxInput(checked);
+        element.set_checkbox_input_checked(checked);
     }
 }
 
@@ -846,8 +955,8 @@ fn create_checkbox_input(doc: &mut BaseDocument, input_element_id: usize) {
 /// construction of the Parley layout (which invokes text shaping) to a paralell phase.
 pub(crate) fn find_inline_layout_embedded_boxes(
     doc: &mut BaseDocument,
-    inline_context_root_node_id: usize,
-    layout_children: &mut Vec<usize>,
+    inline_context_root_node_id: NodeId,
+    layout_children: &mut ThinVec<NodeId>,
 ) {
     flush_inline_pseudos_recursive(doc, inline_context_root_node_id);
 
@@ -860,7 +969,7 @@ pub(crate) fn find_inline_layout_embedded_boxes(
         );
     });
 
-    fn flush_inline_pseudos_recursive(doc: &mut BaseDocument, node_id: usize) {
+    fn flush_inline_pseudos_recursive(doc: &mut BaseDocument, node_id: NodeId) {
         doc.iter_children_mut(node_id, |child_id, doc| {
             flush_pseudo_elements(doc, child_id);
             let display = doc.nodes[node_id]
@@ -878,10 +987,10 @@ pub(crate) fn find_inline_layout_embedded_boxes(
     }
 
     fn find_inline_layout_embedded_boxes_recursive(
-        nodes: &mut Slab<Node>,
-        parent_id: usize,
-        node_id: usize,
-        layout_children: &mut Vec<usize>,
+        nodes: &mut crate::NodeTree,
+        parent_id: NodeId,
+        node_id: NodeId,
+        layout_children: &mut ThinVec<NodeId>,
     ) {
         let node = &mut nodes[node_id];
 
@@ -917,8 +1026,7 @@ pub(crate) fn find_inline_layout_embedded_boxes(
                     (DisplayOutside::Inline, DisplayInside::Flow) => {
                         let tag_name = &element_data.name.local;
 
-                        if *tag_name == local_name!("img")
-                            || *tag_name == local_name!("svg")
+                        if is_replaced_element(tag_name)
                             || *tag_name == local_name!("input")
                             || *tag_name == local_name!("textarea")
                             || *tag_name == local_name!("button")
@@ -944,21 +1052,21 @@ pub(crate) fn find_inline_layout_embedded_boxes(
                     }
                 };
             }
-            NodeData::Comment | NodeData::Text(_) => {
+            NodeData::Comment { .. } | NodeData::Text(_) => {
                 node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             }
-            NodeData::Document => unreachable!(),
+            NodeData::Document(_) => unreachable!(),
         }
     }
 }
 
 pub(crate) fn build_inline_layout_into(
-    nodes: &Slab<Node>,
+    nodes: &crate::NodeTree,
     layout_ctx: &mut LayoutContext<TextBrush>,
     font_ctx: &mut FontContext,
     text_layout: &mut TextLayout,
     scale: f32,
-    inline_context_root_node_id: usize,
+    inline_context_root_node_id: NodeId,
 ) {
     // Get the inline context's root node's text styles
     let root_node = &nodes[inline_context_root_node_id];
@@ -1000,12 +1108,22 @@ pub(crate) fn build_inline_layout_into(
         .and_then(|el| el.list_item_data.as_deref())
     {
         match marker {
-            Marker::Char(char) => builder.push_text(&format!("{char} ")),
+            // Bullet glyphs live in the bundled bullet font. The position-outside
+            // path already asks for it; without the same span here a marker like
+            // disclosure-closed (U+25B8) falls back to the element's own font and
+            // renders as a missing glyph.
+            Marker::Char(char) => {
+                let mut marker_style = parley_style.clone();
+                marker_style.font_family = BULLET_FONT_FAMILY.into();
+                builder.push_style_span(marker_style);
+                builder.push_text(&format!("{char} "));
+                builder.pop_style_span();
+            }
             Marker::String(str) => builder.push_text(str),
         }
     };
 
-    if let Some(before_id) = root_node.before {
+    if let Some(before_id) = root_node.before() {
         build_inline_layout_recursive(
             &mut builder,
             nodes,
@@ -1027,7 +1145,7 @@ pub(crate) fn build_inline_layout_into(
             root_line_height,
         );
     }
-    if let Some(after_id) = root_node.after {
+    if let Some(after_id) = root_node.after() {
         build_inline_layout_recursive(
             &mut builder,
             nodes,
@@ -1044,9 +1162,9 @@ pub(crate) fn build_inline_layout_into(
 
     fn build_inline_layout_recursive(
         builder: &mut TreeBuilder<TextBrush>,
-        nodes: &Slab<Node>,
-        parent_id: usize,
-        node_id: usize,
+        nodes: &crate::NodeTree,
+        parent_id: NodeId,
+        node_id: NodeId,
         collapse_mode: WhiteSpaceCollapse,
         parent_text_transform: TextTransform,
         root_line_height: f32,
@@ -1113,14 +1231,13 @@ pub(crate) fn build_inline_layout_into(
                     (DisplayOutside::Inline, DisplayInside::Flow) => {
                         let tag_name = &element_data.name.local;
 
-                        if *tag_name == local_name!("img")
-                            || *tag_name == local_name!("svg")
+                        if is_replaced_element(tag_name)
                             || *tag_name == local_name!("input")
                             || *tag_name == local_name!("textarea")
                             || *tag_name == local_name!("button")
                         {
                             builder.push_inline_box(InlineBox {
-                                id: node_id as u64,
+                                id: node_id.as_u64(),
                                 kind: box_kind,
                                 // Overridden by push_inline_box method
                                 index: 0,
@@ -1159,7 +1276,7 @@ pub(crate) fn build_inline_layout_into(
 
                             builder.push_style_span(style);
 
-                            if let Some(before_id) = node.before {
+                            if let Some(before_id) = node.before() {
                                 build_inline_layout_recursive(
                                     builder,
                                     nodes,
@@ -1182,7 +1299,7 @@ pub(crate) fn build_inline_layout_into(
                                     root_line_height,
                                 );
                             }
-                            if let Some(after_id) = node.after {
+                            if let Some(after_id) = node.after() {
                                 build_inline_layout_recursive(
                                     builder,
                                     nodes,
@@ -1200,7 +1317,7 @@ pub(crate) fn build_inline_layout_into(
                     // Inline box
                     (_, _) => {
                         builder.push_inline_box(InlineBox {
-                            id: node_id as u64,
+                            id: node_id.as_u64(),
                             kind: box_kind,
                             // Overridden by push_inline_box method
                             index: 0,
@@ -1236,10 +1353,10 @@ pub(crate) fn build_inline_layout_into(
                     }
                 }
             }
-            NodeData::Comment => {
+            NodeData::Comment { .. } => {
                 // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             }
-            NodeData::Document => unreachable!(),
+            NodeData::Document(_) => unreachable!(),
         }
     }
 }

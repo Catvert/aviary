@@ -13,7 +13,7 @@
 //!   built from a non-URI string.
 
 use futures::future::BoxFuture;
-use gpui::http_client::{self, AsyncBody, HttpClient, Response, Url};
+use gpui_kit::http_client::{self, AsyncBody, HttpClient, Response, Url};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -115,10 +115,6 @@ impl CidHttpClient {
 }
 
 impl HttpClient for CidHttpClient {
-    fn type_name(&self) -> &'static str {
-        "CidHttpClient"
-    }
-
     fn user_agent(&self) -> Option<&http_client::http::HeaderValue> {
         self.inner.user_agent()
     }

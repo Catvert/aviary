@@ -8,14 +8,14 @@ use super::super::{icons, util};
 use crate::model::{Account, AccountId, Provider, Tag};
 use crate::providers::tag_color_palette;
 use crate::runtime::Cmd;
-use gpui::{div, prelude::*, Context, ElementId, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputState},
     menu::{DropdownMenu, PopupMenuItem},
     v_flex, ActiveTheme, Disableable, Sizable, StyledExt, WindowExt,
 };
+use gpui_kit::{div, prelude::*, Context, ElementId, Window};
 
 impl AviaryApp {
     pub(super) fn render_settings_tags(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -205,7 +205,11 @@ impl AviaryApp {
             let tag_id = tag_id.clone();
             dialog
                 .title(tr!("tags-rename-title"))
-                .confirm()
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
                 .child(Input::new(&input))
                 .on_ok(move |_, _window, cx| {
                     let new_name = input.read(cx).value().trim().to_string();
@@ -240,7 +244,11 @@ impl AviaryApp {
             let tag_id = tag_id.clone();
             dialog
                 .title(tr!("tags-delete-title"))
-                .confirm()
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
                 .child(
                     div()
                         .text_sm()

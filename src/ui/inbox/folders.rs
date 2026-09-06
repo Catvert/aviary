@@ -6,8 +6,7 @@ use super::super::compose::ComposeInit;
 use super::super::util;
 use crate::model::{AccountId, MailFolder};
 use crate::runtime::Cmd;
-use gpui::{div, prelude::*, px, App, Context, ScrollWheelEvent, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
@@ -15,6 +14,7 @@ use gpui_component::{
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     v_flex, v_virtual_list, ActiveTheme, IconName, Sizable, StyledExt, WindowExt,
 };
+use gpui_kit::{div, prelude::*, px, App, Context, ScrollWheelEvent, Window};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
@@ -94,11 +94,11 @@ impl FolderEntry {
 /// scale alone.
 pub(crate) struct FolderListMetrics {
     ui_scale: u32,
-    heights: HashMap<FolderEntryVariant, gpui::Pixels>,
+    heights: HashMap<FolderEntryVariant, gpui_kit::Pixels>,
 }
 
 /// Localized label for a well-known folder.
-pub(super) fn folder_display_label(f: &MailFolder) -> gpui::SharedString {
+pub(super) fn folder_display_label(f: &MailFolder) -> gpui_kit::SharedString {
     match f.well_known_name.as_deref() {
         Some("inbox") => tr!("folder-inbox"),
         Some("category-personal") => tr!("folder-category-primary"),
@@ -116,7 +116,7 @@ pub(super) fn folder_display_label(f: &MailFolder) -> gpui::SharedString {
     }
 }
 
-fn folder_icon(f: &MailFolder) -> gpui_component::Icon {
+fn folder_icon(f: &MailFolder) -> gpui_kit::component::Icon {
     let name = match f.well_known_name.as_deref() {
         Some("inbox") => "inbox",
         Some("category-personal") => "inbox",
@@ -290,7 +290,7 @@ impl AviaryApp {
         entries: &[FolderEntry],
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Rc<Vec<gpui::Size<gpui::Pixels>>> {
+    ) -> Rc<Vec<gpui_kit::Size<gpui_kit::Pixels>>> {
         let ui_scale = self.settings.global.ui_scale.to_bits();
         if self
             .folder_list_metrics
@@ -303,9 +303,9 @@ impl AviaryApp {
             });
         }
 
-        let available = gpui::size(
-            gpui::AvailableSpace::MinContent,
-            gpui::AvailableSpace::MinContent,
+        let available = gpui_kit::size(
+            gpui_kit::AvailableSpace::MinContent,
+            gpui_kit::AvailableSpace::MinContent,
         );
         for entry in entries {
             let variant = entry.variant();
@@ -334,7 +334,7 @@ impl AviaryApp {
                     let height = heights
                         .and_then(|heights| heights.get(&entry.variant()).copied())
                         .unwrap_or_default();
-                    gpui::size(px(0.), height)
+                    gpui_kit::size(px(0.), height)
                 })
                 .collect(),
         )
@@ -347,7 +347,11 @@ impl AviaryApp {
     /// column's `gap` and from the headers' top margins: `layout_as_root`
     /// measures a node's own box, so spacing expressed as a margin would be
     /// absent from the height the virtual list reserves.
-    fn folder_list_item(&self, entry: &FolderEntry, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn folder_list_item(
+        &self,
+        entry: &FolderEntry,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
         let leading_gap = matches!(
             entry,
             FolderEntry::FavoritesHeader { .. }
@@ -369,7 +373,7 @@ impl AviaryApp {
         &self,
         entry: &FolderEntry,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         match entry {
             FolderEntry::FavoritesHeader { count, collapsed } => self
                 .folder_section_header(
@@ -522,7 +526,7 @@ impl AviaryApp {
         account_id: &AccountId,
         folder_id: &str,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let (Some(account), Some(folder)) = (
             self.account(account_id).cloned(),
             self.folder_by_id(account_id, folder_id).cloned(),
@@ -530,7 +534,7 @@ impl AviaryApp {
             return div().into_any_element();
         };
         let selected = self.folder_is_selected(account_id, &folder);
-        let label: gpui::SharedString = format!(
+        let label: gpui_kit::SharedString = format!(
             "{} · {}",
             folder_display_label(&folder),
             self.account_label(&account)
@@ -563,7 +567,7 @@ impl AviaryApp {
         has_children: bool,
         collapsed: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let Some(folder) = self.folder_by_id(account_id, folder_id).cloned() else {
             return div().into_any_element();
         };
@@ -593,7 +597,7 @@ impl AviaryApp {
         separated: bool,
         collapsed: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let Some(account) = self.account(account_id).cloned() else {
             return div().into_any_element();
         };
@@ -618,7 +622,7 @@ impl AviaryApp {
         let compose_aid = aid.clone();
         let actions_entity = cx.entity();
         h_flex()
-            .id(gpui::ElementId::Name(
+            .id(gpui_kit::ElementId::Name(
                 format!("folder-account-{}", aid.0).into(),
             ))
             .gap_1()
@@ -628,7 +632,7 @@ impl AviaryApp {
                 el.pt_2().border_t_1().border_color(theme.border)
             })
             .child(
-                Button::new(gpui::ElementId::Name(
+                Button::new(gpui_kit::ElementId::Name(
                     format!("folder-account-collapse-{}", aid.0).into(),
                 ))
                 .ghost()
@@ -649,7 +653,7 @@ impl AviaryApp {
             .child(div().w(px(8.)).h(px(8.)).mr_1().rounded_full().bg(color))
             .child(
                 v_flex()
-                    .id(gpui::ElementId::Name(
+                    .id(gpui_kit::ElementId::Name(
                         format!("folder-account-select-{}", aid.0).into(),
                     ))
                     .flex_1()
@@ -681,7 +685,7 @@ impl AviaryApp {
                     })),
             )
             .child(
-                Button::new(gpui::ElementId::Name(
+                Button::new(gpui_kit::ElementId::Name(
                     format!("folder-account-create-{}", aid.0).into(),
                 ))
                 .ghost()
@@ -722,7 +726,7 @@ impl AviaryApp {
                 }),
             )
             .child(
-                Checkbox::new(gpui::ElementId::Name(
+                Checkbox::new(gpui_kit::ElementId::Name(
                     format!("folder-account-visible-{}", aid.0).into(),
                 ))
                 .xsmall()
@@ -739,12 +743,12 @@ impl AviaryApp {
         &self,
         account_id: &AccountId,
         folder: &MailFolder,
-        label: gpui::SharedString,
+        label: gpui_kit::SharedString,
         depth: usize,
         has_children: bool,
         collapsed: bool,
         selected: bool,
-        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+        on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().clone();
@@ -769,7 +773,7 @@ impl AviaryApp {
             let branch_entity = entity.clone();
             let branch_aid = aid.clone();
             let branch_id = folder_id.clone();
-            Button::new(gpui::ElementId::Name(
+            Button::new(gpui_kit::ElementId::Name(
                 format!("folder-branch-{}-{}", aid.0, folder.id).into(),
             ))
             .ghost()
@@ -793,7 +797,7 @@ impl AviaryApp {
         };
 
         let row = div()
-            .id(gpui::ElementId::Name(
+            .id(gpui_kit::ElementId::Name(
                 format!("folder-{}-{}", account_id.0, folder.id).into(),
             ))
             .flex()
@@ -925,14 +929,14 @@ impl AviaryApp {
     #[allow(clippy::too_many_arguments)]
     fn folder_row_generic(
         &self,
-        id: impl Into<gpui::ElementId>,
-        icon: gpui_component::Icon,
+        id: impl Into<gpui_kit::ElementId>,
+        icon: gpui_kit::component::Icon,
         label: String,
         unread: Option<u32>,
         selected: bool,
-        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+        on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
         let theme = cx.theme().clone();
         div()
             .id(id)
@@ -975,7 +979,9 @@ impl AviaryApp {
     ) -> impl IntoElement {
         let theme = cx.theme().clone();
         div()
-            .id(gpui::ElementId::Name(format!("folder-section-{id}").into()))
+            .id(gpui_kit::ElementId::Name(
+                format!("folder-section-{id}").into(),
+            ))
             .px_2()
             .py_1()
             .flex()
@@ -985,7 +991,7 @@ impl AviaryApp {
             .cursor_pointer()
             .hover(|style| style.bg(theme.list_hover))
             .child(
-                gpui_component::Icon::new(if collapsed {
+                gpui_kit::component::Icon::new(if collapsed {
                     IconName::ChevronRight
                 } else {
                     IconName::ChevronDown
@@ -1096,7 +1102,11 @@ impl AviaryApp {
                 } else {
                     tr!("folders-new-title")
                 })
-                .confirm()
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
                 .child(Input::new(&input))
                 .on_ok(move |_, _window, cx| {
                     let name = input.read(cx).value().trim().to_string();
@@ -1134,7 +1144,11 @@ impl AviaryApp {
             let id = id.clone();
             dialog
                 .title(tr!("folders-rename-title"))
-                .confirm()
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
                 .child(Input::new(&input))
                 .on_ok(move |_, _window, cx| {
                     let new_name = input.read(cx).value().trim().to_string();
@@ -1169,7 +1183,11 @@ impl AviaryApp {
             let id = id.clone();
             dialog
                 .title(tr!("folders-delete-title"))
-                .confirm()
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
                 .child(div().child(tr!("folders-delete-confirm-short", { name: name.clone() })))
                 .on_ok(move |_, window, cx| {
                     entity.update(cx, |this, cx| {

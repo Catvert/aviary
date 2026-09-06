@@ -19,7 +19,7 @@ pub(crate) fn element(
     fallback_width: Option<f32>,
     window: &mut Window,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     message_element(m, options, fallback_width, false, window, cx)
 }
 
@@ -33,7 +33,7 @@ pub(crate) fn fragment_element(
     fallback_width: Option<f32>,
     window: &mut Window,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     message_element(m, options, fallback_width, true, window, cx)
 }
 
@@ -44,7 +44,7 @@ pub(super) fn message_element(
     fragment: bool,
     window: &mut Window,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let (source, kind): (&str, PrepSource) = match m.format {
         BodyFormat::Markdown => (
             m.raw_body.as_deref().unwrap_or(&m.body),
@@ -97,7 +97,7 @@ pub(crate) fn html_element(
     options: MailBodyOptions,
     fallback_width: Option<f32>,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let mail_theme = MailTheme::from_app(cx.theme(), options.force_light_theme);
     let (key, job) = prepared_job(
         instance,
@@ -121,7 +121,7 @@ pub(crate) fn preview_html_element(
     fallback_width: Option<f32>,
     window: &mut Window,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     preview_html_element_with_height(
         instance,
         html,
@@ -143,7 +143,7 @@ pub(crate) fn preview_html_fragment_element(
     fallback_width: Option<f32>,
     window: &mut Window,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     preview_html_element_with_height(
         instance,
         html,
@@ -166,7 +166,7 @@ pub(super) fn preview_html_element_with_height(
     fragment: bool,
     window: &mut Window,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let mail_theme = MailTheme::from_app(cx.theme(), options.force_light_theme);
     let (key, job) = prepared_job(
         instance,
@@ -206,7 +206,7 @@ pub(super) fn render_element(
     zoomable: bool,
     zoom_badge_anchor: Option<Point<Pixels>>,
     cx: &mut App,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let theme = cx.theme().clone();
     let focus = {
         let cache = cx.default_global::<BlitzCache>();
@@ -330,7 +330,7 @@ pub(super) fn render_element(
                     if window.default_prevented() {
                         return;
                     }
-                    focus.focus(window);
+                    focus.focus(window, cx);
                     push_pointer(
                         cx,
                         &key,
@@ -422,12 +422,12 @@ pub(super) fn render_element(
             let badge_key = key.clone();
             deferred(
                 anchored()
-                    .anchor(Corner::BottomRight)
+                    .anchor(Anchor::BottomRight)
                     .position(anchor)
                     .snap_to_window_with_margin(px(12.))
                     .child(
                         div()
-                            .id(gpui::ElementId::Name(
+                            .id(gpui_kit::ElementId::Name(
                                 format!("blitz-zoom-badge-{key}").into(),
                             ))
                             .occlude()
@@ -469,7 +469,7 @@ pub(super) fn render_element(
             };
             deferred(
                 anchored()
-                    .anchor(Corner::BottomRight)
+                    .anchor(Anchor::BottomRight)
                     .position(position)
                     .snap_to_window_with_margin(px(12.))
                     .child(
@@ -524,7 +524,7 @@ pub(super) fn link_context_menu(menu: PopupMenu, url: String) -> PopupMenu {
         PopupMenuItem::new(tr!("copy"))
             .icon(crate::ui::icons::app_icon("copy"))
             .on_click(move |_, _, cx| {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(url.clone()));
             }),
     )
 }
@@ -635,11 +635,9 @@ pub(super) fn set_zoom(cx: &mut App, key: &str, zoom: f32) {
                     .get_mut(&badge_key)?;
                 entry.hide_zoom_badge(generation).then_some(entry.owner)
             })
-            .ok()
-            .flatten()
             .flatten();
         if let Some(owner) = owner {
-            let _ = cx.update(|cx| cx.notify(owner));
+            cx.update(|cx| cx.notify(owner));
         }
     })
     .detach();

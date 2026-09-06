@@ -6,7 +6,7 @@
 //! CID images) supports pasting between Aviary views in the same process.
 
 use crate::model::InlineImage;
-use gpui::{App, ClipboardItem};
+use gpui_kit::{App, ClipboardItem};
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, OnceLock};
 

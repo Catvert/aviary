@@ -9,13 +9,13 @@ pub(super) mod messages;
 use super::app::AviaryApp;
 use super::state::SenderHistoryState;
 use crate::runtime::Cmd;
-use gpui::{div, prelude::*, px, Context, Rems, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     resizable::{h_resizable, resizable_panel, v_resizable},
     v_flex, ActiveTheme, Disableable, Sizable, StyledExt,
 };
+use gpui_kit::{div, prelude::*, px, Context, Rems, Window};
 
 /// Shared minimum height for the folder, message-list, and viewer headers.
 pub(super) const MAIL_PANE_HEADER_HEIGHT: Rems = Rems(3.);
@@ -87,7 +87,7 @@ impl AviaryApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let body: gpui::AnyElement = match &self.sender_history {
+        let body: gpui_kit::AnyElement = match &self.sender_history {
             SenderHistoryState::Idle => div()
                 .p_3()
                 .text_sm()
@@ -155,7 +155,11 @@ impl AviaryApp {
             .child(div().flex_1().min_h_0().child(body))
     }
 
-    fn render_history_header(&self, expanded: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_history_header(
+        &self,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
         let theme = cx.theme().clone();
         let title = match self.sender_history.email() {
             Some(email) => tr!("history-title-for", { email: email }),
@@ -173,10 +177,10 @@ impl AviaryApp {
             .cursor_pointer()
             .hover(|s| s.bg(theme.list_hover))
             .child(
-                gpui_component::Icon::new(if expanded {
-                    gpui_component::IconName::ChevronDown
+                gpui_kit::component::Icon::new(if expanded {
+                    gpui_kit::component::IconName::ChevronDown
                 } else {
-                    gpui_component::IconName::ChevronRight
+                    gpui_kit::component::IconName::ChevronRight
                 })
                 .xsmall()
                 .text_color(theme.muted_foreground),

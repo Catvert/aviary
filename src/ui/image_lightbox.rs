@@ -1,16 +1,16 @@
 //! Full-window preview and actions for images inside received messages.
 
 use crate::model::Attachment;
-use gpui::{
-    anchored, div, img, point, prelude::*, px, AnyElement, App, Corner, CursorStyle, FocusHandle,
-    Image, ImageFormat, KeyDownEvent, MouseButton, RenderImage, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     notification::Notification,
     IconName, Sizable, WindowExt as _,
+};
+use gpui_kit::{
+    anchored, div, img, point, prelude::*, px, Anchor, AnyElement, App, CursorStyle, FocusHandle,
+    Image, ImageFormat, KeyDownEvent, MouseButton, RenderImage, Window,
 };
 #[cfg(target_os = "linux")]
 use std::process::Stdio;
@@ -50,7 +50,7 @@ struct ImageLightbox {
     focus: Option<FocusHandle>,
 }
 
-impl gpui::Global for ImageLightbox {}
+impl gpui_kit::Global for ImageLightbox {}
 
 fn open(image: ImageAsset, cx: &mut App) {
     let focus = cx.focus_handle();
@@ -172,7 +172,7 @@ fn copy_image_bytes(bytes: Vec<u8>, window: &mut Window, cx: &mut App) {
         return;
     }
 
-    cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(&image));
     window.push_notification(Notification::success(tr!("viewer-image-copied")), cx);
 }
 
@@ -355,7 +355,7 @@ fn save_as(image: ImageAsset, window: &mut Window, cx: &mut App) {
     .detach();
 }
 
-async fn materialize_bytes(image: &ImageAsset, cx: &gpui::AsyncApp) -> Result<Vec<u8>, String> {
+async fn materialize_bytes(image: &ImageAsset, cx: &gpui_kit::AsyncApp) -> Result<Vec<u8>, String> {
     let rendered = image.image.clone();
     cx.background_executor()
         .spawn(async move { rendered_png(&rendered) })
@@ -404,7 +404,7 @@ pub(crate) fn render(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
         let lightbox = cx.default_global::<ImageLightbox>();
         (lightbox.image.clone()?, lightbox.focus.clone()?)
     };
-    focus.focus(window);
+    focus.focus(window, cx);
 
     let viewport = window.viewport_size();
     // Keep a real margin on every side and reserve the upper strip for the
@@ -413,7 +413,7 @@ pub(crate) fn render(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
     let max_width = (viewport.width - px(64.)).max(px(1.));
     let max_height = (viewport.height - px(112.)).max(px(1.));
     let displayed = img(image.image.clone())
-        .object_fit(gpui::ObjectFit::Contain)
+        .object_fit(gpui_kit::ObjectFit::Contain)
         .w_full()
         .h_full();
 
@@ -422,7 +422,7 @@ pub(crate) fn render(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
 
     Some(
         anchored()
-            .anchor(Corner::TopLeft)
+            .anchor(Anchor::TopLeft)
             .position(point(px(0.), px(0.)))
             .snap_to_window()
             .child(
@@ -438,7 +438,7 @@ pub(crate) fn render(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
                     .pb(px(24.))
                     .px(px(32.))
                     .cursor(CursorStyle::Arrow)
-                    .bg(gpui::black().opacity(0.88))
+                    .bg(gpui_kit::black().opacity(0.88))
                     .track_focus(&focus)
                     .on_key_down(|event: &KeyDownEvent, _, cx| {
                         if event.keystroke.key == "escape" {
@@ -473,8 +473,8 @@ pub(crate) fn render(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
                             .gap_1()
                             .p_1()
                             .rounded_lg()
-                            .text_color(gpui::white())
-                            .bg(gpui::black().opacity(0.58))
+                            .text_color(gpui_kit::white())
+                            .bg(gpui_kit::black().opacity(0.58))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation();
                             })
@@ -485,7 +485,7 @@ pub(crate) fn render(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
                                     .icon(IconName::Ellipsis)
                                     .tooltip(tr!("viewer-image-actions"))
                                     .dropdown_menu_with_anchor(
-                                        Corner::TopRight,
+                                        Anchor::TopRight,
                                         move |menu, _, cx| {
                                             actions_menu_with_enlarge(
                                                 menu,
@@ -516,7 +516,7 @@ pub(crate) fn render(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
 #[cfg(test)]
 mod tests {
     use super::{clipboard_image, rendered_png};
-    use gpui::{ImageFormat, RenderImage};
+    use gpui_kit::{ImageFormat, RenderImage};
     use image::{Frame, Rgba, RgbaImage};
     use smallvec::smallvec;
 

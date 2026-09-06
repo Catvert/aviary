@@ -13,9 +13,9 @@ use super::super::app::{compact_error, AviaryApp};
 use super::super::quick_actions::QuickActionNotification;
 use crate::model::AccountId;
 use crate::runtime::QuickActionExecution;
-use gpui::{prelude::FluentBuilder, Context, Window};
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::notification::Notification;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::{prelude::FluentBuilder, Context, Window};
 
 impl AviaryApp {
     pub(super) fn on_quick_action_completed(

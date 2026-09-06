@@ -5,18 +5,17 @@
 //! This is slower, yes, but happens fast enough that it's not a huge issue.
 
 use crate::node::{ImageData, NodeData, SpecialElementData};
-use crate::{document::BaseDocument, node::Node};
-use markup5ever::local_name;
+use crate::{document::BaseDocument, dom_node_id, node::Node, taffy_node_id};
+use markup5ever::{LocalName, local_name};
 use std::cell::Ref;
 use std::sync::Arc;
 use style::Atom;
 use style::values::computed::CSSPixelLength;
 use style::values::computed::length_percentage::CalcLengthPercentage;
 use taffy::{
-    BlockContext, CollapsibleMarginSet, FlexDirection, LayoutPartialTree, NodeId, ResolveOrZero,
-    RoundTree, Style, TraversePartialTree, TraverseTree, compute_block_layout,
-    compute_cached_layout, compute_flexbox_layout, compute_grid_layout, compute_leaf_layout,
-    prelude::*,
+    BlockContext, FlexDirection, LayoutPartialTree, NodeId, ResolveOrZero, RoundTree, Style,
+    TraversePartialTree, TraverseTree, compute_block_layout, compute_cached_layout,
+    compute_flexbox_layout, compute_grid_layout, compute_leaf_layout, prelude::*,
 };
 
 pub(crate) mod construct;
@@ -26,8 +25,45 @@ pub(crate) mod list;
 pub(crate) mod replaced;
 pub(crate) mod table;
 
-use self::replaced::{ReplacedContext, replaced_measure_function};
+use self::replaced::{
+    IntrinsicSizes, ReplacedContext, compute_replaced_layout, is_replaced_element,
+};
 use self::table::TableTreeWrapper;
+
+/// The default object size for replaced elements
+/// (https://drafts.csswg.org/css-images/#default-object-size).
+const DEFAULT_OBJECT_SIZE: taffy::Size<f32> = taffy::Size {
+    width: 300.0,
+    height: 150.0,
+};
+
+/// The intrinsic dimensions and default object size for a replaced element
+/// whose intrinsic dimensions are determined by its tag: an image with no
+/// loaded resource has no intrinsic dimensions and a zero default object size;
+/// a canvas has an intrinsic size and aspect ratio given by its width/height
+/// attributes (defaulting to 300x150); other replaced elements (video, iframe,
+/// embed) have no intrinsic dimensions and the 300x150 default object size.
+fn tag_intrinsic_sizes(
+    tag_name: &LocalName,
+    attr_size: taffy::Size<Option<f32>>,
+) -> (IntrinsicSizes, taffy::Size<f32>) {
+    if *tag_name == local_name!("img") || *tag_name == local_name!("svg") {
+        return (IntrinsicSizes::default(), taffy::Size::ZERO);
+    }
+    if *tag_name == local_name!("canvas") {
+        let width = attr_size.width.unwrap_or(300.0);
+        let height = attr_size.height.unwrap_or(150.0);
+        return (
+            IntrinsicSizes {
+                width: Some(width),
+                height: Some(height),
+                ratio: Some(width / height),
+            },
+            DEFAULT_OBJECT_SIZE,
+        );
+    }
+    (IntrinsicSizes::default(), DEFAULT_OBJECT_SIZE)
+}
 
 pub(crate) fn resolve_calc_value(calc_ptr: *const (), parent_size: f32) -> f32 {
     let calc = unsafe { &*(calc_ptr as *const CalcLengthPercentage) };
@@ -37,10 +73,10 @@ pub(crate) fn resolve_calc_value(calc_ptr: *const (), parent_size: f32) -> f32 {
 
 impl BaseDocument {
     fn node_from_id(&self, node_id: taffy::prelude::NodeId) -> &Node {
-        &self.nodes[node_id.into()]
+        &self.nodes[dom_node_id(node_id)]
     }
     fn node_from_id_mut(&mut self, node_id: taffy::prelude::NodeId) -> &mut Node {
-        &mut self.nodes[node_id.into()]
+        &mut self.nodes[dom_node_id(node_id)]
     }
 }
 
@@ -51,7 +87,7 @@ impl BaseDocument {
         inputs: taffy::tree::LayoutInput,
         block_ctx: Option<&mut BlockContext<'_>>,
     ) -> taffy::tree::LayoutOutput {
-        let node = &mut self.nodes[node_id.into()];
+        let node = &mut self.nodes[dom_node_id(node_id)];
 
         let font_styles = node.primary_styles().map(|style| {
             use style::values::computed::font::LineHeight;
@@ -74,7 +110,7 @@ impl BaseDocument {
                 // and should therefore never be measured individually.
                 #[cfg(feature = "tracing")]
                 tracing::error!(
-                    node_id = usize::from(node_id),
+                    node_id = ?dom_node_id(node_id),
                     data = ?data,
                     "Tried to lay out text node individually",
                 );
@@ -116,7 +152,7 @@ impl BaseDocument {
 
                     return compute_leaf_layout(
                         inputs,
-                        &node.style,
+                        node.style(),
                         resolve_calc_value,
                         |_known_size, _available_space| taffy::Size {
                             width: cols
@@ -131,20 +167,20 @@ impl BaseDocument {
                     match element_data.attr(local_name!("type")) {
                         // if the input type is hidden, hide it
                         Some("hidden") => {
-                            node.style.display = Display::None;
+                            node.style_mut().display = Display::None;
                             return taffy::LayoutOutput::HIDDEN;
                         }
                         Some("checkbox") => {
                             return compute_leaf_layout(
                                 inputs,
-                                &node.style,
+                                node.style(),
                                 resolve_calc_value,
                                 |_known_size, _available_space| {
-                                    let width = node.style.size.width.resolve_or_zero(
+                                    let width = node.style().size.width.resolve_or_zero(
                                         inputs.parent_size.width,
                                         resolve_calc_value,
                                     );
-                                    let height = node.style.size.height.resolve_or_zero(
+                                    let height = node.style().size.height.resolve_or_zero(
                                         inputs.parent_size.height,
                                         resolve_calc_value,
                                     );
@@ -159,7 +195,7 @@ impl BaseDocument {
                         None | Some("text" | "password" | "email" | "tel" | "url" | "search") => {
                             return compute_leaf_layout(
                                 inputs,
-                                &node.style,
+                                node.style(),
                                 resolve_calc_value,
                                 |_known_size, _available_space| taffy::Size {
                                     width: match inputs.available_space.width {
@@ -175,14 +211,13 @@ impl BaseDocument {
                     }
                 }
 
-                if *element_data.name.local == *"img"
-                    || *element_data.name.local == *"canvas"
-                    || (cfg!(feature = "svg") && *element_data.name.local == *"svg")
-                {
-                    // Get width and height attributes on image element
-                    //
-                    // TODO: smarter sizing using these (depending on object-fit, they shouldn't
-                    // necessarily just override the native size)
+                if is_replaced_element(&element_data.name.local) {
+                    // Width/height attributes are presentational hints mapped to the CSS
+                    // width/height properties by
+                    // `synthesize_presentational_hints_for_legacy_attributes`, so they
+                    // are already part of the style. They are only read here for the
+                    // elements whose attributes determine their *intrinsic* size
+                    // (canvas, and custom widgets on canvas tags).
                     let attr_size = taffy::Size {
                         width: element_data
                             .attr(local_name!("width"))
@@ -192,54 +227,102 @@ impl BaseDocument {
                             .and_then(|val| val.parse::<f32>().ok()),
                     };
 
-                    // Get image's native sizespecial_data
-                    let inherent_size = match &element_data.special_data {
+                    // Get the element's intrinsic dimensions and default object size
+                    let (intrinsic_sizes, default_object_size) = match &element_data.special_data {
                         SpecialElementData::Image(image_data) => match &**image_data {
-                            ImageData::Raster(image) => taffy::Size {
-                                width: image.width as f32,
-                                height: image.height as f32,
-                            },
+                            ImageData::Raster(image) => {
+                                let (width, height) = (image.width as f32, image.height as f32);
+                                (
+                                    IntrinsicSizes {
+                                        width: Some(width),
+                                        height: Some(height),
+                                        ratio: Some(width / height),
+                                    },
+                                    DEFAULT_OBJECT_SIZE,
+                                )
+                            }
                             #[cfg(feature = "svg")]
                             ImageData::Svg(svg) => {
-                                let size = svg.tree.size();
-                                taffy::Size {
-                                    width: size.width(),
-                                    height: size.height(),
+                                let mut width = svg.intrinsic_width();
+                                let mut height = svg.intrinsic_height();
+                                // An SVG with no declared dimensions and no viewBox has no
+                                // intrinsic dimensions per CSS, but usvg still resolves a
+                                // concrete size; use it in place of the default object size.
+                                if width.is_none()
+                                    && height.is_none()
+                                    && svg.viewbox_aspect_ratio().is_none()
+                                {
+                                    let size = svg.tree.size();
+                                    width = Some(size.width());
+                                    height = Some(size.height());
                                 }
+                                (
+                                    IntrinsicSizes {
+                                        width,
+                                        height,
+                                        ratio: Some(svg.aspect_ratio()),
+                                    },
+                                    DEFAULT_OBJECT_SIZE,
+                                )
                             }
-                            ImageData::None => taffy::Size::ZERO,
+                            ImageData::None => (IntrinsicSizes::default(), taffy::Size::ZERO),
                         },
-                        SpecialElementData::Canvas(_) => taffy::Size::ZERO,
-                        SpecialElementData::None => taffy::Size::ZERO,
+                        SpecialElementData::Canvas(_)
+                        | SpecialElementData::SubDocument(_)
+                        | SpecialElementData::None => {
+                            tag_intrinsic_sizes(&element_data.name.local, attr_size)
+                        }
+                        #[cfg(feature = "custom-widget")]
+                        SpecialElementData::CustomWidget(widget_data) => {
+                            let (fallback, default_object_size) =
+                                tag_intrinsic_sizes(&element_data.name.local, attr_size);
+                            // A canvas's content attributes determine its intrinsic size,
+                            // overriding the widget-reported one; the widget-reported size
+                            // in turn overrides the tag's fallback.
+                            let attr_intrinsic =
+                                if *element_data.name.local == local_name!("canvas") {
+                                    attr_size
+                                } else {
+                                    taffy::Size::NONE
+                                };
+                            let attr_ratio = match (attr_intrinsic.width, attr_intrinsic.height) {
+                                (Some(w), Some(h)) => Some(w / h),
+                                _ => None,
+                            };
+                            let widget_sizes = widget_data.widget.intrinsic_sizes();
+                            (
+                                IntrinsicSizes {
+                                    width: attr_intrinsic
+                                        .width
+                                        .or(widget_sizes.width)
+                                        .or(fallback.width),
+                                    height: attr_intrinsic
+                                        .height
+                                        .or(widget_sizes.height)
+                                        .or(fallback.height),
+                                    ratio: attr_ratio.or(widget_sizes.ratio).or(fallback.ratio),
+                                },
+                                default_object_size,
+                            )
+                        }
                         _ => unreachable!(),
                     };
 
                     let replaced_context = ReplacedContext {
-                        inherent_size,
-                        attr_size,
+                        intrinsic_sizes,
+                        default_object_size,
                     };
 
-                    let computed = replaced_measure_function(
-                        inputs.known_dimensions,
-                        inputs.parent_size,
-                        inputs.available_space,
+                    return compute_replaced_layout(
+                        inputs,
+                        node.style(),
+                        resolve_calc_value,
                         &replaced_context,
-                        &node.style,
-                        false,
                     );
-
-                    return taffy::LayoutOutput {
-                        size: computed,
-                        content_size: computed,
-                        first_baselines: taffy::Point::NONE,
-                        top_margin: CollapsibleMarginSet::ZERO,
-                        bottom_margin: CollapsibleMarginSet::ZERO,
-                        margins_can_collapse_through: false,
-                    };
                 }
 
                 if node.flags.is_table_root() {
-                    let SpecialElementData::TableRoot(context) = &self.nodes[node_id.into()]
+                    let SpecialElementData::TableRoot(context) = &self.nodes[dom_node_id(node_id)]
                         .data
                         .downcast_element()
                         .unwrap()
@@ -255,26 +338,33 @@ impl BaseDocument {
                     };
                     let mut output = compute_grid_layout(&mut table_wrapper, node_id, inputs);
 
-                    // HACK: Cap content size at node size to prevent scrolling
-                    output.content_size.width = output.content_size.width.min(output.size.width);
-                    output.content_size.height = output.content_size.height.min(output.size.height);
+                    // HACK: Cap scrollable overflow at node size to prevent scrolling
+                    output.scrollable_overflow_rect.left = 0.0;
+                    output.scrollable_overflow_rect.top = 0.0;
+                    output.scrollable_overflow_rect.right =
+                        output.scrollable_overflow_rect.right.min(output.size.width);
+                    output.scrollable_overflow_rect.bottom = output
+                        .scrollable_overflow_rect
+                        .bottom
+                        .min(output.size.height);
 
                     return output;
                 }
 
                 if node.flags.is_inline_root() {
-                    return self.compute_inline_layout(usize::from(node_id), inputs, block_ctx);
+                    return self.compute_inline_layout(dom_node_id(node_id), inputs, block_ctx);
                 }
 
                 // The default CSS file will set
-                match node.style.display {
+                match node.style().display {
                     Display::Block => compute_block_layout(self, node_id, inputs, block_ctx),
+                    Display::FlowRoot => compute_block_layout(self, node_id, inputs, None),
                     Display::Flex => compute_flexbox_layout(self, node_id, inputs),
                     Display::Grid => compute_grid_layout(self, node_id, inputs),
                     Display::None => taffy::LayoutOutput::HIDDEN,
                 }
             }
-            NodeData::Document => compute_block_layout(self, node_id, inputs, None),
+            NodeData::Document(_) => compute_block_layout(self, node_id, inputs, None),
 
             _ => taffy::LayoutOutput::HIDDEN,
         }
@@ -301,7 +391,7 @@ impl TraversePartialTree for BaseDocument {
     }
 
     fn get_child_id(&self, node_id: NodeId, index: usize) -> NodeId {
-        NodeId::from(
+        taffy_node_id(
             self.node_from_id(node_id)
                 .layout_children
                 .borrow()
@@ -321,11 +411,11 @@ impl LayoutPartialTree for BaseDocument {
     type CustomIdent = Atom;
 
     fn get_core_container_style(&self, node_id: NodeId) -> &Style<Atom> {
-        &self.node_from_id(node_id).style
+        self.node_from_id(node_id).style()
     }
 
     fn set_unrounded_layout(&mut self, node_id: NodeId, layout: &Layout) {
-        self.node_from_id_mut(node_id).unrounded_layout = *layout;
+        *self.node_from_id_mut(node_id).unrounded_layout_mut() = *layout;
     }
 
     fn resolve_calc_value(&self, calc_ptr: *const (), parent_size: f32) -> f32 {
@@ -347,11 +437,11 @@ impl LayoutPartialTree for BaseDocument {
 impl taffy::CacheTree for BaseDocument {
     #[inline]
     fn cache_get(
-        &self,
+        &mut self,
         node_id: NodeId,
         inputs: &taffy::LayoutInput,
     ) -> Option<taffy::LayoutOutput> {
-        self.node_from_id(node_id).cache.get(inputs)
+        self.node_from_id_mut(node_id).cache_mut().get(inputs)
     }
 
     #[inline]
@@ -362,13 +452,13 @@ impl taffy::CacheTree for BaseDocument {
         layout_output: taffy::LayoutOutput,
     ) {
         self.node_from_id_mut(node_id)
-            .cache
+            .cache_mut()
             .store(inputs, layout_output);
     }
 
     #[inline]
     fn cache_clear(&mut self, node_id: NodeId) {
-        self.node_from_id_mut(node_id).cache.clear();
+        self.node_from_id_mut(node_id).cache_mut().clear();
     }
 }
 
@@ -442,30 +532,41 @@ impl taffy::LayoutGridContainer for BaseDocument {
     fn get_grid_child_style(&self, child_node_id: NodeId) -> Self::GridItemStyle<'_> {
         self.get_core_container_style(child_node_id)
     }
+
+    fn set_detailed_grid_info(
+        &mut self,
+        node_id: NodeId,
+        detailed_grid_info: taffy::DetailedGridInfo<Atom>,
+    ) {
+        let node = self.node_from_id_mut(node_id);
+        if let Some(element) = node.element_data_mut() {
+            element.detailed_grid_info = Some(Box::new(detailed_grid_info));
+        }
+    }
 }
 
 impl RoundTree for BaseDocument {
     fn get_unrounded_layout(&self, node_id: NodeId) -> Layout {
-        self.node_from_id(node_id).unrounded_layout
+        *self.node_from_id(node_id).unrounded_layout()
     }
 
     fn set_final_layout(&mut self, node_id: NodeId, layout: &Layout) {
-        self.node_from_id_mut(node_id).final_layout = *layout;
+        *self.node_from_id_mut(node_id).final_layout_mut() = *layout;
     }
 }
 
 impl PrintTree for BaseDocument {
     fn get_debug_label(&self, node_id: NodeId) -> &'static str {
         let node = &self.node_from_id(node_id);
-        let style = &node.style;
 
         match node.data {
-            NodeData::Document => "DOCUMENT",
+            NodeData::Document(_) => "DOCUMENT",
             // NodeData::Doctype { .. } => return "DOCTYPE",
             NodeData::Text { .. } => node.node_debug_str().leak(),
-            NodeData::Comment => "COMMENT",
+            NodeData::Comment { .. } => "COMMENT",
             NodeData::AnonymousBlock(_) => "ANONYMOUS BLOCK",
             NodeData::Element(_) => {
+                let style = node.style();
                 let display = match style.display {
                     Display::Flex => match style.flex_direction {
                         FlexDirection::Row | FlexDirection::RowReverse => "FLEX ROW",
@@ -473,6 +574,7 @@ impl PrintTree for BaseDocument {
                     },
                     Display::Grid => "GRID",
                     Display::Block => "BLOCK",
+                    Display::FlowRoot => "FLOW ROOT",
                     Display::None => "NONE",
                 };
                 format!("{} ({})", node.node_debug_str(), display).leak()
@@ -481,7 +583,7 @@ impl PrintTree for BaseDocument {
     }
 
     fn get_final_layout(&self, node_id: NodeId) -> Layout {
-        self.node_from_id(node_id).final_layout
+        *self.node_from_id(node_id).final_layout()
     }
 }
 
@@ -494,11 +596,11 @@ impl PrintTree for BaseDocument {
 // }
 
 pub struct RefCellChildIter<'a> {
-    items: Ref<'a, [usize]>,
+    items: Ref<'a, [crate::NodeId]>,
     idx: usize,
 }
 impl<'a> RefCellChildIter<'a> {
-    fn new(items: Ref<'a, [usize]>) -> RefCellChildIter<'a> {
+    fn new(items: Ref<'a, [crate::NodeId]>) -> RefCellChildIter<'a> {
         RefCellChildIter { items, idx: 0 }
     }
 }
@@ -508,7 +610,7 @@ impl Iterator for RefCellChildIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         self.items.get(self.idx).map(|id| {
             self.idx += 1;
-            NodeId::from(*id)
+            taffy_node_id(*id)
         })
     }
 }

@@ -44,8 +44,8 @@ pub(crate) mod util;
 mod viewer;
 
 use crate::single_instance::ExternalRequest;
-use gpui::{px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
-use gpui_component::Root;
+use gpui_kit::component::Root;
+use gpui_kit::{px, size, App, AppContext, Bounds, WindowBounds, WindowOptions};
 use rust_embed::RustEmbed;
 
 pub use settings::Settings;
@@ -66,7 +66,7 @@ const JETBRAINS_MONO_FONT: &[u8] = include_bytes!("../../assets/fonts/JetBrainsM
 const NOTO_COLOR_EMOJI_FONT: &[u8] = include_bytes!("../../assets/fonts/NotoColorEmoji.ttf");
 
 /// Assets embedded in the binary and served to gpui through `AssetSource`.
-/// gpui-component resolves its icons under `icons/*.svg`.
+/// App icons take precedence; GPUI Kit supplies fallback icons for its widgets.
 ///
 /// Fonts are deliberately *not* embedded here: nothing ever asks the asset
 /// source for one — gpui gets them from the `include_bytes!` constants above
@@ -78,21 +78,27 @@ const NOTO_COLOR_EMOJI_FONT: &[u8] = include_bytes!("../../assets/fonts/NotoColo
 #[include = "icons/**/*.svg"]
 struct Assets;
 
-impl gpui::AssetSource for Assets {
+impl gpui_kit::AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         // Message inline `cid:` images, registered when displayed
         // (voir `inline_images`).
         if let Some(bytes) = inline_images::load(path) {
             return Ok(Some(std::borrow::Cow::Owned(bytes)));
         }
-        Ok(Self::get(path).map(|f| f.data))
+        Ok(Self::get(path)
+            .map(|f| f.data)
+            .or_else(|| gpui_kit::assets::Assets::get(path).map(|f| f.data)))
     }
 
-    fn list(&self, path: &str) -> anyhow::Result<Vec<gpui::SharedString>> {
-        Ok(Self::iter()
+    fn list(&self, path: &str) -> anyhow::Result<Vec<gpui_kit::SharedString>> {
+        let mut paths: Vec<gpui_kit::SharedString> = Self::iter()
+            .chain(gpui_kit::assets::Assets::iter())
             .filter(|p| p.starts_with(path))
             .map(|p| p.to_string().into())
-            .collect())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
     }
 }
 
@@ -105,7 +111,7 @@ pub(super) fn set_i18n_language(language: settings::LanguageChoice) {
     // Each `rust-i18n` catalog owns its locale state. Keep Aviary and the
     // component library in sync so built-in menus follow the live preference.
     rust_i18n::set_locale(locale);
-    gpui_component::set_locale(locale);
+    gpui_kit::component::set_locale(locale);
 }
 
 fn install_fonts(cx: &mut App) {
@@ -141,7 +147,7 @@ pub fn run(
     settings.global.ai.ensure_prompt_defaults();
     settings.save();
 
-    let application = Application::new().with_assets(Assets);
+    let application = gpui_kit::application().with_assets(Assets);
 
     // A URL handed over by the desktop goes through the same parser as one read
     // from `argv`, with the same refusals (no `attach`, no unknown headers): it
@@ -164,7 +170,7 @@ pub fn run(
         cx.set_http_client(std::sync::Arc::new(inline_images::CidHttpClient::new(
             default_client,
         )));
-        gpui_component::init(cx);
+        gpui_kit::init(cx);
         components::block_input::init(cx);
         addresses::init(cx);
         block_editor::init(cx);
@@ -185,7 +191,7 @@ pub fn run(
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(window_bounds),
-                titlebar: Some(gpui_component::TitleBar::title_bar_options()),
+                titlebar: Some(gpui_kit::component::TitleBar::title_bar_options()),
                 app_id: Some("aviary".into()),
                 ..Default::default()
             },
@@ -268,5 +274,27 @@ mod i18n_tests {
             rust_i18n::t!("status-connected-as", locale = "fr", label = "Camille"),
             "Connecté · Camille"
         );
+    }
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::Assets;
+    use gpui_kit::AssetSource;
+
+    #[test]
+    fn kit_icons_are_available_without_replacing_app_overrides() {
+        for path in gpui_kit::assets::Assets::iter() {
+            let expected = Assets::get(&path)
+                .or_else(|| gpui_kit::assets::Assets::get(&path))
+                .expect("listed asset exists");
+            assert_eq!(Assets.load(&path).unwrap().unwrap(), expected.data);
+        }
+        let paths = Assets.list("icons/").unwrap();
+        assert!(paths.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(Assets
+            .load("icons/missing-test-icon.svg")
+            .unwrap()
+            .is_none());
     }
 }

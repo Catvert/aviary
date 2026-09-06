@@ -1,8 +1,8 @@
 //! Keyboard settings and shortcut reference.
 
 use super::super::app::AviaryApp;
-use gpui::{div, prelude::*, px, AnyElement, Context, Keystroke};
-use gpui_component::{h_flex, kbd::Kbd, switch::Switch, v_flex, ActiveTheme};
+use gpui_kit::component::{h_flex, kbd::Kbd, switch::Switch, v_flex, ActiveTheme};
+use gpui_kit::{div, prelude::*, px, AnyElement, Context, Keystroke};
 
 impl AviaryApp {
     pub(super) fn render_settings_keyboard(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

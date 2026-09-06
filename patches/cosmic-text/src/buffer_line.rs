@@ -1,9 +1,12 @@
+#![allow(clippy::too_many_arguments)]
+
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 use core::mem;
 
 use crate::{
-    Align, Attrs, AttrsList, Cached, FontSystem, LayoutLine, LineEnding, ShapeLine, Shaping, Wrap,
+    Align, Attrs, AttrsList, Cached, Ellipsize, FontSystem, Hinting, LayoutLine, LayoutRunIter,
+    LineEnding, ShapeLine, Shaping, Wrap,
 };
 
 /// A line (or paragraph) of text that is shaped and laid out
@@ -95,7 +98,7 @@ impl BufferLine {
     }
 
     /// Get line ending
-    pub fn ending(&self) -> LineEnding {
+    pub const fn ending(&self) -> LineEnding {
         self.ending
     }
 
@@ -114,7 +117,7 @@ impl BufferLine {
     }
 
     /// Get attributes list
-    pub fn attrs_list(&self) -> &AttrsList {
+    pub const fn attrs_list(&self) -> &AttrsList {
         &self.attrs_list
     }
 
@@ -133,7 +136,7 @@ impl BufferLine {
     }
 
     /// Get the Text alignment
-    pub fn align(&self) -> Option<Align> {
+    pub const fn align(&self) -> Option<Align> {
         self.align
     }
 
@@ -155,9 +158,12 @@ impl BufferLine {
     /// Append line at end of this line
     ///
     /// The wrap setting of the appended line will be lost
-    pub fn append(&mut self, other: Self) {
+    pub fn append(&mut self, other: &Self) {
         let len = self.text.len();
         self.text.push_str(other.text());
+
+        // To preserve line endings, we use the one from the other line
+        self.ending = other.ending();
 
         if other.attrs_list.defaults() != self.attrs_list.defaults() {
             // If default formatting does not match, make a new span for it
@@ -181,6 +187,8 @@ impl BufferLine {
         self.reset();
 
         let mut new = Self::new(text, self.ending, attrs_list, self.shaping);
+        // To preserve line endings, it moves to the new line
+        self.ending = LineEnding::None;
         new.align = self.align;
         new
     }
@@ -224,8 +232,12 @@ impl BufferLine {
     }
 
     /// Get line shaping cache
-    pub fn shape_opt(&self) -> Option<&ShapeLine> {
+    pub const fn shape_opt(&self) -> Option<&ShapeLine> {
         self.shape_opt.get()
+    }
+
+    pub const fn needs_reshaping(&self) -> bool {
+        self.shape_opt.is_invalidated() || self.layout_opt.is_invalidated()
     }
 
     /// Layout line, will cache results
@@ -236,8 +248,10 @@ impl BufferLine {
         font_size: f32,
         width_opt: Option<f32>,
         wrap: Wrap,
+        ellipsize: Ellipsize,
         match_mono_width: Option<f32>,
         tab_width: u16,
+        hinting: Hinting,
     ) -> &[LayoutLine] {
         if self.layout_opt.is_unused() {
             let align = self.align;
@@ -251,9 +265,11 @@ impl BufferLine {
                 font_size,
                 width_opt,
                 wrap,
+                ellipsize,
                 align,
                 &mut layout,
                 match_mono_width,
+                hinting,
             );
             self.layout_opt.set_used(layout);
         }
@@ -261,13 +277,18 @@ impl BufferLine {
     }
 
     /// Get line layout cache
-    pub fn layout_opt(&self) -> Option<&Vec<LayoutLine>> {
+    pub const fn layout_opt(&self) -> Option<&Vec<LayoutLine>> {
         self.layout_opt.get()
+    }
+
+    /// Get the visible layout runs for rendering and other tasks
+    pub fn layout_runs(&self, height_opt: Option<f32>, line_height: f32) -> LayoutRunIter<'_> {
+        LayoutRunIter::from_lines(core::slice::from_ref(self), height_opt, line_height, 0.0, 0)
     }
 
     /// Get line metadata. This will be None if [`BufferLine::set_metadata`] has not been called
     /// after the last reset of shaping and layout caches
-    pub fn metadata(&self) -> Option<usize> {
+    pub const fn metadata(&self) -> Option<usize> {
         self.metadata
     }
 
@@ -282,7 +303,7 @@ impl BufferLine {
     pub(crate) fn empty() -> Self {
         Self {
             text: String::default(),
-            ending: LineEnding::default(),
+            ending: LineEnding::None,
             attrs_list: AttrsList::new(&Attrs::new()),
             align: None,
             shape_opt: Cached::Empty,

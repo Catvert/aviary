@@ -25,16 +25,16 @@ use super::state::{
 use crate::auth;
 use crate::model::{Account, AccountId, Message, MessageHeader, MessageRef, Provider, Tag};
 use crate::runtime::{self, Cmd, MessageMutationKind, QuickActionStep, UnifiedAccountPage};
-use gpui::{
-    div, prelude::*, px, AnyElement, App, Context, DismissEvent, Entity, FocusHandle,
-    Focusable as _, Render, ScrollHandle, SharedString, Subscription, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     input::{InputEvent, InputState},
     notification::{Notification, NotificationList},
     resizable::{h_resizable, resizable_panel, ResizablePanel, ResizableState},
     Sizable, VirtualListScrollHandle, WindowExt,
+};
+use gpui_kit::{
+    div, prelude::*, px, AnyElement, App, Context, DismissEvent, Entity, FocusHandle,
+    Focusable as _, Render, ScrollHandle, SharedString, Subscription, Window,
 };
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -118,7 +118,7 @@ impl Render for BottomRightNotifications {
         }
 
         div().absolute().bottom_4().right_4().child(
-            gpui_component::v_flex()
+            gpui_kit::component::v_flex()
                 .id("bottom-right-notification-list")
                 .gap_3()
                 .children(notifications),
@@ -665,7 +665,7 @@ pub struct AviaryApp {
     pub folder_dialog_input: Option<Entity<InputState>>,
     /// Kept alive for as long as the "remind me on…" dialog is open: its
     /// closure only borrows the picker, so nothing else owns it.
-    pub snooze_dialog_picker: Option<Entity<gpui_component::date_picker::DatePickerState>>,
+    pub snooze_dialog_picker: Option<Entity<gpui_kit::component::date_picker::DatePickerState>>,
     notification_layer: Option<Entity<BottomRightNotifications>>,
 
     #[cfg(target_os = "linux")]
@@ -966,8 +966,8 @@ impl AviaryApp {
 
         let shortcut_focus = cx.focus_handle();
         let initial_shortcut_focus = shortcut_focus.clone();
-        cx.on_next_frame(window, move |_, window, _| {
-            initial_shortcut_focus.focus(window);
+        cx.on_next_frame(window, move |_, window, cx| {
+            initial_shortcut_focus.focus(window, cx);
         });
 
         let mut calendar =
@@ -1297,8 +1297,8 @@ impl AviaryApp {
         window.push_notification(note, cx);
     }
 
-    pub(crate) fn focus_shortcuts(&self, window: &mut Window) {
-        self.shortcut_focus.focus(window);
+    pub(crate) fn focus_shortcuts(&self, window: &mut Window, cx: &mut App) {
+        self.shortcut_focus.focus(window, cx);
     }
 
     pub(crate) fn open_create_tag_dialog(
@@ -1310,14 +1310,18 @@ impl AviaryApp {
         let input =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("tags-new-name-placeholder")));
         let entity = cx.entity();
-        gpui_component::WindowExt::open_dialog(window, cx, move |dialog, _window, _cx| {
+        gpui_kit::component::WindowExt::open_dialog(window, cx, move |dialog, _window, _cx| {
             let entity = entity.clone();
             let input = input.clone();
             let account_id = account_id.clone();
             dialog
                 .title(tr!("tags-create-title"))
-                .confirm()
-                .child(gpui_component::input::Input::new(&input))
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
+                .child(gpui_kit::component::input::Input::new(&input))
                 .on_ok(move |_, _window, cx| {
                     let name = input.read(cx).value().trim().to_string();
                     if name.is_empty() {
@@ -1514,13 +1518,13 @@ impl AviaryApp {
             .retain(|previous| !previous.eq_ignore_ascii_case(&query));
         self.mailbox.search.history.insert(0, query.clone());
         self.mailbox.search.history.truncate(SEARCH_HISTORY_CAP);
-        self.mailbox.search.query = query.clone();
-        self.mailbox.search.results = Some(Vec::new());
+        self.mailbox.search.begin(query.clone());
         self.invalidate_message_list();
         let scope = self.mail_search_scope();
         for aid in self.active_account_ids() {
             let limit = self.fetch_limit(&aid);
             self.send(Cmd::Search {
+                request_id: self.mailbox.search.request_id,
                 account_id: aid,
                 query: query.clone(),
                 scope: scope.clone(),

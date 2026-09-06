@@ -11,7 +11,7 @@ use style::{
 use crate::{
     color::{ToColorColor as _, contrast_ratio},
     kurbo_css::Edge,
-    render::ElementCx,
+    render::{ElementCx, PhysicalTracks},
 };
 
 /// A darker version of a colour (mirrors WebKit/Blink's `Color::Dark`): the
@@ -525,39 +525,13 @@ impl ElementCx<'_, '_> {
             return;
         };
 
-        // CSS keeps the initial border width (`medium`) in the computed
-        // border struct even when `border-style: none`; the used width is
-        // nevertheless zero.  Painting that computed width produces a black
-        // grid around the ubiquitous email pattern
-        // `table { border-collapse: collapse }` + `border="0"`.
-        let visible_edge = |style: BorderStyle, width: f32| {
-            !matches!(style, BorderStyle::None | BorderStyle::Hidden) && width > 0.0
-        };
-        if !visible_edge(
-            border_style.border_top_style,
-            border_style.border_top_width.0.to_f32_px(),
-        ) && !visible_edge(
-            border_style.border_right_style,
-            border_style.border_right_width.0.to_f32_px(),
-        ) && !visible_edge(
-            border_style.border_bottom_style,
-            border_style.border_bottom_width.0.to_f32_px(),
-        ) && !visible_edge(
-            border_style.border_left_style,
-            border_style.border_left_width.0.to_f32_px(),
-        ) {
-            return;
-        }
-
         let outer_border_style = self.style.get_border();
 
-        let cols = &grid_info.columns;
-        let rows = &grid_info.rows;
+        let cols = PhysicalTracks::from_tracks(&grid_info.columns);
+        let rows = PhysicalTracks::from_tracks(&grid_info.rows);
 
-        let inner_width =
-            (cols.sizes.iter().sum::<f32>() + cols.gutters.iter().sum::<f32>()) as f64;
-        let inner_height =
-            (rows.sizes.iter().sum::<f32>() + rows.gutters.iter().sum::<f32>()) as f64;
+        let inner_width = cols.span() as f64;
+        let inner_height = rows.span() as f64;
 
         // TODO: support different colors for different borders
         let current_color = self.style.clone_color();
@@ -571,16 +545,25 @@ impl ElementCx<'_, '_> {
             return;
         }
 
+        // Border widths are not adjusted for border-style in computed styles,
+        // so a border with `none`/`hidden` style must be treated as zero-width.
+        if border_style.border_top_style.none_or_hidden() {
+            return;
+        }
+
         let border_width = border_style.border_top_width.0.to_f64_px();
 
-        // Draw horizontal inner borders
-        let mut y = 0.0;
-        for (&height, &gutter) in rows.sizes.iter().zip(rows.gutters.iter()) {
-            let shape =
-                Rect::new(0.0, y, inner_width, y + gutter as f64).scale_from_origin(self.scale);
+        // Draw horizontal inner borders (the gutters between adjacent row tracks)
+        let row_origin = rows.origin();
+        for (prev, next) in rows.iter().zip(rows.iter().skip(1)) {
+            let shape = Rect::new(
+                0.0,
+                (prev.end - row_origin) as f64,
+                inner_width,
+                (next.start - row_origin) as f64,
+            )
+            .scale_from_origin(self.scale);
             scene.fill(Fill::NonZero, self.transform, border_color, None, &shape);
-
-            y += (height + gutter) as f64;
         }
 
         // Draw horizontal outer borders
@@ -597,14 +580,17 @@ impl ElementCx<'_, '_> {
             scene.fill(Fill::NonZero, self.transform, border_color, None, &shape);
         }
 
-        // Draw vertical inner borders
-        let mut x = 0.0;
-        for (&width, &gutter) in cols.sizes.iter().zip(cols.gutters.iter()) {
-            let shape =
-                Rect::new(x, 0.0, x + gutter as f64, inner_height).scale_from_origin(self.scale);
+        // Draw vertical inner borders (the gutters between adjacent column tracks)
+        let col_origin = cols.origin();
+        for (prev, next) in cols.iter().zip(cols.iter().skip(1)) {
+            let shape = Rect::new(
+                (prev.end - col_origin) as f64,
+                0.0,
+                (next.start - col_origin) as f64,
+                inner_height,
+            )
+            .scale_from_origin(self.scale);
             scene.fill(Fill::NonZero, self.transform, border_color, None, &shape);
-
-            x += (width + gutter) as f64;
         }
 
         // Draw vertical outer borders

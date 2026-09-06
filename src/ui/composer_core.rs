@@ -6,8 +6,8 @@ use super::addresses::RecipientInput;
 use super::block_editor::BlockEditor;
 use super::motion::WheelScrollMotion;
 use crate::model::{Attachment, Signature, Template};
-use gpui::{Entity, ScrollHandle};
-use gpui_component::input::InputState;
+use gpui_kit::component::input::InputState;
+use gpui_kit::{Entity, ScrollHandle};
 
 pub(super) struct ComposerCoreInit {
     pub to: Entity<RecipientInput>,

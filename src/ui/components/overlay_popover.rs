@@ -6,11 +6,11 @@
 //! interaction.
 
 use super::super::motion::{ease_out_cubic, WheelScrollMotion};
-use gpui::{
+use gpui_kit::component::{v_flex, ActiveTheme};
+use gpui_kit::{
     deferred, point, prelude::*, px, Animation, AnimationExt as _, AnyElement, App, ElementId,
     IntoElement, Pixels, RenderOnce, ScrollHandle, ScrollWheelEvent, Window,
 };
-use gpui_component::{v_flex, ActiveTheme};
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 const OPEN_DURATION: Duration = Duration::from_millis(140);

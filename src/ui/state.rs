@@ -73,6 +73,8 @@ pub struct MailPagination {
 /// not a search is active.
 #[derive(Default)]
 pub struct MailSearchState {
+    /// Identifies one submission, including a repeat of the same query.
+    pub request_id: u64,
     pub query: String,
     pub scope: crate::ui::settings::MailSearchScope,
     pub sort: crate::ui::settings::MailSearchSort,
@@ -87,6 +89,18 @@ pub struct MailSearchState {
     pub menu_open: bool,
     /// Keyboard-highlighted row in the flattened contact/history suggestions.
     pub menu_selection: Option<usize>,
+}
+
+impl MailSearchState {
+    pub(crate) fn begin(&mut self, query: String) {
+        self.request_id = self.request_id.wrapping_add(1);
+        self.query = query;
+        self.results = Some(Vec::new());
+    }
+
+    pub(crate) fn accepts_results(&self, request_id: u64, query: &str) -> bool {
+        self.results.is_some() && self.request_id == request_id && self.query == query
+    }
 }
 
 #[derive(Default)]
@@ -235,6 +249,47 @@ mod tests {
     use super::MailboxState;
 
     #[test]
+    fn late_results_cannot_enter_a_repeated_search() {
+        let mut search = super::MailSearchState::default();
+        search.begin("subject:alpha".into());
+        let first = search.request_id;
+        search.begin("subject:beta".into());
+        let second = search.request_id;
+        search.begin("subject:alpha".into());
+        assert!(!search.accepts_results(first, "subject:alpha"));
+        assert!(!search.accepts_results(second, "subject:beta"));
+        assert!(search.accepts_results(search.request_id, "subject:alpha"));
+    }
+
+    #[test]
+    fn resubmitting_after_a_scope_change_rejects_the_previous_response() {
+        let mut search = super::MailSearchState::default();
+        search.begin("subject:alpha".into());
+        let previous = search.request_id;
+        search.scope = crate::ui::settings::MailSearchScope::Folder;
+        search.begin("subject:alpha".into());
+        assert!(!search.accepts_results(previous, "subject:alpha"));
+        // Both the local and provider phase of the current request are accepted.
+        assert!(search.accepts_results(search.request_id, "subject:alpha"));
+        assert!(search.accepts_results(search.request_id, "subject:alpha"));
+    }
+
+    #[test]
+    fn leaving_search_mode_rejects_in_flight_results() {
+        let mut mailbox = MailboxState::default();
+        mailbox.search.begin("subject:alpha".into());
+        let previous = mailbox.search.request_id;
+        // Changing folders leaves the input text in place, but disables search.
+        mailbox.search.results = None;
+        assert!(!mailbox.search.accepts_results(previous, "subject:alpha"));
+        mailbox.search.begin("subject:alpha".into());
+        assert!(!mailbox.search.accepts_results(previous, "subject:alpha"));
+        let current = mailbox.search.request_id;
+        mailbox.clear_search();
+        assert!(!mailbox.search.accepts_results(current, "subject:alpha"));
+    }
+
+    #[test]
     fn clearing_a_restored_search_requests_the_initial_mailbox_load() {
         let mut mailbox = MailboxState {
             search: super::MailSearchState {
@@ -274,6 +329,7 @@ pub enum SenderHistoryState {
 
 #[derive(Default)]
 pub struct ContactsState {
+    pub(crate) render_cache: Option<super::contacts_view::ContactListCache>,
     pub list: Vec<crate::model::Contact>,
     pub selected: Option<String>,
     pub query: String,

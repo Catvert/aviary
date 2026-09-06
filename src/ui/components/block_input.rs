@@ -6,17 +6,17 @@
 
 use super::display_map::{DisplayMap, FoldableRange};
 use super::overlay_popover::{OverlayPopover, OverlayPopoverScroll};
-use gpui::{
+use gpui_kit::component::{
+    menu::{ContextMenuExt as _, PopupMenuItem},
+    ActiveTheme, StyledExt as _,
+};
+use gpui_kit::{
     actions, combine_highlights, div, fill, point, prelude::*, px, size, App, Bounds,
     ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity, EntityId,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, HighlightStyle,
     InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce, SharedString,
     StyleRefinement, Styled, StyledText, Subscription, TextLayout, UTF16Selection, Window,
-};
-use gpui_component::{
-    menu::{ContextMenuExt as _, PopupMenuItem},
-    ActiveTheme, StyledExt as _,
 };
 use std::{ops::Range, rc::Rc};
 
@@ -387,8 +387,8 @@ impl BlockInputState {
         self.refresh_completions();
     }
 
-    pub(crate) fn focus(&self, window: &mut Window, _cx: &mut Context<Self>) {
-        self.focus_handle.focus(window);
+    pub(crate) fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_handle.focus(window, cx);
     }
 
     pub(crate) fn unselect(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -440,7 +440,7 @@ impl BlockInputState {
 
     pub(crate) fn handle_completion_action(
         &mut self,
-        action: Box<dyn gpui::Action>,
+        action: Box<dyn gpui_kit::Action>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -968,7 +968,7 @@ impl BlockInputState {
         if event.button != MouseButton::Left {
             return;
         }
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
         self.selecting = true;
         match event.click_count {
             2 => {
@@ -1327,7 +1327,7 @@ impl RenderOnce for BlockInput {
             highlights.push((
                 marked,
                 HighlightStyle {
-                    underline: Some(gpui::UnderlineStyle {
+                    underline: Some(gpui_kit::UnderlineStyle {
                         color: Some(cx.theme().caret),
                         thickness: px(1.),
                         wavy: false,

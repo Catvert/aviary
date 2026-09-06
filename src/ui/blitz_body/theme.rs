@@ -93,7 +93,7 @@ pub(super) struct MailTheme {
 }
 
 impl MailTheme {
-    pub(super) fn from_app(theme: &gpui_component::Theme, force_light: bool) -> Self {
+    pub(super) fn from_app(theme: &gpui_kit::component::Theme, force_light: bool) -> Self {
         if force_light {
             Self::forced_light()
         } else {
@@ -335,6 +335,6 @@ fn relative_luminance((r, g, b): (u8, u8, u8)) -> f32 {
     0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
 }
 
-fn rgba8(color: gpui::Hsla) -> u32 {
-    gpui::Rgba::from(color).into()
+fn rgba8(color: gpui_kit::Hsla) -> u32 {
+    gpui_kit::Rgba::from(color).into()
 }

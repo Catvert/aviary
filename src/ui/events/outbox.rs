@@ -15,8 +15,8 @@
 use super::super::app::{AviaryApp, BulkCompletion, BulkReply};
 use crate::model::{AccountId, MessageHeader, MessageRef};
 use crate::runtime::{Cmd, MessageMutationKind};
-use gpui::{Context, SharedString, Window};
-use gpui_component::notification::{Notification, NotificationType};
+use gpui_kit::component::notification::{Notification, NotificationType};
+use gpui_kit::{Context, SharedString, Window};
 
 impl AviaryApp {
     /// The provider is unreachable: the operation stays in the outbox and will

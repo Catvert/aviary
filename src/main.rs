@@ -60,17 +60,17 @@ unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-/// Turns a catalog lookup into a [`gpui::SharedString`] without copying when
+/// Turns a catalog lookup into a [`gpui_kit::SharedString`] without copying when
 /// the entry needs no interpolation.
 ///
 /// `rust-i18n` compiles the catalogs into `Cow::Borrowed(&'static str)`, and a
 /// `SharedString` can hold that borrow as-is. Producing a `String` — what the
 /// `tr!` facade used to do — cost one allocation for the copy and a second for
 /// the `Arc` gpui puts behind every label, on every frame that renders it.
-pub fn i18n_shared(value: std::borrow::Cow<'static, str>) -> gpui::SharedString {
+pub fn i18n_shared(value: std::borrow::Cow<'static, str>) -> gpui_kit::SharedString {
     match value {
-        std::borrow::Cow::Borrowed(text) => gpui::SharedString::new_static(text),
-        std::borrow::Cow::Owned(text) => gpui::SharedString::from(text),
+        std::borrow::Cow::Borrowed(text) => gpui_kit::SharedString::new_static(text),
+        std::borrow::Cow::Owned(text) => gpui_kit::SharedString::from(text),
     }
 }
 

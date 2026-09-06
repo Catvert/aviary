@@ -1,22 +1,35 @@
+use blitz_traits::node_id::NodeId;
 use cssparser::ParserInput;
+use kurbo::{Affine, Rect as KurboRect};
 use linebender_resource_handle::Blob;
 use markup5ever::{LocalName, QualName, local_name};
-use selectors::matching::QuirksMode;
+use selectors::matching::{ElementSelectorFlags, QuirksMode};
+use std::cell::Cell;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use style::Atom;
 use style::parser::ParserContext;
 use style::properties::{Importance, PropertyDeclaration, PropertyId, SourcePropertyDeclaration};
 use style::stylesheets::{DocumentStyleSheet, Origin, UrlExtraData};
+use style::values::computed::Display as StyloDisplay;
 use style::{
     properties::{PropertyDeclarationBlock, parse_style_attribute},
     servo_arc::Arc as ServoArc,
     shared_lock::{Locked, SharedRwLock},
     stylesheets::CssRuleType,
 };
+use style_dom::ElementState;
 use style_traits::ParsingMode;
+use taffy::{
+    Cache,
+    prelude::{Layout, Style},
+};
 use url::Url;
 
+use super::stylo_data::StyloData;
+#[cfg(feature = "svg")]
+use super::svg::SvgImageData;
 use super::{Attribute, Attributes};
 use crate::Document;
 use crate::layout::table::TableContext;
@@ -31,7 +44,6 @@ macro_rules! local_names {
     };
 }
 
-#[derive(Debug, Clone)]
 pub struct ElementData {
     /// The elements tag name, namespace and prefix
     pub name: QualName,
@@ -67,9 +79,204 @@ pub struct ElementData {
     pub list_item_data: Option<Box<ListItemLayout>>,
 
     /// The element's template contents (\<template\> elements only)
-    pub template_contents: Option<usize>,
+    pub template_contents: Option<NodeId>,
     // /// Whether the node is a [HTML integration point] (https://html.spec.whatwg.org/multipage/#html-integration-point)
     // pub mathml_annotation_xml_integration_point: bool,
+
+    // ---------------------------------------------------------------------
+    // Fields moved from `Node`. These live on the element data so that the
+    // `Node` struct itself only carries tree-structure information.
+    // ---------------------------------------------------------------------
+    /// Style data from stylo, plus a lock guard that allows access to it.
+    pub stylo_element_data: StyloData,
+    pub selector_flags: Cell<ElementSelectorFlags>,
+    /// A clone of the document's shared style lock. Set when the owning
+    /// [`Node`](super::Node) is constructed.
+    pub guard: Option<SharedRwLock>,
+    pub element_state: ElementState,
+    pub has_snapshot: bool,
+    pub snapshot_handled: AtomicBool,
+    /// Whether any descendant of this node needs restyling.
+    /// Used by Stylo's incremental style traversal to skip unchanged subtrees.
+    pub dirty_descendants: AtomicBool,
+    /// Whether this node or any of its descendants may carry `RestyleDamage`.
+    /// Used by the damage propagation pass to skip unchanged subtrees.
+    pub damaged_descendants: AtomicBool,
+
+    // Pseudo element nodes
+    pub before: Option<NodeId>,
+    pub after: Option<NodeId>,
+
+    /// Detailed grid track sizing information from the most recent layout
+    /// (grid containers only). Used by devtools grid inspection.
+    pub detailed_grid_info: Option<Box<taffy::DetailedGridInfo<Atom>>>,
+
+    // Taffy layout data:
+    pub style: Style<Atom>,
+    pub display_constructed_as: StyloDisplay,
+    pub cache: Cache,
+    pub unrounded_layout: Layout,
+    pub final_layout: Layout,
+    pub scroll_offset: crate::Point<f64>,
+    pub scrollable_overflow: KurboRect,
+    pub transform: Option<Affine>,
+}
+
+/// Data specific to the [`Document`](super::super::Document) root node.
+///
+/// The document node participates in layout and styling like an element, so it
+/// carries the same style/layout fields that were previously stored directly on
+/// [`Node`](super::Node).
+pub struct DocumentData {
+    pub stylo_element_data: StyloData,
+    /// Selector flags deposited here by `apply_selector_flags` when a
+    /// `for_parent()` flag is applied while matching the root `<html>` element,
+    /// whose parent node is the document.
+    pub selector_flags: Cell<ElementSelectorFlags>,
+    /// A clone of the document's shared style lock. Set when the owning
+    /// [`Node`](super::Node) is constructed.
+    pub guard: Option<SharedRwLock>,
+    pub dirty_descendants: AtomicBool,
+    pub damaged_descendants: AtomicBool,
+    pub element_state: ElementState,
+    pub has_snapshot: bool,
+    pub snapshot_handled: AtomicBool,
+    pub style: Style<Atom>,
+    pub display_constructed_as: StyloDisplay,
+    pub cache: Cache,
+    pub unrounded_layout: Layout,
+    pub final_layout: Layout,
+    pub scroll_offset: crate::Point<f64>,
+    pub scrollable_overflow: KurboRect,
+    pub transform: Option<Affine>,
+}
+
+// Hand-written like `ElementData`'s, because `ElementSelectorFlags` does not
+// implement `Debug`. Every other field is still reported.
+impl std::fmt::Debug for DocumentData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DocumentData")
+            .field("stylo_element_data", &self.stylo_element_data)
+            .field("guard", &self.guard)
+            .field("dirty_descendants", &self.dirty_descendants)
+            .field("damaged_descendants", &self.damaged_descendants)
+            .field("element_state", &self.element_state)
+            .field("has_snapshot", &self.has_snapshot)
+            .field("snapshot_handled", &self.snapshot_handled)
+            .field("style", &self.style)
+            .field("display_constructed_as", &self.display_constructed_as)
+            .field("cache", &self.cache)
+            .field("unrounded_layout", &self.unrounded_layout)
+            .field("final_layout", &self.final_layout)
+            .field("scroll_offset", &self.scroll_offset)
+            .field("scrollable_overflow", &self.scrollable_overflow)
+            .field("transform", &self.transform)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DocumentData {
+    pub fn new() -> Self {
+        Self {
+            stylo_element_data: Default::default(),
+            selector_flags: Cell::new(ElementSelectorFlags::empty()),
+            guard: None,
+            dirty_descendants: AtomicBool::new(true),
+            damaged_descendants: AtomicBool::new(true),
+            element_state: ElementState::empty(),
+            has_snapshot: false,
+            snapshot_handled: AtomicBool::new(false),
+            style: Default::default(),
+            display_constructed_as: StyloDisplay::Block,
+            cache: Cache::new(),
+            unrounded_layout: Layout::new(),
+            final_layout: Layout::new(),
+            scroll_offset: crate::Point::ZERO,
+            scrollable_overflow: KurboRect::ZERO,
+            transform: None,
+        }
+    }
+}
+
+impl Default for DocumentData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for DocumentData {
+    fn clone(&self) -> Self {
+        // Runtime style/layout state is reset (the document node is not
+        // meaningfully cloneable), matching `ElementData`'s clone semantics.
+        Self {
+            guard: self.guard.clone(),
+            ..Self::new()
+        }
+    }
+}
+
+impl std::fmt::Debug for ElementData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ElementData")
+            .field("name", &self.name)
+            .field("id", &self.id)
+            .field("attrs", &self.attrs)
+            .field("is_focussable", &self.is_focussable)
+            .field("style_attribute", &self.style_attribute)
+            .field("special_data", &self.special_data)
+            .field("background_images", &self.background_images)
+            .field("mask_images", &self.mask_images)
+            .field("inline_layout_data", &self.inline_layout_data)
+            .field("list_item_data", &self.list_item_data)
+            .field("template_contents", &self.template_contents)
+            .field("element_state", &self.element_state)
+            .field("display_constructed_as", &self.display_constructed_as)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Clone for ElementData {
+    /// Clones the *content* of the element (name, attributes, style attribute,
+    /// special data, etc.). Runtime style/layout state (stylo data, taffy
+    /// layout, caches, pseudo-element ids, ...) is reset to its default so that
+    /// the clone behaves like a freshly-created element that has not yet been
+    /// styled or laid out.
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            id: self.id.clone(),
+            attrs: self.attrs.clone(),
+            is_focussable: self.is_focussable,
+            style_attribute: self.style_attribute.clone(),
+            special_data: self.special_data.clone(),
+            background_images: self.background_images.clone(),
+            mask_images: self.mask_images.clone(),
+            inline_layout_data: self.inline_layout_data.clone(),
+            list_item_data: self.list_item_data.clone(),
+            template_contents: self.template_contents,
+
+            // Runtime state: reset to defaults.
+            stylo_element_data: Default::default(),
+            selector_flags: Cell::new(ElementSelectorFlags::empty()),
+            guard: self.guard.clone(),
+            element_state: self.element_state,
+            has_snapshot: false,
+            snapshot_handled: AtomicBool::new(false),
+            dirty_descendants: AtomicBool::new(true),
+            damaged_descendants: AtomicBool::new(true),
+            before: None,
+            after: None,
+            detailed_grid_info: None,
+            style: Default::default(),
+            display_constructed_as: StyloDisplay::Block,
+            cache: Cache::new(),
+            unrounded_layout: Layout::new(),
+            final_layout: Layout::new(),
+            scroll_offset: crate::Point::ZERO,
+            scrollable_overflow: KurboRect::ZERO,
+            transform: None,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Default)]
@@ -160,8 +367,51 @@ impl ElementData {
             template_contents: None,
             background_images: Vec::new(),
             mask_images: Vec::new(),
+
+            stylo_element_data: Default::default(),
+            selector_flags: Cell::new(ElementSelectorFlags::empty()),
+            guard: None,
+            element_state: ElementState::empty(),
+            has_snapshot: false,
+            snapshot_handled: AtomicBool::new(false),
+            dirty_descendants: AtomicBool::new(true),
+            damaged_descendants: AtomicBool::new(true),
+            before: None,
+            after: None,
+            detailed_grid_info: None,
+            style: Default::default(),
+            display_constructed_as: StyloDisplay::Block,
+            cache: Cache::new(),
+            unrounded_layout: Layout::new(),
+            final_layout: Layout::new(),
+            scroll_offset: crate::Point::ZERO,
+            scrollable_overflow: KurboRect::ZERO,
+            transform: None,
         };
         data.flush_is_focussable();
+        data.flush_link_state();
+
+        // Mirror the `checked` attribute into the element state so that `:checked`
+        // selectors can be matched (and invalidated) from `ElementState`.
+        if data.name.local == local_name!("input")
+            && matches!(
+                data.attr(local_name!("type")),
+                Some("checkbox") | Some("radio")
+            )
+            && data.has_attr(local_name!("checked"))
+        {
+            data.element_state.insert(ElementState::CHECKED);
+        }
+
+        // The element state needs to be modified if the element can be disabled.
+        if data.can_be_disabled() {
+            data.element_state
+                .insert(match data.has_attr(local_name!("disabled")) {
+                    true => ElementState::DISABLED,
+                    false => ElementState::ENABLED,
+                });
+        }
+
         data
     }
 
@@ -186,6 +436,27 @@ impl ElementData {
 
     pub fn can_be_disabled(&self) -> bool {
         local_names!("button", "input", "select", "textarea").contains(&self.name.local)
+    }
+
+    /// Whether this element is a link (an `<a>` or `<area>` element with an `href` attribute)
+    pub fn is_link(&self) -> bool {
+        (self.name.local == local_name!("a") || self.name.local == local_name!("area"))
+            && self.has_attr(local_name!("href"))
+    }
+
+    /// Sync the visitedness bits of `element_state` with the element's link-ness.
+    /// Blitz does not track browsing history, so all links are unvisited.
+    ///
+    /// Stylo's snapshot invalidation (`ElementWrapper::is_link`) determines link-ness
+    /// from these state bits, so they must be kept accurate for `:link`/`:any-link`
+    /// selectors to be correctly invalidated. Must be called whenever the `href`
+    /// attribute is added or removed.
+    pub fn flush_link_state(&mut self) {
+        self.element_state
+            .remove(ElementState::VISITED_OR_UNVISITED);
+        if self.is_link() {
+            self.element_state.insert(ElementState::UNVISITED);
+        }
     }
 
     pub fn image_data(&self) -> Option<&ImageData> {
@@ -287,6 +558,16 @@ impl ElementData {
             SpecialElementData::CheckboxInput(ref mut checked) => Some(checked),
             _ => None,
         }
+    }
+
+    /// Set the checked state of a checkbox/radio input, keeping the
+    /// `ElementState::CHECKED` bit (used for `:checked` selector matching and
+    /// invalidation) in sync with the special data.
+    pub fn set_checkbox_input_checked(&mut self, checked: bool) {
+        if let Some(is_checked) = self.checkbox_input_checked_mut() {
+            *is_checked = checked;
+        }
+        self.element_state.set(ElementState::CHECKED, checked);
     }
 
     #[cfg(feature = "file-input")]
@@ -493,37 +774,6 @@ impl RasterImageData {
             height,
             data: Blob::new(data),
         }
-    }
-}
-
-/// A parsed SVG image together with its CSS intrinsic dimensions.
-///
-/// usvg always resolves the root `<svg>` to a concrete [`usvg::Tree::size`],
-/// falling back to the `viewBox` size when `width`/`height` are absent or given
-/// as percentages. For CSS sizing purposes, however, such an SVG has *no*
-/// intrinsic width/height (only an intrinsic aspect ratio). We record which
-/// dimensions were actually declared as absolute lengths so the paint layer can
-/// apply the CSS default sizing algorithm correctly.
-#[cfg(feature = "svg")]
-#[derive(Debug, Clone)]
-pub struct SvgImageData {
-    /// The parsed SVG tree.
-    pub tree: Arc<usvg::Tree>,
-    /// The intrinsic width in CSS px, present only when the root `<svg>`
-    /// declared an absolute (non-percentage) `width`.
-    pub intrinsic_width: Option<f32>,
-    /// The intrinsic height in CSS px, present only when the root `<svg>`
-    /// declared an absolute (non-percentage) `height`.
-    pub intrinsic_height: Option<f32>,
-}
-
-#[cfg(feature = "svg")]
-impl SvgImageData {
-    /// The intrinsic aspect ratio of the SVG (always available: usvg resolves
-    /// the `viewBox` or declared size into a non-zero [`usvg::Tree::size`]).
-    pub fn aspect_ratio(&self) -> f32 {
-        let size = self.tree.size();
-        size.width() / size.height()
     }
 }
 

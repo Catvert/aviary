@@ -7,14 +7,16 @@ use super::util;
 use crate::blocks::{build_html_body, Block};
 use crate::model::{AccountId, Message, MessageHeader, MessageRef};
 use crate::runtime::{Cmd, OutgoingMail, QuickActionExecution, QuickActionStep};
-use gpui::{div, prelude::*, Context, DismissEvent, Entity, Focusable as _, MouseButton, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     menu::{PopupMenu, PopupMenuItem},
     notification::Notification,
     popover::Popover,
     ActiveTheme, Disableable, Sizable, WindowExt,
+};
+use gpui_kit::{
+    div, prelude::*, Context, DismissEvent, Entity, Focusable as _, MouseButton, Window,
 };
 
 const QUICK_ACTION_EXECUTION_BIT: u64 = 1 << 63;
@@ -162,7 +164,7 @@ impl AviaryApp {
         show_favorites: bool,
         show_menu: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let actions = self.quick_actions_for(account_id);
         if actions.is_empty() {
             return div().into_any_element();
@@ -176,7 +178,7 @@ impl AviaryApp {
             .collect();
         let entity = cx.entity();
         let mut controls = h_flex()
-            .id(gpui::ElementId::Name(
+            .id(gpui_kit::ElementId::Name(
                 format!(
                     "quick-action-controls-{scope}-{}-{message_id}",
                     account_id.0
@@ -196,7 +198,7 @@ impl AviaryApp {
                 let action_id = action.id;
                 let valid = self.quick_action_is_valid(account_id, &action);
                 controls = controls.child(
-                    Button::new(gpui::ElementId::Name(
+                    Button::new(gpui_kit::ElementId::Name(
                         format!(
                             "quick-action-{scope}-{}-{}-{action_id}",
                             account_id.0, message_id
@@ -242,7 +244,7 @@ impl AviaryApp {
             .as_ref()
             .filter(|state| state.target == target && state.scope == scope)
             .map(|state| state.menu.clone());
-        let menu_button = Button::new(gpui::ElementId::Name(
+        let menu_button = Button::new(gpui_kit::ElementId::Name(
             format!("quick-actions-menu-{scope}-{}-{}", account_id.0, message_id).into(),
         ))
         .ghost()
@@ -253,7 +255,7 @@ impl AviaryApp {
         let target_for_toggle = target.clone();
         controls
             .child(
-                Popover::new(gpui::ElementId::Name(
+                Popover::new(gpui_kit::ElementId::Name(
                     format!(
                         "quick-actions-popover-{scope}-{}-{}",
                         account_id.0, message_id
@@ -284,7 +286,7 @@ impl AviaryApp {
                         return div().into_any_element();
                     };
                     if !menu.focus_handle(cx).contains_focused(window, cx) {
-                        menu.focus_handle(cx).focus(window);
+                        menu.focus_handle(cx).focus(window, cx);
                     }
                     menu.into_any_element()
                 }),

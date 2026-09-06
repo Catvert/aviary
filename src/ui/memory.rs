@@ -14,7 +14,7 @@
 use super::app::AviaryApp;
 use super::state::ThreadBodyState;
 use crate::model::Message;
-use gpui::App;
+use gpui_kit::App;
 
 /// Resident set size of the process, in bytes.
 ///

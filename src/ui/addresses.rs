@@ -8,16 +8,16 @@
 
 use crate::model::Contact;
 use crate::runtime::RecipientUsage;
-use gpui::{
-    actions, div, prelude::*, px, App, Context, ElementId, Entity, Focusable as _, KeyBinding,
-    MouseButton, Pixels, WeakEntity, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     avatar::Avatar,
     button::{Button, ButtonVariants},
     h_flex,
     input::{Backspace, Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp},
     v_flex, ActiveTheme, Sizable, StyledExt,
+};
+use gpui_kit::{
+    actions, div, prelude::*, px, App, Context, ElementId, Entity, Focusable as _, KeyBinding,
+    MouseButton, Pixels, WeakEntity, Window,
 };
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -269,19 +269,19 @@ impl RecipientInput {
         self.input.update(cx, |state, cx| state.focus(window, cx));
     }
 
-    pub fn is_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+    pub fn is_focused(&self, window: &Window, cx: &gpui_kit::App) -> bool {
         self.input.focus_handle(cx).is_focused(window)
     }
 
     /// All displayed forms, including input not yet converted into a chip.
     /// Useful when detaching a composer or saving a
     /// draft without losing text under the cursor.
-    pub fn serialized(&self, cx: &gpui::App) -> String {
+    pub fn serialized(&self, cx: &gpui_kit::App) -> String {
         self.values(cx).join(", ")
     }
 
     /// Bare addresses expected by providers.
-    pub fn bare_addresses(&self, cx: &gpui::App) -> Vec<String> {
+    pub fn bare_addresses(&self, cx: &gpui_kit::App) -> Vec<String> {
         super::util::parse_bare_addresses(&self.serialized(cx))
     }
 
@@ -299,7 +299,7 @@ impl RecipientInput {
         cx.notify();
     }
 
-    fn values(&self, cx: &gpui::App) -> Vec<String> {
+    fn values(&self, cx: &gpui_kit::App) -> Vec<String> {
         let mut values = self.recipients.clone();
         values.extend(super::util::parse_addresses(
             self.input.read(cx).value().as_ref(),
@@ -533,8 +533,8 @@ impl Render for RecipientInput {
             .small()
             .tab_index(0)
             .appearance(false)
-            .flex_grow()
-            .flex_shrink()
+            .flex_grow(1.)
+            .flex_shrink(1.)
             .flex_basis(px(160.))
             .min_w(px(120.));
         let picker_id = ElementId::Name(format!("recipient-picker-{entity_id}").into());

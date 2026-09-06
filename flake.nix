@@ -27,7 +27,7 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
-        # Libraries the binary dlopens at runtime: gpui renders through blade
+        # Libraries the binary dlopens at runtime: gpui renders through WGPU
         # (Vulkan), and the window/font/clipboard stack is resolved lazily. They
         # go on the RPATH of the built binary and into LD_LIBRARY_PATH for the
         # dev shell.
@@ -67,7 +67,7 @@
       {
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "aviary";
-          version = "0.2.4";
+          version = "0.2.5";
           src = self;
 
           # `patches/` pins four crates through [patch.crates-io], so the lock

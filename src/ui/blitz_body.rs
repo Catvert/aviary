@@ -100,14 +100,14 @@ use blitz_traits::shell::Viewport;
 use cursor_icon::CursorIcon;
 use fontique::{Blob, GenericFamily};
 use futures::channel::oneshot;
-use gpui::{
-    anchored, canvas, deferred, div, img, point, prelude::*, px, App, Corner, CursorStyle,
-    EntityId, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, Pixels, Point, RenderImage, ScrollDelta, ScrollWheelEvent, WeakEntity, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
     v_flex, ActiveTheme, StyledExt,
+};
+use gpui_kit::{
+    anchored, canvas, deferred, div, img, point, prelude::*, px, Anchor, App, CursorStyle,
+    EntityId, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, Pixels, Point, RenderImage, ScrollDelta, ScrollWheelEvent, WeakEntity, Window,
 };
 use peniko::{kurbo::Rect, Fill};
 use smallvec::SmallVec;
@@ -170,7 +170,7 @@ struct LinkHandler {
     app: Option<WeakEntity<super::app::AviaryApp>>,
 }
 
-impl gpui::Global for LinkHandler {}
+impl gpui_kit::Global for LinkHandler {}
 
 pub(crate) fn install_link_handler(app: WeakEntity<super::app::AviaryApp>, cx: &mut App) {
     cx.default_global::<LinkHandler>().app = Some(app);
@@ -504,7 +504,7 @@ pub(crate) struct BlitzCache {
     last_sweep: Option<Instant>,
 }
 
-impl gpui::Global for BlitzCache {}
+impl gpui_kit::Global for BlitzCache {}
 
 impl BlitzCache {
     fn entry_mut(&mut self, key: &str) -> &mut Entry {
@@ -792,7 +792,7 @@ struct PrepCache {
     order: VecDeque<String>,
 }
 
-impl gpui::Global for PrepCache {}
+impl gpui_kit::Global for PrepCache {}
 
 impl PrepCache {
     /// Entries and the bytes their retained source, repaired HTML and inline
@@ -973,8 +973,8 @@ struct PaintState {
     had_visible: bool,
     /// DOM nodes touched at the start and end of a rich drag. They augment
     /// Blitz's text selection to include images.
-    rich_anchor: Option<usize>,
-    rich_focus: Option<usize>,
+    rich_anchor: Option<blitz_dom::NodeId>,
+    rich_focus: Option<blitz_dom::NodeId>,
     rich_anchor_point: Option<(f32, f32)>,
     rich_focus_point: Option<(f32, f32)>,
     rich_dragged: bool,
@@ -987,7 +987,7 @@ struct PaintState {
     /// Only the received-message reader opens images. Editor quotes and
     /// composer previews keep their existing link behavior.
     preview_images: bool,
-    hovered_image_node: Option<usize>,
+    hovered_image_node: Option<blitz_dom::NodeId>,
     hovered_image: Option<Arc<RenderImage>>,
     hovered_link: Option<String>,
 }

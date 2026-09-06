@@ -6,17 +6,17 @@ use super::motion::{HoverMotionExt as _, HoverMotionMap, Lerp as _, WheelScrollM
 use super::util;
 use crate::model::{AccountId, MessageHeader, Tag};
 use crate::runtime::Cmd;
-use gpui::{
-    div, point, prelude::*, px, Context, Hsla, Pixels, Point, ScrollHandle, ScrollWheelEvent,
-    Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::Input,
     menu::{DropdownMenu, PopupMenuItem},
     scroll::Scrollbar,
-    v_flex, ActiveTheme, IconName, Sizable, StyledExt,
+    v_flex, v_virtual_list, ActiveTheme, IconName, Sizable, StyledExt, VirtualListScrollHandle,
+};
+use gpui_kit::{
+    div, point, prelude::*, px, AvailableSpace, Context, Hsla, Pixels, Point, ScrollHandle,
+    ScrollWheelEvent, Window,
 };
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -90,19 +90,28 @@ struct MergedColumn {
     key: String,
     title: String,
     targets: Vec<MergedTagTarget>,
-    cards: Vec<MergedCard>,
+    cards: Rc<Vec<MergedCard>>,
     loaded: bool,
 }
 
+struct KanbanColumnMetrics {
+    ui_scale: u32,
+    card_count: usize,
+    loaded: bool,
+    sizes: Rc<Vec<gpui_kit::Size<Pixels>>>,
+}
+
 struct KanbanColumnScroll {
-    handle: ScrollHandle,
+    handle: VirtualListScrollHandle,
+    metrics: Option<KanbanColumnMetrics>,
     motion: WheelScrollMotion,
 }
 
 impl Default for KanbanColumnScroll {
     fn default() -> Self {
         Self {
-            handle: ScrollHandle::new(),
+            handle: VirtualListScrollHandle::new(),
+            metrics: None,
             motion: WheelScrollMotion::default(),
         }
     }
@@ -126,7 +135,7 @@ fn scroll_board_by_shift_wheel(
         return true;
     }
     let offset = board.offset();
-    let x = (offset.x + amount).clamp(-board.max_offset().width, px(0.));
+    let x = (offset.x + amount).clamp(-board.max_offset().x, px(0.));
     board.set_offset(point(x, offset.y));
     true
 }
@@ -444,7 +453,7 @@ impl BoardState {
                         key: key.clone(),
                         title,
                         targets: Vec::new(),
-                        cards: Vec::new(),
+                        cards: Rc::new(Vec::new()),
                         loaded: true,
                     });
                     seen_targets.push(HashSet::new());
@@ -463,7 +472,7 @@ impl BoardState {
                     if !seen_cards[index].insert((message.account_id.clone(), message.id.clone())) {
                         continue;
                     }
-                    merged[index].cards.push(MergedCard {
+                    Rc::make_mut(&mut merged[index].cards).push(MergedCard {
                         source_tag_id: column.tag_id.clone(),
                         message: message.clone(),
                     });
@@ -471,8 +480,7 @@ impl BoardState {
             }
         }
         for column in &mut merged {
-            column
-                .cards
+            Rc::make_mut(&mut column.cards)
                 .sort_by_key(|card| std::cmp::Reverse(card.message.received));
         }
         let merged = Rc::new(merged);
@@ -571,7 +579,7 @@ impl AviaryApp {
                                     .child(tr!("kanban-message-preview")),
                             )
                             .child(
-                                Button::new(gpui::ElementId::Name(
+                                Button::new(gpui_kit::ElementId::Name(
                                     format!("kanban-close-preview-{message_id}").into(),
                                 ))
                                 .ghost()
@@ -620,7 +628,7 @@ impl AviaryApp {
             .on_children_prepainted({
                 let horizontal_scroll = horizontal_scroll.clone();
                 move |_, _, cx| {
-                    let horizontal_overflow = horizontal_scroll.max_offset().width > px(0.);
+                    let horizontal_overflow = horizontal_scroll.max_offset().x > px(0.);
                     app.update(cx, |this, cx| {
                         if this.kanban.horizontal_overflow != horizontal_overflow {
                             this.kanban.horizontal_overflow = horizontal_overflow;
@@ -719,7 +727,7 @@ impl AviaryApp {
             let color = util::name_color(&column.title);
             columns = columns.child(
                 h_flex()
-                    .id(gpui::ElementId::Name(
+                    .id(gpui_kit::ElementId::Name(
                         format!("kanban-sidebar-column-{index}").into(),
                     ))
                     .gap_2()
@@ -1007,35 +1015,65 @@ impl AviaryApp {
         let targets = column.targets.clone();
         let scroll_handle = {
             let scroll = self.kanban.column_scrolls.entry(key.clone()).or_default();
-            scroll.motion.advance(&scroll.handle, window);
+            scroll.motion.advance(scroll.handle.base_handle(), window);
             scroll.handle.clone()
         };
         let horizontal_scroll = self.kanban.horizontal_scroll.clone();
 
-        let mut cards = v_flex().gap_2().p_2().min_h(px(60.));
-        for card in &column.cards {
-            cards = cards.child(self.render_kanban_card(&card.message, &card.source_tag_id, cx));
-        }
-        if !column.loaded {
-            cards = cards.child(
-                div()
-                    .p_2()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(tr!("loading")),
+        let ui_scale = self.settings.global.ui_scale.to_bits();
+        let cached_sizes = self
+            .kanban
+            .column_scrolls
+            .get(&key)
+            .and_then(|scroll| scroll.metrics.as_ref())
+            .filter(|metrics| {
+                metrics.ui_scale == ui_scale
+                    && metrics.card_count == column.cards.len()
+                    && metrics.loaded == column.loaded
+            })
+            .map(|metrics| metrics.sizes.clone());
+        let sizes = cached_sizes.unwrap_or_else(|| {
+            let available = gpui_kit::size(
+                AvailableSpace::Definite(px(300.)),
+                AvailableSpace::MinContent,
             );
-        } else if column.cards.is_empty() {
-            cards = cards.child(
-                div()
-                    .p_2()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(tr!("kanban-empty-column")),
-            );
-        }
+            let mut sizes = Vec::new();
+            if !column.cards.is_empty() {
+                let mut card = self.render_kanban_entry(column, 0, cx);
+                let height = card.layout_as_root(available, window, cx).height;
+                sizes.resize(column.cards.len(), gpui_kit::size(px(0.), height));
+            }
+            if !column.loaded || column.cards.is_empty() {
+                let mut footer = self.render_kanban_entry(column, column.cards.len(), cx);
+                let height = footer.layout_as_root(available, window, cx).height;
+                sizes.push(gpui_kit::size(px(0.), height));
+            }
+            let sizes = Rc::new(sizes);
+            self.kanban
+                .column_scrolls
+                .get_mut(&key)
+                .expect("column scroll exists")
+                .metrics = Some(KanbanColumnMetrics {
+                ui_scale,
+                card_count: column.cards.len(),
+                loaded: column.loaded,
+                sizes: sizes.clone(),
+            });
+            sizes
+        });
+        let virtual_list = v_virtual_list(cx.entity(), format!("kcol-scroll-{ix}"), sizes, {
+            let column = column.clone();
+            move |this, range: std::ops::Range<usize>, _window, cx| {
+                range
+                    .map(|index| this.render_kanban_entry(&column, index, cx))
+                    .collect::<Vec<_>>()
+            }
+        })
+        .track_scroll(&scroll_handle)
+        .pb_2();
 
         v_flex()
-            .id(gpui::ElementId::Name(format!("kcol-{ix}").into()))
+            .id(gpui_kit::ElementId::Name(format!("kcol-{ix}").into()))
             .w(px(300.))
             .h_full()
             .min_h_0()
@@ -1051,7 +1089,7 @@ impl AviaryApp {
                     .flex_1()
                     .min_h_0()
                     .on_scroll_wheel(cx.listener({
-                        let handle = scroll_handle.clone();
+                        let handle = scroll_handle.base_handle().clone();
                         let key = key.clone();
                         let horizontal_scroll = horizontal_scroll.clone();
                         move |this, event: &ScrollWheelEvent, window, cx| {
@@ -1079,15 +1117,7 @@ impl AviaryApp {
                             }
                         }
                     }))
-                    .child(
-                        div()
-                            .id(gpui::ElementId::Name(format!("kcol-scroll-{ix}").into()))
-                            .size_full()
-                            .overflow_x_hidden()
-                            .overflow_y_scroll()
-                            .track_scroll(&scroll_handle)
-                            .child(cards),
-                    ),
+                    .child(virtual_list),
             )
             .drag_over::<CardDrag>(|style, _, _, cx| style.bg(cx.theme().drop_target))
             .on_drop(cx.listener({
@@ -1148,16 +1178,20 @@ impl AviaryApp {
 
     fn open_create_merged_tag_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| {
-            gpui_component::input::InputState::new(window, cx)
+            gpui_kit::component::input::InputState::new(window, cx)
                 .placeholder(tr!("tags-new-name-placeholder"))
         });
         let entity = cx.entity();
-        gpui_component::WindowExt::open_dialog(window, cx, move |dialog, _window, _cx| {
+        gpui_kit::component::WindowExt::open_dialog(window, cx, move |dialog, _window, _cx| {
             let entity = entity.clone();
             let input = input.clone();
             dialog
                 .title(tr!("tags-create-title"))
-                .confirm()
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
                 .child(
                     v_flex()
                         .gap_2()
@@ -1191,16 +1225,21 @@ impl AviaryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let input =
-            cx.new(|cx| gpui_component::input::InputState::new(window, cx).default_value(current));
+        let input = cx.new(|cx| {
+            gpui_kit::component::input::InputState::new(window, cx).default_value(current)
+        });
         let entity = cx.entity();
-        gpui_component::WindowExt::open_dialog(window, cx, move |dialog, _window, _cx| {
+        gpui_kit::component::WindowExt::open_dialog(window, cx, move |dialog, _window, _cx| {
             let entity = entity.clone();
             let input = input.clone();
             let targets = targets.clone();
             dialog
                 .title(tr!("tags-rename-title"))
-                .confirm()
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
                 .child(Input::new(&input))
                 .on_ok(move |_, _window, cx| {
                     let new_name = input.read(cx).value().trim().to_string();
@@ -1220,6 +1259,31 @@ impl AviaryApp {
                     true
                 })
         });
+    }
+
+    fn render_kanban_entry(
+        &self,
+        column: &MergedColumn,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let content = if let Some(card) = column.cards.get(index) {
+            self.render_kanban_card(&card.message, &card.source_tag_id, cx)
+                .into_any_element()
+        } else {
+            div()
+                .p_2()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(if column.loaded {
+                    tr!("kanban-empty-column")
+                } else {
+                    tr!("loading")
+                })
+                .into_any_element()
+        };
+        // Spacing belongs to the measured entry, not external margins.
+        div().px_2().pt_2().child(content).into_any_element()
     }
 
     fn render_kanban_card(
@@ -1249,7 +1313,7 @@ impl AviaryApp {
         let background = theme.background.lerp(theme.list_hover, hover);
         let border_color = theme.border.lerp(account_color.opacity(0.65), hover);
         div()
-            .id(gpui::ElementId::Name(
+            .id(gpui_kit::ElementId::Name(
                 format!("card-{}-{}-{}", m.account_id.0, tag_id, m.id).into(),
             ))
             .relative()
@@ -1315,7 +1379,7 @@ impl AviaryApp {
                 })
             })
             .with_hover_motion(cx, motion_key, |this| &mut this.kanban.card_hover)
-            .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| {
+            .on_click(cx.listener(move |this, ev: &gpui_kit::ClickEvent, _, cx| {
                 if ev.click_count() >= 2 {
                     this.request_message_tab(aid.clone(), mid.clone(), cx);
                 } else {
@@ -1363,7 +1427,7 @@ impl AviaryApp {
                     .child(column.cards.len().to_string()),
             )
             .child(
-                Button::new(gpui::ElementId::Name(format!("kcol-menu-{ix}").into()))
+                Button::new(gpui_kit::ElementId::Name(format!("kcol-menu-{ix}").into()))
                     .ghost()
                     .xsmall()
                     .icon(IconName::Ellipsis)
@@ -1452,7 +1516,7 @@ struct CardDragPreview {
 impl Render for CardDragPreview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let size = gpui::size(px(284.), px(64.));
+        let size = gpui_kit::size(px(284.), px(64.));
         div()
             // As with calendar events, gpui positions the root at
             // `mouse - click offset`. Recenter the preview so it does not

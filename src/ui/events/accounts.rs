@@ -4,7 +4,7 @@ use super::super::app::AviaryApp;
 use super::super::state::{AuthState, MainView};
 use crate::model::{Account, AccountId, Provider};
 use crate::runtime::Cmd;
-use gpui::{Context, Window};
+use gpui_kit::{Context, Window};
 
 impl AviaryApp {
     pub(super) fn on_device_code(
@@ -77,10 +77,11 @@ impl AviaryApp {
                 |selected| selected == &account_id,
             );
             if account_is_visible {
-                if self.mailbox.search.query.is_empty() {
+                if self.mailbox.search.results.is_none() {
                     self.request_mailbox_refresh();
                 } else {
                     self.send(Cmd::Search {
+                        request_id: self.mailbox.search.request_id,
                         account_id: account_id.clone(),
                         query: self.mailbox.search.query.clone(),
                         scope: self.mail_search_scope(),

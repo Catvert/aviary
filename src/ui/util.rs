@@ -2,7 +2,7 @@
 
 use crate::model::{AccountId, MessageHeader};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, Utc};
-use gpui::Hsla;
+use gpui_kit::Hsla;
 
 pub fn escape_html_text(text: &str) -> String {
     text.replace('&', "&amp;")
@@ -62,7 +62,7 @@ pub fn display_name(from: &str) -> String {
 /// derived from the ID hash.
 pub fn account_color(account_id: &AccountId, override_rgb: Option<u32>) -> Hsla {
     if let Some(rgb) = override_rgb {
-        return gpui::Rgba {
+        return gpui_kit::Rgba {
             r: ((rgb >> 16) & 0xff) as f32 / 255.0,
             g: ((rgb >> 8) & 0xff) as f32 / 255.0,
             b: (rgb & 0xff) as f32 / 255.0,
@@ -74,7 +74,7 @@ pub fn account_color(account_id: &AccountId, override_rgb: Option<u32>) -> Hsla 
     for b in account_id.0.as_bytes() {
         hash = hash.wrapping_mul(31).wrapping_add(*b as u32);
     }
-    gpui::hsla((hash % 360) as f32 / 360.0, 0.55, 0.55, 1.0)
+    gpui_kit::hsla((hash % 360) as f32 / 360.0, 0.55, 0.55, 1.0)
 }
 
 /// Color derived from a tag name when the provider does not supply one.
@@ -83,12 +83,12 @@ pub fn name_color(name: &str) -> Hsla {
     for b in name.as_bytes() {
         hash = hash.wrapping_mul(31).wrapping_add(*b as u32);
     }
-    gpui::hsla((hash % 360) as f32 / 360.0, 0.45, 0.45, 1.0)
+    gpui_kit::hsla((hash % 360) as f32 / 360.0, 0.45, 0.45, 1.0)
 }
 
 /// Color of a tag packed as `0xRRGGBB`.
 pub fn packed_color(rgb: u32) -> Hsla {
-    gpui::Rgba {
+    gpui_kit::Rgba {
         r: ((rgb >> 16) & 0xff) as f32 / 255.0,
         g: ((rgb >> 8) & 0xff) as f32 / 255.0,
         b: (rgb & 0xff) as f32 / 255.0,

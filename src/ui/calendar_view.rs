@@ -9,17 +9,17 @@ use super::util;
 use crate::model::{AccountId, CalendarEvent, Provider};
 use crate::runtime::Cmd;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc};
-use gpui::{
-    div, point, prelude::*, px, Context, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
-    Point, ScrollWheelEvent, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
     menu::{ContextMenuExt, PopupMenuItem},
     v_flex, v_virtual_list, ActiveTheme, Disableable, IconName, Selectable, Sizable, StyledExt,
     WindowExt,
+};
+use gpui_kit::{
+    div, point, prelude::*, px, Context, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
+    Point, ScrollWheelEvent, Window,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -698,7 +698,7 @@ impl AviaryApp {
             .border_color(theme.border)
             .child(div().text_lg().font_semibold().child(title))
             .when(self.calendar.loading, |el| {
-                el.child(gpui_component::spinner::Spinner::new().small())
+                el.child(gpui_kit::component::spinner::Spinner::new().small())
             })
             .child(div().flex_1())
             .when(!upcoming, |toolbar| {
@@ -741,7 +741,7 @@ impl AviaryApp {
             })
             .when(self.calendar.layout == CalendarLayout::List, |toolbar| {
                 toolbar
-                    .child(gpui_component::divider::Divider::vertical())
+                    .child(gpui_kit::component::separator::Separator::vertical())
                     .child(self.range_button(
                         "cal-upcoming",
                         tr!("calendar-upcoming-view").to_string(),
@@ -767,7 +767,7 @@ impl AviaryApp {
                         cx,
                     ))
             })
-            .child(gpui_component::divider::Divider::vertical())
+            .child(gpui_kit::component::separator::Separator::vertical())
             .child(
                 Button::new("cal-layout-list")
                     .ghost()
@@ -793,7 +793,7 @@ impl AviaryApp {
                     })),
             );
 
-        let body: gpui::AnyElement = if infinite_grid {
+        let body: gpui_kit::AnyElement = if infinite_grid {
             self.render_infinite_grid(window, cx).into_any_element()
         } else if grid {
             self.render_paged_grid(cx).into_any_element()
@@ -854,7 +854,7 @@ impl AviaryApp {
             );
             account_list = account_list.child(
                 h_flex()
-                    .id(gpui::ElementId::Name(
+                    .id(gpui_kit::ElementId::Name(
                         format!("calendar-account-{}", account.id.0).into(),
                     ))
                     .w_full()
@@ -865,7 +865,7 @@ impl AviaryApp {
                     .rounded(theme.radius)
                     .hover(|style| style.bg(theme.list_hover))
                     .child(
-                        Checkbox::new(gpui::ElementId::Name(
+                        Checkbox::new(gpui_kit::ElementId::Name(
                             format!("calendar-account-visible-{}", checkbox_id.0).into(),
                         ))
                         .xsmall()
@@ -906,7 +906,7 @@ impl AviaryApp {
                 .unwrap_or_default();
             account_list = account_list.child(
                 h_flex()
-                    .id(gpui::ElementId::Name(
+                    .id(gpui_kit::ElementId::Name(
                         format!("calendar-account-{}", account_id.0).into(),
                     ))
                     .w_full()
@@ -917,7 +917,7 @@ impl AviaryApp {
                     .rounded(theme.radius)
                     .hover(|style| style.bg(theme.list_hover))
                     .child(
-                        Checkbox::new(gpui::ElementId::Name(
+                        Checkbox::new(gpui_kit::ElementId::Name(
                             format!("calendar-account-visible-{}", checkbox_id.0).into(),
                         ))
                         .xsmall()
@@ -1049,7 +1049,7 @@ impl AviaryApp {
                 let in_month = day.month() == first.month();
                 row = row.child(
                     div()
-                        .id(gpui::ElementId::Name(
+                        .id(gpui_kit::ElementId::Name(
                             format!("mini-calendar-day-{day}").into(),
                         ))
                         .flex_1()
@@ -1410,7 +1410,7 @@ impl AviaryApp {
         let read_only = e.read_only;
         let entity = cx.entity();
         let row = h_flex()
-            .id(gpui::ElementId::Name(
+            .id(gpui_kit::ElementId::Name(
                 format!("evt-{occurrence_day}-{}", e.id).into(),
             ))
             .gap_2()
@@ -1448,7 +1448,7 @@ impl AviaryApp {
             })
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.calendar.selected = Some(eid.clone());
-                this.focus_shortcuts(window);
+                this.focus_shortcuts(window, cx);
                 cx.notify();
             }));
         row.context_menu(move |menu, _window, _cx| {
@@ -1491,7 +1491,7 @@ impl AviaryApp {
 
     /// Day-name header row shared by both grid variants (weeks start on
     /// Monday).
-    fn grid_weekday_header(&self, theme: &gpui_component::theme::Theme) -> impl IntoElement {
+    fn grid_weekday_header(&self, theme: &gpui_kit::component::theme::Theme) -> impl IntoElement {
         let start = start_of_week(Local::now().date_naive());
         let mut head = h_flex()
             .gap_0()
@@ -1593,8 +1593,8 @@ impl AviaryApp {
         let today = Local::now().date_naive();
         let head = self.grid_weekday_header(&theme);
 
-        let sizes: Rc<Vec<gpui::Size<Pixels>>> =
-            Rc::new(vec![gpui::size(px(0.), px(row_h)); GRID_WEEKS]);
+        let sizes: Rc<Vec<gpui_kit::Size<Pixels>>> =
+            Rc::new(vec![gpui_kit::size(px(0.), px(row_h)); GRID_WEEKS]);
         let base_handle = self.scrolls.calendar.handle.base_handle().clone();
         self.scrolls.calendar.motion.advance(&base_handle, window);
         let app = cx.entity();
@@ -1842,7 +1842,11 @@ impl AviaryApp {
             let event_id = event.id.clone();
             dialog
                 .title(tr!("calendar-delete-event-title"))
-                .confirm()
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
+                )
+                .overlay_closable(false)
+                .close_button(false)
                 .child(div().child(tr!("calendar-delete-event-confirm", {
                     name: event.subject.clone()
                 })))
@@ -1862,7 +1866,7 @@ impl AviaryApp {
         });
     }
 
-    fn render_event_detail(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn render_event_detail(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let id = self.calendar.selected.as_ref()?;
         let e = self.calendar.events.iter().find(|e| &e.id == id)?.clone();
         let theme = cx.theme().clone();
@@ -2077,7 +2081,7 @@ impl AviaryApp {
         week_start: NaiveDate,
         today: NaiveDate,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let theme = cx.theme().clone();
         let mut cells = div()
             .absolute()
@@ -2103,7 +2107,9 @@ impl AviaryApp {
                 day.day().to_string()
             };
             let cell = v_flex()
-                .id(gpui::ElementId::Name(format!("calendar-day-{day}").into()))
+                .id(gpui_kit::ElementId::Name(
+                    format!("calendar-day-{day}").into(),
+                ))
                 .col_start(dow as i16 + 1)
                 .col_end(dow as i16 + 2)
                 .h_full()
@@ -2201,11 +2207,11 @@ impl AviaryApp {
         data: &WeekRenderData,
         chip_lanes: u16,
         cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
+    ) -> Vec<gpui_kit::AnyElement> {
         let theme = cx.theme().clone();
         let events = &data.events;
         let layouts = &data.layouts;
-        let mut chips: Vec<gpui::AnyElement> = Vec::new();
+        let mut chips: Vec<gpui_kit::AnyElement> = Vec::new();
         for layout in layouts.iter().filter(|layout| layout.lane < chip_lanes) {
             let e = &events[layout.event_index];
             let segment_day = week_start + Duration::days(i64::from(layout.start_col));
@@ -2252,7 +2258,7 @@ impl AviaryApp {
                 )
             };
             let chip = div()
-                .id(gpui::ElementId::Name(
+                .id(gpui_kit::ElementId::Name(
                     format!("week-{week_start}-{}", e.id).into(),
                 ))
                 // Do not let clicks on an event reach the date cell
@@ -2290,7 +2296,7 @@ impl AviaryApp {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     this.calendar.selected = Some(eid.clone());
-                    this.focus_shortcuts(window);
+                    this.focus_shortcuts(window, cx);
                     cx.notify();
                 }));
             let chip = chip.context_menu(move |menu, _window, _cx| {
@@ -2348,9 +2354,9 @@ struct EventDragPreview {
     cursor_offset: Point<Pixels>,
 }
 
-impl gpui::Render for EventDragPreview {
+impl gpui_kit::Render for EventDragPreview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let size = gpui::size(px(220.), px(24.));
+        let size = gpui_kit::size(px(220.), px(24.));
         div()
             // gpui places the root at `mouse - click offset`. Centering the
             // visual on that offset prevents a differently sized chip from

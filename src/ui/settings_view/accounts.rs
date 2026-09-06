@@ -4,8 +4,7 @@ use super::super::app::AviaryApp;
 use super::labelled;
 use crate::model::Provider;
 use crate::runtime::Cmd;
-use gpui::{div, prelude::*, px, Context};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonGroup, ButtonVariants},
     color_picker::ColorPicker,
     h_flex,
@@ -13,6 +12,7 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     v_flex, ActiveTheme, Disableable, IconName, Sizable, StyledExt,
 };
+use gpui_kit::{div, prelude::*, px, Context};
 
 impl AviaryApp {
     pub(super) fn refresh_account_customizations(&mut self, cx: &mut Context<Self>) {
@@ -141,7 +141,7 @@ impl AviaryApp {
             let display_name = editor.display_name.clone();
             let color = editor.color.clone();
             let reset_color = color.clone();
-            let default_button = Button::new(gpui::ElementId::Name(
+            let default_button = Button::new(gpui_kit::ElementId::Name(
                 format!("account-default-{}", aid.0).into(),
             ))
             .small()
@@ -227,13 +227,13 @@ impl AviaryApp {
                                     .flex_none()
                                     .gap_2()
                                     .child(
-                                        ButtonGroup::new(gpui::ElementId::Name(
+                                        ButtonGroup::new(gpui_kit::ElementId::Name(
                                             format!("account-order-{}", aid.0).into(),
                                         ))
                                         .outline()
                                         .compact()
                                         .child(
-                                            Button::new(gpui::ElementId::Name(
+                                            Button::new(gpui_kit::ElementId::Name(
                                                 format!("account-up-{}", aid.0).into(),
                                             ))
                                             .xsmall()
@@ -242,7 +242,7 @@ impl AviaryApp {
                                             .tooltip(tr!("settings-account-move-up")),
                                         )
                                         .child(
-                                            Button::new(gpui::ElementId::Name(
+                                            Button::new(gpui_kit::ElementId::Name(
                                                 format!("account-down-{}", aid.0).into(),
                                             ))
                                             .xsmall()
@@ -268,7 +268,7 @@ impl AviaryApp {
                                         ),
                                     )
                                     .child(
-                                        Button::new(gpui::ElementId::Name(
+                                        Button::new(gpui_kit::ElementId::Name(
                                             format!("logout-{}", aid.0).into(),
                                         ))
                                         .danger()
@@ -311,7 +311,7 @@ impl AviaryApp {
                                         .items_center()
                                         .child(ColorPicker::new(&color).small())
                                         .child(
-                                            Button::new(gpui::ElementId::Name(
+                                            Button::new(gpui_kit::ElementId::Name(
                                                 format!("account-color-reset-{}", aid.0).into(),
                                             ))
                                             .ghost()
@@ -368,7 +368,7 @@ impl AviaryApp {
                             .child(div().text_xs().text_color(theme.danger).child(error)),
                     )
                     .child(
-                        Button::new(gpui::ElementId::Name(
+                        Button::new(gpui_kit::ElementId::Name(
                             format!("logout-unavailable-{}", aid.0).into(),
                         ))
                         .danger()
@@ -412,7 +412,7 @@ impl AviaryApp {
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.list_hover))
                     .child(
-                        gpui_component::Icon::new(if advanced_expanded {
+                        gpui_kit::component::Icon::new(if advanced_expanded {
                             IconName::ChevronDown
                         } else {
                             IconName::ChevronRight

@@ -394,7 +394,7 @@ pub(super) fn paint_tiles(
     width_phys: u32,
     scale: RasterScale,
     background: Color,
-    selected_images: &[usize],
+    selected_images: &[blitz_dom::NodeId],
     cancellation: Option<&RenderCancellation>,
     range_logical: (f32, f32),
 ) -> Result<(Tiles, bool, u32), String> {
@@ -402,13 +402,13 @@ pub(super) fn paint_tiles(
         cancellation.check()?;
     }
     let root = doc.as_ref().root_element();
-    let layout_h_phys = f64::from(root.final_layout.size.height) * scale.render;
+    let layout_h_phys = f64::from(root.final_layout().size.height) * scale.render;
     // Newsletter styles commonly force `html, body { height: 100% !important; }`.
     // In that case the root layout remains one viewport tall even though its
     // descendants continue below it. Blitz records that real painted extent in
     // device pixels as the root's scrollable overflow, so use its bottom edge
     // when sizing our vertically tiled canvas.
-    let overflow_h_phys = root.scrollable_overflow.y1.max(0.0);
+    let overflow_h_phys = root.scrollable_overflow().y1.max(0.0);
     let full_phys_h = layout_h_phys.max(overflow_h_phys).ceil().max(32.0) as u64;
     let truncated = full_phys_h > u64::from(MAX_PHYS_HEIGHT);
     let render_h = full_phys_h.min(u64::from(MAX_PHYS_HEIGHT)) as u32;
@@ -458,7 +458,7 @@ pub(super) fn paint_tile_band(
     render_h: u32,
     tile_ix: u32,
     background: Color,
-    selected_images: &[usize],
+    selected_images: &[blitz_dom::NodeId],
 ) -> Result<(usize, Arc<RenderImage>, f32), String> {
     let start_row = tile_ix * TILE_ROWS;
     let rows = (render_h - start_row).min(TILE_ROWS);
@@ -496,7 +496,7 @@ pub(super) fn paint_tile_band(
 pub(super) fn paint_image_selection(
     scene: &mut impl anyrender::PaintScene,
     doc: &HtmlDocument,
-    selected_images: &[usize],
+    selected_images: &[blitz_dom::NodeId],
     scale: f64,
     tile_start_row: u32,
 ) {
@@ -506,7 +506,7 @@ pub(super) fn paint_image_selection(
             continue;
         };
         let position = node.absolute_position(0.0, 0.0);
-        let layout = node.final_layout;
+        let layout = node.final_layout();
         let x = f64::from(position.x) * scale;
         let y = f64::from(position.y) * scale - f64::from(tile_start_row);
         let width = f64::from(layout.size.width) * scale;

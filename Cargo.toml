@@ -1,6 +1,6 @@
 [package]
 name = "aviary"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 description = "Desktop email, calendar and kanban client for Microsoft 365, Gmail and IMAP/SMTP, built on gpui"
 repository = "https://github.com/Catvert/aviary"
@@ -18,16 +18,15 @@ rust-version = "1.97"
 publish = false
 
 [dependencies]
-# UI: gpui (Zed's framework) and gpui-component (inputs, dock, virtualized
-# lists, menus, notifications, Markdown/HTML rendering, and themes).
-# gpui-component 0.5 is aligned with gpui 0.2.2 (crates.io).
-gpui = "0.2.2"
-gpui-component = "0.5"
+# UI facade keeps GPUI and the styled component layer on matching versions.
+gpui-kit = "0.6"
 # Embedded assets (Lucide SVG icons and fonts) served to gpui via AssetSource.
 rust-embed = "8"
 # BoxFuture for implementing gpui's HttpClient trait (intercepts inline
 # aviary-cid/... images; see ui/inline_images.rs).
 futures = "0.3"
+# Share Blitz font discovery with the GPUI Kit linked fontconfig backend.
+fontique = { version = "0.11", default-features = false }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 html-to-markdown-rs = "3.3"
 # Used by `app::html_render` for the rich HTML viewer (alternative to the
@@ -48,26 +47,25 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # offscreen rendering. Floats preserve email table grids, complex scripts add
 # dictionary line breaking, and incremental layout keeps pointer interaction
 # from relaying out a whole newsletter. Versions aligned with the Blitz
-# 0.3.0-beta.1 workspace.
-blitz-dom = { version = "0.3.0-beta.1", default-features = false, features = [
+# 0.3.0-beta.2 workspace; incremental layout is now on by default at runtime.
+blitz-dom = { version = "0.3.0-beta.2", default-features = false, features = [
     "svg",
     "woff",
     "system-fonts",
     "floats",
     "complex-scripts",
-    "incremental",
 ] }
-blitz-html = "0.3.0-beta.1"
-blitz-paint = "0.3.0-beta.1"
-blitz-traits = "0.3.0-beta.1"
-anyrender = "0.11"
+blitz-html = "0.3.0-beta.2"
+blitz-paint = "0.3.0-beta.2"
+blitz-traits = "0.3.0-beta.2"
+anyrender = "0.13"
 # `multithreading`: parallel vello_cpu rasterization (rayon, already in the
 # dependency graph through Stylo), speeding up full renders of large emails.
-anyrender_vello_cpu = { version = "0.14", features = ["multithreading"] }
+anyrender_vello_cpu = { version = "0.17", features = ["multithreading"] }
 # anyrender_vello_cpu disables vello_cpu's default features and does not expose
 # its `png` switch. Re-enable it in the unified feature graph so Glifo can decode
 # the PNG strikes stored in Noto Color Emoji's CBDT table.
-vello_cpu = { version = "0.0.9", default-features = false, features = ["png"] }
+vello_cpu = { version = "0.1", default-features = false, features = ["png"] }
 peniko = "0.6"
 smallvec = "1"
 # Constructs Blitz UiEvents for faithful-mode selection and link interaction.
@@ -75,10 +73,6 @@ smallvec = "1"
 atomic_refcell = "0.1"
 keyboard-types = "0.7"
 cursor-icon = "1"
-# gpui enables `yeslogic-fontconfig-sys/dlopen` (through font-kit); fontique,
-# pulled in by blitz-dom through parley, must compile against the matching
-# dlopen API or its linked fontconfig imports fail (feature unification).
-fontique = { version = "0.10", default-features = false, features = ["fontconfig-dlopen"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "form", "query", "stream", "rustls"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net", "io-util", "fs", "process"] }
 serde = { version = "1", features = ["derive"] }
@@ -201,7 +195,13 @@ opt-level = 3
 opt-level = 3
 
 # gpui and image decoding are shared by every view, including Blitz tiles.
-[profile.dev.package.gpui]
+[profile.dev.package.gpui-pre]
+opt-level = 3
+
+[profile.dev.package.gpui-base]
+opt-level = 3
+
+[profile.dev.package.gpui-pre-wgpu]
 opt-level = 3
 
 [profile.dev.package.gpui-component]
@@ -211,9 +211,9 @@ opt-level = 3
 opt-level = 3
 
 # These are minimal, buildable crate sources rather than Git clones. The exact
-# upstream versions and six modified source files are listed in patches/README.md.
+# upstream versions and modified source files are listed in patches/README.md.
 [patch.crates-io]
+cosmic-text = { path = "patches/cosmic-text" }
 blitz-dom = { path = "patches/blitz-dom" }
 blitz-paint = { path = "patches/blitz-paint" }
-cosmic-text = { path = "patches/cosmic-text" }
 stylo_derive = { path = "patches/stylo_derive" }

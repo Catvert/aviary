@@ -4,17 +4,24 @@ use super::app::AviaryApp;
 use super::state::{MainView, SenderHistoryState};
 use crate::model::Contact;
 use crate::runtime::Cmd;
-use gpui::{
-    div, prelude::*, px, AvailableSpace, Context, ScrollStrategy, ScrollWheelEvent, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::Input,
     v_flex, v_virtual_list, ActiveTheme, IconName, Sizable, StyledExt,
 };
+use gpui_kit::{
+    div, prelude::*, px, AvailableSpace, Context, ScrollStrategy, ScrollWheelEvent, Window,
+};
 use std::ops::Range;
 use std::rc::Rc;
+
+pub(crate) struct ContactListCache {
+    query: String,
+    ui_scale: u32,
+    contacts: Rc<Vec<Contact>>,
+    sizes: Rc<Vec<gpui_kit::Size<gpui_kit::Pixels>>>,
+}
 
 impl AviaryApp {
     pub fn render_contacts(
@@ -37,24 +44,41 @@ impl AviaryApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let contacts = Rc::new(self.visible_contacts());
-
-        // Virtual list: rows are uniform, so measure the first one offscreen
-        // to determine item height.
-        let row_h = contacts.first().map(|c| {
-            let mut el = self.contact_row(c, cx);
-            el.layout_as_root(
-                gpui::size(AvailableSpace::MinContent, AvailableSpace::MinContent),
-                window,
-                cx,
-            )
-            .height
-        });
-        let sizes: Rc<Vec<gpui::Size<gpui::Pixels>>> =
-            Rc::new(vec![
-                gpui::size(px(0.), row_h.unwrap_or_default());
-                contacts.len()
-            ]);
+        let ui_scale = self.settings.global.ui_scale.to_bits();
+        if !self
+            .contacts
+            .render_cache
+            .as_ref()
+            .is_some_and(|cache| cache.query == self.contacts.query && cache.ui_scale == ui_scale)
+        {
+            let contacts = Rc::new(self.visible_contacts());
+            let row_h = contacts
+                .first()
+                .map(|c| {
+                    let mut el = self.contact_row(c, cx);
+                    el.layout_as_root(
+                        gpui_kit::size(AvailableSpace::MinContent, AvailableSpace::MinContent),
+                        window,
+                        cx,
+                    )
+                    .height
+                })
+                .unwrap_or_default();
+            let sizes = Rc::new(vec![gpui_kit::size(px(0.), row_h); contacts.len()]);
+            self.contacts.render_cache = Some(ContactListCache {
+                query: self.contacts.query.clone(),
+                ui_scale,
+                contacts,
+                sizes,
+            });
+        }
+        let cache = self
+            .contacts
+            .render_cache
+            .as_ref()
+            .expect("contacts cache built");
+        let contacts = cache.contacts.clone();
+        let sizes = cache.sizes.clone();
 
         let empty = contacts.is_empty();
         let has_unfiltered_contacts = !self.contacts.list.is_empty();
@@ -149,7 +173,7 @@ impl AviaryApp {
                                 .min_w_0()
                                 .w_full()
                                 .cleanable(true)
-                                .prefix(gpui_component::Icon::new(IconName::Search).small()),
+                                .prefix(gpui_kit::component::Icon::new(IconName::Search).small()),
                         ),
                 ),
             )
@@ -168,7 +192,7 @@ impl AviaryApp {
 
     /// Contact virtual-list row with constant height (used
     /// and for offscreen measurement).
-    fn contact_row(&self, c: &Contact, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn contact_row(&self, c: &Contact, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let theme = cx.theme().clone();
         let selected = self.contacts.selected.as_deref() == Some(c.email.as_str());
         let email = c.email.clone();
@@ -176,7 +200,9 @@ impl AviaryApp {
             .px_2()
             .child(
                 h_flex()
-                    .id(gpui::ElementId::Name(format!("contact-{}", c.email).into()))
+                    .id(gpui_kit::ElementId::Name(
+                        format!("contact-{}", c.email).into(),
+                    ))
                     .gap_2()
                     .items_center()
                     .px_2()
@@ -223,7 +249,7 @@ impl AviaryApp {
                             ),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.focus_shortcuts(window);
+                        this.focus_shortcuts(window, cx);
                         this.select_contact(email.clone(), cx);
                     })),
             )
@@ -277,6 +303,7 @@ impl AviaryApp {
             label.to_ascii_lowercase()
         });
         self.contacts.list = contacts;
+        self.contacts.render_cache = None;
     }
 
     fn select_contact(&mut self, email: String, cx: &mut Context<Self>) {
@@ -366,7 +393,7 @@ impl AviaryApp {
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| email.clone());
 
-        let history: gpui::AnyElement = match &self.sender_history {
+        let history: gpui_kit::AnyElement = match &self.sender_history {
             SenderHistoryState::Loaded { messages, .. } if !messages.is_empty() => {
                 let mut rows = v_flex().gap_0p5().p_2();
                 for m in messages.clone() {

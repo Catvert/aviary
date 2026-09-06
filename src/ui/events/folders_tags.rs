@@ -5,8 +5,8 @@ use super::super::state::{SenderHistoryState, ThreadBodyState};
 use super::super::util;
 use crate::model::{AccountId, MailFolder, Message, MessageHeader, Tag};
 use crate::runtime::{Cmd, MessageMutationKind};
-use gpui::{Context, Window};
-use gpui_component::notification::Notification;
+use gpui_kit::component::notification::Notification;
+use gpui_kit::{Context, Window};
 
 impl AviaryApp {
     pub(super) fn on_folders(&mut self, account_id: AccountId, folders: Vec<MailFolder>) {

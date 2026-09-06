@@ -6,18 +6,67 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 use core::ops::{Deref, DerefMut};
+use fontdb::{FaceInfo, Query, Style};
+use skrifa::raw::{ReadError, TableProvider as _};
+use skrifa::MetadataProvider;
 
-// re-export fontdb and rustybuzz
+// re-export fontdb and harfrust
 pub use fontdb;
-pub use rustybuzz;
+pub use harfrust;
 
 use super::fallback::{Fallback, Fallbacks, MonospaceFallbackInfo, PlatformFallback};
 
+// The fields are used in the derived Ord implementation for sorting fallback candidates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FontMatchKey {
+    pub(crate) not_emoji: bool,
     pub(crate) font_weight_diff: u16,
+    pub(crate) font_stretch_diff: u16,
+    pub(crate) font_style_diff: u8,
     pub(crate) font_weight: u16,
+    pub(crate) font_stretch: u16,
     pub(crate) id: fontdb::ID,
+    pub(crate) variable_weight_match: bool,
+}
+
+impl FontMatchKey {
+    fn new(attrs: &Attrs, face: &FaceInfo, db: &fontdb::Database) -> FontMatchKey {
+        // TODO: smarter way of detecting emoji
+        let not_emoji = !face.post_script_name.contains("Emoji");
+        let font_weight_diff = attrs.weight.0.abs_diff(face.weight.0);
+
+        let variable_weight_match = font_weight_diff != 0
+            && db.with_face_data(face.id, |font_data, face_index| {
+                let font_ref = skrifa::FontRef::from_index(font_data, face_index).ok()?;
+                let axis = font_ref.axes().get_by_tag(skrifa::Tag::new(b"wght"))?;
+                let w = attrs.weight.0 as f32;
+                Some(w >= axis.min_value() && w <= axis.max_value())
+            }) == Some(Some(true));
+        let font_weight = face.weight.0;
+        let font_stretch_diff = attrs.stretch.to_number().abs_diff(face.stretch.to_number());
+        let font_stretch = face.stretch.to_number();
+        let font_style_diff = match (attrs.style, face.style) {
+            (Style::Normal, Style::Normal)
+            | (Style::Italic, Style::Italic)
+            | (Style::Oblique, Style::Oblique) => 0,
+            (Style::Italic, Style::Oblique) | (Style::Oblique, Style::Italic) => 1,
+            (Style::Normal, Style::Italic)
+            | (Style::Normal, Style::Oblique)
+            | (Style::Italic, Style::Normal)
+            | (Style::Oblique, Style::Normal) => 2,
+        };
+        let id = face.id;
+        FontMatchKey {
+            not_emoji,
+            font_weight_diff,
+            font_stretch_diff,
+            font_style_diff,
+            font_weight,
+            font_stretch,
+            id,
+            variable_weight_match,
+        }
+    }
 }
 
 struct FontCachedCodepointSupportInfo {
@@ -88,7 +137,7 @@ pub struct FontSystem {
     db: fontdb::Database,
 
     /// Cache for loaded fonts from the database.
-    font_cache: HashMap<fontdb::ID, Option<Arc<Font>>>,
+    font_cache: HashMap<(fontdb::ID, fontdb::Weight), Option<Arc<Font>>>,
 
     /// Sorted unique ID's of all Monospace fonts in DB
     monospace_font_ids: Vec<fontdb::ID>,
@@ -126,7 +175,7 @@ impl fmt::Debug for FontSystem {
         f.debug_struct("FontSystem")
             .field("locale", &self.locale)
             .field("db", &self.db)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -146,7 +195,7 @@ impl FontSystem {
     /// Create a new [`FontSystem`] with a pre-specified set of fonts.
     pub fn new_with_fonts(fonts: impl IntoIterator<Item = fontdb::Source>) -> Self {
         let locale = Self::get_locale();
-        log::debug!("Locale: {}", locale);
+        log::debug!("Locale: {locale}");
 
         let mut db = fontdb::Database::new();
 
@@ -179,23 +228,24 @@ impl FontSystem {
             HashMap::default();
 
         if cfg!(feature = "monospace_fallback") {
-            monospace_font_ids.iter().for_each(|&id| {
+            for &id in &monospace_font_ids {
                 db.with_face_data(id, |font_data, face_index| {
-                    let _ = ttf_parser::Face::parse(font_data, face_index).map(|face| {
-                        face.tables()
-                            .gpos
-                            .into_iter()
-                            .chain(face.tables().gsub)
-                            .flat_map(|table| table.scripts)
-                            .inspect(|script| {
-                                per_script_monospace_font_ids
-                                    .entry(script.tag.to_bytes())
-                                    .or_default()
-                                    .insert(id);
-                            })
-                    });
+                    let face = skrifa::FontRef::from_index(font_data, face_index)?;
+                    for script in face
+                        .gpos()?
+                        .script_list()?
+                        .script_records()
+                        .iter()
+                        .chain(face.gsub()?.script_list()?.script_records().iter())
+                    {
+                        per_script_monospace_font_ids
+                            .entry(script.script_tag().into_bytes())
+                            .or_default()
+                            .insert(id);
+                    }
+                    Ok::<_, ReadError>(())
                 });
-            });
+            }
         }
 
         let per_script_monospace_font_ids = per_script_monospace_font_ids
@@ -210,9 +260,9 @@ impl FontSystem {
             db,
             monospace_font_ids,
             per_script_monospace_font_ids,
-            font_cache: Default::default(),
-            font_matches_cache: Default::default(),
-            font_codepoint_support_info_cache: Default::default(),
+            font_cache: HashMap::default(),
+            font_matches_cache: HashMap::default(),
+            font_codepoint_support_info_cache: HashMap::default(),
             monospace_fallbacks_buffer: BTreeSet::default(),
             #[cfg(feature = "shape-run-cache")]
             shape_run_cache: crate::ShapeRunCache::default(),
@@ -233,7 +283,7 @@ impl FontSystem {
     }
 
     /// Get the database.
-    pub fn db(&self) -> &fontdb::Database {
+    pub const fn db(&self) -> &fontdb::Database {
         &self.db
     }
 
@@ -248,24 +298,23 @@ impl FontSystem {
         (self.locale, self.db)
     }
 
-    /// Get a font by its ID.
-    pub fn get_font(&mut self, id: fontdb::ID) -> Option<Arc<Font>> {
+    /// Get a font by its ID and weight.
+    pub fn get_font(&mut self, id: fontdb::ID, weight: fontdb::Weight) -> Option<Arc<Font>> {
         self.font_cache
-            .entry(id)
+            .entry((id, weight))
             .or_insert_with(|| {
                 #[cfg(feature = "std")]
                 unsafe {
                     self.db.make_shared_face_data(id);
                 }
-                match Font::new(&self.db, id) {
-                    Some(font) => Some(Arc::new(font)),
-                    None => {
-                        log::warn!(
-                            "failed to load font '{}'",
-                            self.db.face(id)?.post_script_name
-                        );
-                        None
-                    }
+                if let Some(font) = Font::new(&self.db, id, weight) {
+                    Some(Arc::new(font))
+                } else {
+                    log::warn!(
+                        "failed to load font '{}'",
+                        self.db.face(id)?.post_script_name
+                    );
+                    None
                 }
             })
             .clone()
@@ -292,9 +341,10 @@ impl FontSystem {
     pub fn get_font_supported_codepoints_in_word(
         &mut self,
         id: fontdb::ID,
+        weight: fontdb::Weight,
         word: &str,
     ) -> Option<usize> {
-        self.get_font(id).map(|font| {
+        self.get_font(id, weight).map(|font| {
             let code_points = font.unicode_codepoints();
             let cache = self
                 .font_codepoint_support_info_cache
@@ -323,21 +373,43 @@ impl FontSystem {
                 let mut font_match_keys = self
                     .db
                     .faces()
-                    .filter(|face| attrs.matches(face))
-                    .map(|face| FontMatchKey {
-                        font_weight_diff: attrs.weight.0.abs_diff(face.weight.0),
-                        font_weight: face.weight.0,
-                        id: face.id,
-                    })
+                    .map(|face| FontMatchKey::new(attrs, face, &self.db))
                     .collect::<Vec<_>>();
 
                 // Sort so we get the keys with weight_offset=0 first
                 font_match_keys.sort();
 
+                // db.query is better than above, but returns just one font
+                let query = Query {
+                    families: &[attrs.family],
+                    weight: attrs.weight,
+                    stretch: attrs.stretch,
+                    style: attrs.style,
+                };
+
+                if let Some(id) = self.db.query(&query) {
+                    if let Some(i) = font_match_keys
+                        .iter()
+                        .enumerate()
+                        .find(|(_i, key)| key.id == id)
+                        .map(|(i, _)| i)
+                    {
+                        // if exists move to front
+                        let match_key = font_match_keys.remove(i);
+                        font_match_keys.insert(0, match_key);
+                    } else if let Some(face) = self.db.face(id) {
+                        // else insert in front
+                        let match_key = FontMatchKey::new(attrs, face, &self.db);
+                        font_match_keys.insert(0, match_key);
+                    } else {
+                        log::error!("Could not get face from db, that should've been there.");
+                    }
+                }
+
                 #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
                 {
                     let elapsed = now.elapsed();
-                    log::debug!("font matches for {:?} in {:?}", attrs, elapsed);
+                    log::debug!("font matches for {attrs:?} in {elapsed:?}");
                 }
 
                 Arc::new(font_match_keys)

@@ -17,12 +17,12 @@ use crate::ui::app::{
     OptimisticSelection, PendingAction, PendingActionNotification, PendingCancelEffect,
 };
 use crate::ui::state::SenderHistoryState;
-use gpui::{Context, SharedString, Window};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     notification::Notification,
     WindowExt,
 };
+use gpui_kit::{Context, SharedString, Window};
 use std::time::Duration;
 
 /// How long a batch keeps aggregating its replies after its commands were

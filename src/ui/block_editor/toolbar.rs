@@ -2,12 +2,12 @@
 
 use super::{BlockEditor, EbKind, InlineFormat, StyleTarget};
 use crate::ui::icons;
-use gpui::{prelude::*, AnyElement, Context, ElementId, Entity};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonGroup, ButtonVariants},
     menu::{DropdownMenu as _, PopupMenuItem},
     Disableable, Sizable,
 };
+use gpui_kit::{prelude::*, AnyElement, Context, ElementId, Entity};
 
 impl BlockEditor {
     pub(super) fn block_menu(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {

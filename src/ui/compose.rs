@@ -16,16 +16,16 @@ use crate::blocks::BlockKind;
 use crate::model::{AccountId, Attachment, InlineImage, Message, Signature, Template};
 use crate::proofreading::LanguageToolSettings;
 use crate::runtime::Cmd;
-use gpui::{
-    div, prelude::*, px, Context, Entity, Focusable as _, Subscription, WeakEntity, Window,
-    WindowHandle,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::{IndentInline, Input, InputState},
     menu::{DropdownMenu, PopupMenuItem},
     v_flex, ActiveTheme, Disableable, Root, Selectable, Sizable, StyledExt,
+};
+use gpui_kit::{
+    div, prelude::*, px, Context, Entity, Focusable as _, Subscription, WeakEntity, Window,
+    WindowHandle,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -40,7 +40,7 @@ pub struct ComposeHandle {
     /// closed and until undo, success, or failure decides its fate.
     pending_view: Option<Entity<ComposeView>>,
     _event_subscription: Option<Subscription>,
-    _preference_subscription: gpui::Subscription,
+    _preference_subscription: gpui_kit::Subscription,
 }
 
 /// Composer embedded in the main window's reader pane, which is the default
@@ -48,7 +48,7 @@ pub struct ComposeHandle {
 pub struct InlineCompose {
     pub id: u64,
     pub view: Entity<ComposeView>,
-    _sub: gpui::Subscription,
+    _sub: gpui_kit::Subscription,
 }
 
 /// Events emitted by an inline `ComposeView` to `AviaryApp`.
@@ -64,7 +64,7 @@ pub enum ComposeEvent {
     RecipientVisibilityChanged { show_cc: bool, show_bcc: bool },
 }
 
-impl gpui::EventEmitter<ComposeEvent> for ComposeView {}
+impl gpui_kit::EventEmitter<ComposeEvent> for ComposeView {}
 
 /// Where a composer is displayed. It is the same composer everywhere — same
 /// editor, same send, draft, AI and template paths — but the three surfaces do
@@ -423,7 +423,7 @@ fn plain_text_html(text: &str) -> String {
 }
 
 /// Shared icon button for saving a draft.
-pub(super) fn compose_save_draft_button(id: impl Into<gpui::ElementId>) -> Button {
+pub(super) fn compose_save_draft_button(id: impl Into<gpui_kit::ElementId>) -> Button {
     Button::new(id)
         .ghost()
         .icon(super::icons::app_icon("save"))
@@ -431,7 +431,7 @@ pub(super) fn compose_save_draft_button(id: impl Into<gpui::ElementId>) -> Butto
 }
 
 /// Shared edit/preview toggle represented by the pencil.
-pub(super) fn compose_preview_toggle(id: impl Into<gpui::ElementId>, preview: bool) -> Button {
+pub(super) fn compose_preview_toggle(id: impl Into<gpui_kit::ElementId>, preview: bool) -> Button {
     Button::new(id)
         .xsmall()
         .ghost()
@@ -866,7 +866,7 @@ impl ComposeView {
     }
 
     /// Tab title: the subject being entered, or a label based on composition type.
-    pub fn tab_title(&self, cx: &gpui::App) -> String {
+    pub fn tab_title(&self, cx: &gpui_kit::App) -> String {
         let subject = self.subject.read(cx).value().trim().to_string();
         if !subject.is_empty() {
             return subject;
@@ -888,7 +888,7 @@ impl ComposeView {
 
     /// Captures current state again as `ComposeInit`, used to detach an inline
     /// composer into a window.
-    pub fn to_init(&self, cx: &gpui::App) -> ComposeInit {
+    pub fn to_init(&self, cx: &gpui_kit::App) -> ComposeInit {
         let editor = self.editor.read(cx);
         ComposeInit {
             compose_id: Some(self.id),
@@ -912,7 +912,7 @@ impl ComposeView {
         }
     }
 
-    fn draft_fingerprint(&self, cx: &gpui::App) -> u64 {
+    fn draft_fingerprint(&self, cx: &gpui_kit::App) -> u64 {
         let mut init = self.to_init(cx);
         // The provider id changes after the first save but does not represent
         // user content and must not immediately trigger a second autosave.
@@ -1133,7 +1133,7 @@ impl ComposeView {
     }
 
     fn pick_attachment(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
             files: true,
             directories: false,
             multiple: true,
@@ -1567,7 +1567,7 @@ impl ComposeView {
             for preset in self.ai_settings.prompts.clone() {
                 let id = preset.id;
                 actions = actions.child(
-                    Button::new(gpui::ElementId::Name(format!("ai-prompt-{id}").into()))
+                    Button::new(gpui_kit::ElementId::Name(format!("ai-prompt-{id}").into()))
                         .xsmall()
                         .label(preset.name.clone())
                         .disabled(self.ai_running || self.sending)
@@ -1629,7 +1629,7 @@ impl ComposeView {
             let filename = f.filename.clone();
             let size = attachments::format_size(f.size);
             file_chips = file_chips.child(
-                Button::new(gpui::ElementId::Name(format!("file-{ix}").into()))
+                Button::new(gpui_kit::ElementId::Name(format!("file-{ix}").into()))
                     .outline()
                     .small()
                     .h_auto()
@@ -1703,7 +1703,7 @@ impl ComposeView {
         let editor_scroll_handle = self.editor_scroll_handle.clone();
         self.editor_scroll_motion
             .advance(&editor_scroll_handle, window);
-        let body_area: gpui::AnyElement = if self.preview {
+        let body_area: gpui_kit::AnyElement = if self.preview {
             let preview = self
                 .editor
                 .update(cx, |editor, cx| editor.preview_element(window, cx));
@@ -1720,7 +1720,7 @@ impl ComposeView {
                 .overflow_y_scroll()
                 .track_scroll(&editor_scroll_handle)
                 .on_scroll_wheel(cx.listener(
-                    move |this, event: &gpui::ScrollWheelEvent, window, cx| {
+                    move |this, event: &gpui_kit::ScrollWheelEvent, window, cx| {
                         if this
                             .editor_scroll_motion
                             .on_wheel(&scroll_handle, event, window)
@@ -1754,7 +1754,7 @@ impl ComposeView {
                 })
                 .track_scroll(&editor_scroll_handle)
                 .on_scroll_wheel(cx.listener(
-                    move |this, event: &gpui::ScrollWheelEvent, window, cx| {
+                    move |this, event: &gpui_kit::ScrollWheelEvent, window, cx| {
                         if this
                             .editor_scroll_motion
                             .on_wheel(&scroll_handle, event, window)
@@ -1926,13 +1926,13 @@ impl Render for ComposeView {
             .child(self.render_body(window, cx))
             .child(self.render_footer(cx))
             .when(!self.sending, |el| {
-                el.drag_over::<gpui::ExternalPaths>(|style, _, _, cx| {
+                el.drag_over::<gpui_kit::ExternalPaths>(|style, _, _, cx| {
                     style
                         .bg(cx.theme().drop_target)
                         .border_color(cx.theme().primary)
                 })
                 .on_drop(cx.listener(
-                    |this, paths: &gpui::ExternalPaths, _, cx| {
+                    |this, paths: &gpui_kit::ExternalPaths, _, cx| {
                         this.attach_paths(paths.paths().to_vec(), cx);
                     },
                 ))
@@ -2004,7 +2004,7 @@ impl AviaryApp {
             .collect()
     }
 
-    pub(crate) fn refresh_compose_account_options(&mut self, cx: &mut gpui::App) {
+    pub(crate) fn refresh_compose_account_options(&mut self, cx: &mut gpui_kit::App) {
         let accounts = self.compose_account_options();
         for handle in &self.composes {
             let accounts = accounts.clone();
@@ -2020,7 +2020,7 @@ impl AviaryApp {
     /// reopening them. The signature already in a draft is left as it is —
     /// it was rendered when it was inserted, and a draft must not change
     /// under the user.
-    pub(crate) fn refresh_compose_signatures(&self, cx: &mut gpui::App) {
+    pub(crate) fn refresh_compose_signatures(&self, cx: &mut gpui_kit::App) {
         let signatures: Vec<Signature> = self
             .ordered_accounts()
             .into_iter()
@@ -2040,7 +2040,7 @@ impl AviaryApp {
         }
     }
 
-    pub(crate) fn refresh_compose_ai_settings(&self, cx: &mut gpui::App) {
+    pub(crate) fn refresh_compose_ai_settings(&self, cx: &mut gpui_kit::App) {
         let settings = self.settings.global.ai.clone();
         for handle in &self.composes {
             let settings = settings.clone();
@@ -2394,12 +2394,12 @@ impl AviaryApp {
             init.reply_to.is_some(),
             init.is_forward,
         );
-        let bounds = gpui::Bounds::centered(None, gpui::size(px(720.), px(640.)), cx);
+        let bounds = gpui_kit::Bounds::centered(None, gpui_kit::size(px(720.), px(640.)), cx);
         let mut view_slot: Option<Entity<ComposeView>> = None;
         let handle = cx.open_window(
-            gpui::WindowOptions {
-                window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
-                titlebar: Some(gpui::TitlebarOptions {
+            gpui_kit::WindowOptions {
+                window_bounds: Some(gpui_kit::WindowBounds::Windowed(bounds)),
+                titlebar: Some(gpui_kit::TitlebarOptions {
                     title: Some(title.into()),
                     ..Default::default()
                 }),
@@ -2502,11 +2502,11 @@ impl AviaryApp {
             return;
         };
         let title = view.read(cx).window_title();
-        let bounds = gpui::Bounds::centered(None, gpui::size(px(720.), px(640.)), cx);
+        let bounds = gpui_kit::Bounds::centered(None, gpui_kit::size(px(720.), px(640.)), cx);
         let restored = cx.open_window(
-            gpui::WindowOptions {
-                window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
-                titlebar: Some(gpui::TitlebarOptions {
+            gpui_kit::WindowOptions {
+                window_bounds: Some(gpui_kit::WindowBounds::Windowed(bounds)),
+                titlebar: Some(gpui_kit::TitlebarOptions {
                     title: Some(title.into()),
                     ..Default::default()
                 }),
