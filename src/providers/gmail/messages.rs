@@ -218,6 +218,7 @@ async fn fetch_has_attachment_ids(
     access_token: &str,
     label: Option<&str>,
     extra_query: Option<&str>,
+    include_spam_trash: bool,
     max_results: usize,
 ) -> HashSet<String> {
     let q = match extra_query {
@@ -225,10 +226,13 @@ async fn fetch_has_attachment_ids(
         None => "has:attachment".to_string(),
     };
     let max_s = max_results.to_string();
-    let request = client
+    let mut request = client
         .get(format!("{BASE}/users/me/messages"))
         .bearer_auth(access_token)
         .query(&[("q", q.as_str()), ("maxResults", max_s.as_str())]);
+    if include_spam_trash {
+        request = request.query(&[("includeSpamTrash", "true")]);
+    }
     let request = match label {
         Some(label) => with_folder_labels(request, label),
         None => request,
@@ -255,6 +259,65 @@ async fn fetch_has_attachment_ids(
             HashSet::new()
         }
     }
+}
+
+/// Seconds of slack around a page's time window, in case Gmail's search date
+/// and `internalDate` disagree on the rounding.
+const ATTACHMENT_WINDOW_SLACK_SECS: i64 = 60;
+
+/// The `has:attachment` lookup for an arbitrary page of results: restricted to
+/// the time span the page covers, so it answers for *these* messages.
+///
+/// Asking for "the N most recent messages with an attachment" is only right
+/// for the first page — for page 2 onward every hit is newer than anything on
+/// screen, and no row ever showed a paperclip. `None` for an empty page.
+fn attachment_window_query(headers: &[MessageHeader], extra_query: Option<&str>) -> Option<String> {
+    let oldest = headers.iter().map(|h| h.received.timestamp()).min()?;
+    let newest = headers.iter().map(|h| h.received.timestamp()).max()?;
+    let window = format!(
+        "after:{} before:{}",
+        oldest - ATTACHMENT_WINDOW_SLACK_SECS,
+        newest + ATTACHMENT_WINDOW_SLACK_SECS
+    );
+    Some(match extra_query.filter(|q| !q.trim().is_empty()) {
+        Some(q) => format!("({q}) {window}"),
+        None => window,
+    })
+}
+
+fn mark_attachment_hits(headers: &mut [MessageHeader], hits: &HashSet<String>) {
+    for header in headers {
+        if hits.contains(&header.id) {
+            header.has_attachments = true;
+        }
+    }
+}
+
+/// Flags the attachments of an arbitrary page through a windowed lookup (see
+/// [`attachment_window_query`]). One extra round trip, after the metadata,
+/// since the window comes from it. Best effort, like the lookup itself.
+async fn mark_attachments_in_window(
+    client: &reqwest::Client,
+    access_token: &str,
+    label: Option<&str>,
+    extra_query: Option<&str>,
+    include_spam_trash: bool,
+    headers: &mut [MessageHeader],
+) {
+    let Some(query) = attachment_window_query(headers, extra_query) else {
+        return;
+    };
+    let max_results = (headers.len() * 2).clamp(50, 500);
+    let hits = fetch_has_attachment_ids(
+        client,
+        access_token,
+        label,
+        Some(&query),
+        include_spam_trash,
+        max_results,
+    )
+    .await;
+    mark_attachment_hits(headers, &hits);
 }
 
 pub async fn list_folder_messages(
@@ -300,19 +363,31 @@ pub async fn list_folder_messages(
             .take(top)
             .map(|m| m.id)
             .collect();
+        if skip > 0 {
+            // Past the first page the "most recent with an attachment"
+            // lookup no longer covers these rows: window it on them instead.
+            let mut headers = fetch_metadata_batch(client, access_token, take_ids).await?;
+            mark_attachments_in_window(
+                client,
+                access_token,
+                Some(label),
+                None,
+                false,
+                &mut headers,
+            )
+            .await;
+            return Ok(headers);
+        }
         // Run the per-id metadata fetches and the `has:attachment` index
         // lookup in parallel — neither depends on the other and we need
-        // both to flag the rows.
+        // both to flag the rows. On the first page the `top` most recent
+        // attachment-bearing messages include every one on screen.
         let (headers_result, attach_ids) = tokio::join!(
             fetch_metadata_batch(client, access_token, take_ids),
-            fetch_has_attachment_ids(client, access_token, Some(label), None, top.max(50)),
+            fetch_has_attachment_ids(client, access_token, Some(label), None, false, top.max(50)),
         );
         let mut headers = headers_result?;
-        for h in &mut headers {
-            if attach_ids.contains(&h.id) {
-                h.has_attachments = true;
-            }
-        }
+        mark_attachment_hits(&mut headers, &attach_ids);
         return Ok(headers);
     }
 }
@@ -339,14 +414,10 @@ pub async fn list_folder_messages_page(
         .collect();
     let (headers_result, attach_ids) = tokio::join!(
         fetch_metadata_batch(client, access_token, ids),
-        fetch_has_attachment_ids(client, access_token, Some(label), None, top.max(50)),
+        fetch_has_attachment_ids(client, access_token, Some(label), None, false, top.max(50)),
     );
     let mut messages = headers_result?;
-    for message in &mut messages {
-        if attach_ids.contains(&message.id) {
-            message.has_attachments = true;
-        }
-    }
+    mark_attachment_hits(&mut messages, &attach_ids);
     Ok(MessagePage {
         messages,
         next: body.next_page_token.map(|token| format!("{label}|{token}")),
@@ -465,7 +536,9 @@ pub async fn fetch_messages_page(
         let next = body
             .next_page_token
             .map(|next_token| format!("__SEARCH__|{query}|{next_token}"));
-        let headers = fetch_metadata_batch(client, access_token, ids).await?;
+        let mut headers = fetch_metadata_batch(client, access_token, ids).await?;
+        mark_attachments_in_window(client, access_token, None, Some(query), true, &mut headers)
+            .await;
         return Ok((headers, next));
     }
 
@@ -483,16 +556,10 @@ pub async fn fetch_messages_page(
     let body: GmailListResponse = resp.json().await?;
     let ids: Vec<String> = body.messages.into_iter().map(|m| m.id).collect();
     let next = body.next_page_token.map(|t| format!("{label}|{t}"));
-    let (headers_result, attach_ids) = tokio::join!(
-        fetch_metadata_batch(client, access_token, ids),
-        fetch_has_attachment_ids(client, access_token, Some(label), None, 50),
-    );
-    let mut headers = headers_result?;
-    for h in &mut headers {
-        if attach_ids.contains(&h.id) {
-            h.has_attachments = true;
-        }
-    }
+    // A continuation page: the paperclips are looked up over the span these
+    // rows cover, not among the label's most recent messages.
+    let mut headers = fetch_metadata_batch(client, access_token, ids).await?;
+    mark_attachments_in_window(client, access_token, Some(label), None, false, &mut headers).await;
     Ok((headers, next))
 }
 
@@ -931,7 +998,7 @@ pub async fn get_message(
             filename: reference.filename,
             mime: reference.mime,
             size: reference.size,
-            bytes: None,
+            bytes: reference.inline_bytes,
         })
         .collect();
 
@@ -1088,12 +1155,50 @@ struct FileRef {
     filename: String,
     mime: String,
     size: u64,
+    /// Empty when the bytes came inline, see `inline_bytes`.
     attachment_id: String,
+    inline_bytes: Option<Vec<u8>>,
 }
 
 struct CalendarPartRef {
     data: Option<String>,
     attachment_id: Option<String>,
+}
+
+/// A part that is a file rather than a body or a container: it carries a
+/// filename, or declares itself an `attachment`. An `attachmentId` alone does
+/// not qualify — Gmail also moves the data of a large *body* part behind one.
+fn is_file_part(p: &GmailPayload, disposition: &str) -> bool {
+    !p.mime_type.to_ascii_lowercase().starts_with("multipart/")
+        && (!p.filename.is_empty() || disposition.starts_with("attachment"))
+}
+
+fn push_file_ref(p: &GmailPayload, mime: String, files_out: &mut Vec<FileRef>) {
+    let Some(body) = &p.body else {
+        return;
+    };
+    // A small file can come inline (`data`) rather than behind an id; it is
+    // then carried along instead of being lost.
+    let inline_bytes = body
+        .attachment_id
+        .is_none()
+        .then(|| body.data.as_deref().and_then(decode_b64url_bytes))
+        .flatten();
+    if body.attachment_id.is_none() && inline_bytes.is_none() {
+        return;
+    }
+    let filename = if p.filename.is_empty() {
+        "piece-jointe".to_string()
+    } else {
+        p.filename.clone()
+    };
+    files_out.push(FileRef {
+        filename,
+        mime,
+        size: body.size,
+        attachment_id: body.attachment_id.clone().unwrap_or_default(),
+        inline_bytes,
+    });
 }
 
 fn walk_payload(
@@ -1140,6 +1245,7 @@ fn walk_payload(
                 mime,
                 size: p.body.as_ref().map(|body| body.size).unwrap_or_default(),
                 attachment_id: att_id,
+                inline_bytes: None,
             });
             return;
         }
@@ -1158,10 +1264,15 @@ fn walk_payload(
                 inline_out.push((key, mime.clone(), att_id.clone()));
             }
         }
+    } else if is_file_part(p, &disposition) {
+        // Checked before the body branches: a `.txt` or `.html` sent as a
+        // file is a `text/*` part too, and used to replace — or become — the
+        // message body instead of appearing among the attachments.
+        push_file_ref(p, mime, files_out);
     } else if mime == "text/html" && html_out.is_none() {
         if let Some(body) = &p.body {
             if let Some(data) = &body.data {
-                if let Some(decoded) = decode_b64url(data) {
+                if let Some(decoded) = decode_part_text(p, data) {
                     *html_out = Some(decoded);
                 }
             }
@@ -1169,22 +1280,9 @@ fn walk_payload(
     } else if mime == "text/plain" && text_out.is_none() {
         if let Some(body) = &p.body {
             if let Some(data) = &body.data {
-                if let Some(decoded) = decode_b64url(data) {
+                if let Some(decoded) = decode_part_text(p, data) {
                     *text_out = Some(decoded);
                 }
-            }
-        }
-    } else if !p.filename.is_empty() && !mime.starts_with("multipart/") {
-        // Anything with a filename that isn't a recognised inline image and
-        // isn't a multipart container is a regular attachment.
-        if let Some(body) = &p.body {
-            if let Some(att_id) = &body.attachment_id {
-                files_out.push(FileRef {
-                    filename: p.filename.clone(),
-                    mime: mime.clone(),
-                    size: body.size,
-                    attachment_id: att_id.clone(),
-                });
             }
         }
     }
@@ -1420,15 +1518,24 @@ fn move_label_payload(source_folder_id: Option<&str>, target_folder_id: &str) ->
     let archive = target.eq_ignore_ascii_case(crate::providers::ARCHIVE_FOLDER_ALIAS);
     let target_is_category = target.starts_with("CATEGORY_");
     let source_is_category = source.starts_with("CATEGORY_");
+    // `SENT` and `DRAFT` record what a message *is*, not where it is filed —
+    // like the categories. Dropping `SENT` would make a sent mail vanish from
+    // the Sent view for good; Gmail refuses to touch `DRAFT` through
+    // `modify` at all. Moving out of those views therefore removes nothing.
+    let intrinsic_source = matches!(source, "SENT" | "DRAFT");
     if archive {
         // Gmail has no Archive label: archiving is exactly removing INBOX.
         // Category labels describe classification and remain untouched.
-        let remove = if source_is_category { "INBOX" } else { source };
+        let remove = if source_is_category || intrinsic_source {
+            "INBOX"
+        } else {
+            source
+        };
         serde_json::json!({ "removeLabelIds": [remove] })
     } else if target_is_category {
         // Moving to a Gmail tab is reclassification, not archiving: keep (or
         // restore) INBOX and only remove the previous category/source label.
-        let remove: Vec<&str> = if source == "INBOX" || source == target {
+        let remove: Vec<&str> = if source == "INBOX" || source == target || intrinsic_source {
             Vec::new()
         } else {
             vec![source]
@@ -1440,10 +1547,16 @@ fn move_label_payload(source_folder_id: Option<&str>, target_folder_id: &str) ->
     } else {
         // A category view is still an inbox view. Moving out of it must remove
         // INBOX (archive semantics), not destroy Gmail's classification.
-        let remove = if source_is_category { "INBOX" } else { source };
+        let remove: Vec<&str> = if intrinsic_source {
+            Vec::new()
+        } else if source_is_category {
+            vec!["INBOX"]
+        } else {
+            vec![source]
+        };
         serde_json::json!({
             "addLabelIds": [target],
-            "removeLabelIds": [remove],
+            "removeLabelIds": remove,
         })
     }
 }
@@ -1545,7 +1658,31 @@ pub async fn search(
     let resp = check_status(resp, "search").await?;
     let body: GmailListResponse = resp.json().await?;
     let ids: Vec<String> = body.messages.into_iter().map(|m| m.id).collect();
-    fetch_metadata_batch(client, access_token, ids).await
+    if query.has_attachment == Some(true) {
+        // Gmail already filtered on `has:attachment`: every hit has one.
+        let mut headers = fetch_metadata_batch(client, access_token, ids).await?;
+        mark_all_with_attachments(&mut headers);
+        return Ok(headers);
+    }
+    // `format=metadata` says nothing about parts, and the runtime re-applies
+    // the query locally — so the flag has to be right. The same expression
+    // restricted to `has:attachment`, over the same scope and limit, contains
+    // every attachment-bearing hit of this one.
+    let scope = folder_id.map(|folder| folder.unwrap_or("INBOX"));
+    let extra = (!expression.trim().is_empty()).then_some(expression.as_str());
+    let (headers_result, attach_ids) = tokio::join!(
+        fetch_metadata_batch(client, access_token, ids),
+        fetch_has_attachment_ids(client, access_token, scope, extra, false, limit.max(1)),
+    );
+    let mut headers = headers_result?;
+    mark_attachment_hits(&mut headers, &attach_ids);
+    Ok(headers)
+}
+
+fn mark_all_with_attachments(headers: &mut [MessageHeader]) {
+    for header in headers {
+        header.has_attachments = true;
+    }
 }
 
 pub async fn list_from_sender(
@@ -1569,7 +1706,12 @@ pub async fn list_from_sender(
     let resp = check_status(resp, "list_from_sender").await?;
     let body: GmailListResponse = resp.json().await?;
     let ids: Vec<String> = body.messages.into_iter().map(|m| m.id).collect();
-    let headers = fetch_metadata_batch(client, access_token, ids).await?;
+    let (headers_result, attach_ids) = tokio::join!(
+        fetch_metadata_batch(client, access_token, ids),
+        fetch_has_attachment_ids(client, access_token, None, Some(&q), true, top.max(1)),
+    );
+    let mut headers = headers_result?;
+    mark_attachment_hits(&mut headers, &attach_ids);
     // Encode the `q=...` filter into the page-token blob so paginated calls
     // keep the same filter active. We use a marker ` __SEARCH__` so
     // `fetch_messages_page` can route correctly.
@@ -1607,8 +1749,53 @@ pub async fn list_thread(
     Ok(out)
 }
 
-fn decode_b64url(s: &str) -> Option<String> {
-    decode_b64url_bytes(s).and_then(|b| String::from_utf8(b).ok())
+/// Decodes a text part's body. Gmail hands back the part's octets in the
+/// charset its `Content-Type` declares, not re-encoded to UTF-8, so an
+/// `iso-8859-1` or `windows-1252` message used to be thrown away whole by a
+/// strict UTF-8 conversion. Only an undecodable base64 payload yields `None`.
+fn decode_part_text(part: &GmailPayload, data: &str) -> Option<String> {
+    let bytes = decode_b64url_bytes(data)?;
+    let charset = header(part, "Content-Type").and_then(|value| content_type_charset(&value));
+    Some(decode_text_bytes(bytes, charset.as_deref()))
+}
+
+/// The `charset` parameter of a `Content-Type` value, unquoted.
+fn content_type_charset(content_type: &str) -> Option<String> {
+    content_type.split(';').skip(1).find_map(|param| {
+        let (name, value) = param.split_once('=')?;
+        name.trim()
+            .eq_ignore_ascii_case("charset")
+            .then(|| value.trim().trim_matches('"').trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+/// Text in `charset`, with the fallbacks a mail client needs: a declared
+/// UTF-8 (or ASCII, or nothing) is tried strictly first; a declared legacy
+/// charset goes through mail-parser's decoders; mislabelled or unknown bytes
+/// read as windows-1252 — by far the most common undeclared legacy charset,
+/// and a superset of Latin-1's printable range — rather than being dropped.
+fn decode_text_bytes(bytes: Vec<u8>, charset: Option<&str>) -> String {
+    use mail_parser::decoders::charsets::map::charset_decoder;
+    let declared_utf8 = charset.is_none_or(|charset| {
+        let charset = charset.to_ascii_lowercase();
+        matches!(charset.as_str(), "utf-8" | "utf8" | "us-ascii" | "ascii")
+    });
+    if !declared_utf8 {
+        if let Some(decode) = charset.and_then(|charset| charset_decoder(charset.as_bytes())) {
+            return decode(&bytes);
+        }
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            let bytes = error.into_bytes();
+            match charset_decoder(b"windows-1252") {
+                Some(decode) => decode(&bytes),
+                None => String::from_utf8_lossy(&bytes).into_owned(),
+            }
+        }
+    }
 }
 
 fn decode_b64url_bytes(s: &str) -> Option<Vec<u8>> {
@@ -1629,10 +1816,220 @@ fn drop_unresolved_cid_images(md: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        invitation_uid, is_retryable_gmail_error, labels_belong_to_folder, move_label_payload,
-        parse_batch_metadata_response, trash_request, unfold_header_value, walk_payload,
-        with_folder_labels, GmailBody, GmailPayload,
+        attachment_window_query, content_type_charset, decode_part_text, decode_text_bytes,
+        invitation_uid, is_retryable_gmail_error, labels_belong_to_folder, mark_attachment_hits,
+        message_header_from, move_label_payload, parse_batch_metadata_response, trash_request,
+        unfold_header_value, walk_payload, with_folder_labels, GmailBody, GmailHeader,
+        GmailMessage, GmailPayload,
     };
+    use base64::Engine as _;
+    use std::collections::HashSet;
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::URL_SAFE.encode(bytes)
+    }
+
+    fn text_part(
+        mime: &str,
+        headers: &[(&str, &str)],
+        data: &[u8],
+        filename: &str,
+    ) -> GmailPayload {
+        GmailPayload {
+            mime_type: mime.to_string(),
+            headers: headers
+                .iter()
+                .map(|(name, value)| GmailHeader {
+                    name: name.to_string(),
+                    value: value.to_string(),
+                })
+                .collect(),
+            parts: Vec::new(),
+            body: Some(GmailBody {
+                data: Some(b64(data)),
+                attachment_id: None,
+                size: data.len() as u64,
+            }),
+            filename: filename.to_string(),
+        }
+    }
+
+    fn walk(payload: &GmailPayload) -> (Option<String>, Option<String>, Vec<super::FileRef>) {
+        let mut html = None;
+        let mut text = None;
+        let mut inline = Vec::new();
+        let mut files = Vec::new();
+        let mut calendar = Vec::new();
+        walk_payload(
+            payload,
+            &mut html,
+            &mut text,
+            &mut inline,
+            &mut files,
+            &mut calendar,
+        );
+        (html, text, files)
+    }
+
+    fn multipart(parts: Vec<GmailPayload>) -> GmailPayload {
+        GmailPayload {
+            mime_type: "multipart/mixed".to_string(),
+            headers: Vec::new(),
+            parts,
+            body: None,
+            filename: String::new(),
+        }
+    }
+
+    /// A `.txt` sent as a file is a `text/plain` part too. It used to become
+    /// the body (or be dropped when the real body came first); it is a file.
+    #[test]
+    fn text_parts_with_a_filename_are_attachments_not_bodies() {
+        let mut notes = text_part("text/plain", &[], b"contenu du fichier", "notes.txt");
+        notes.body.as_mut().unwrap().attachment_id = Some("att-notes".to_string());
+        notes.body.as_mut().unwrap().data = None;
+        let payload = multipart(vec![notes, text_part("text/plain", &[], b"Bonjour", "")]);
+        let (html, text, files) = walk(&payload);
+        assert_eq!(text.as_deref(), Some("Bonjour"));
+        assert!(html.is_none());
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "notes.txt");
+        assert_eq!(files[0].attachment_id, "att-notes");
+    }
+
+    /// A disposition `attachment` is enough, even without a filename, and a
+    /// small file delivered inline keeps its bytes.
+    #[test]
+    fn attachment_disposition_makes_a_file_and_keeps_inline_bytes() {
+        let payload = multipart(vec![
+            text_part("text/html", &[], b"<p>Corps</p>", ""),
+            text_part(
+                "text/html",
+                &[("Content-Disposition", "attachment")],
+                b"<p>Fichier</p>",
+                "",
+            ),
+        ]);
+        let (html, _, files) = walk(&payload);
+        assert_eq!(html.as_deref(), Some("<p>Corps</p>"));
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].attachment_id, "");
+        assert_eq!(
+            files[0].inline_bytes.as_deref(),
+            Some(&b"<p>Fichier</p>"[..])
+        );
+    }
+
+    /// Gmail returns a part's octets in its declared charset. A Latin-1 body
+    /// used to fail the UTF-8 conversion and disappear.
+    #[test]
+    fn legacy_charset_bodies_are_decoded_not_dropped() {
+        let part = text_part(
+            "text/plain",
+            &[("Content-Type", "text/plain; charset=\"ISO-8859-1\"")],
+            b"R\xe9union \xe0 midi",
+            "",
+        );
+        let data = part.body.as_ref().unwrap().data.clone().unwrap();
+        assert_eq!(
+            decode_part_text(&part, &data).as_deref(),
+            Some("Réunion à midi")
+        );
+
+        let (_, text, _) = walk(&part);
+        assert_eq!(text.as_deref(), Some("Réunion à midi"));
+    }
+
+    #[test]
+    fn windows_1252_and_mislabelled_bodies_fall_back_instead_of_vanishing() {
+        // Declared windows-1252: the euro sign lives at 0x80.
+        assert_eq!(
+            decode_text_bytes(b"Prix : 10 \x80".to_vec(), Some("windows-1252")),
+            "Prix : 10 €"
+        );
+        // Declared UTF-8 but actually Latin-1: still readable.
+        assert_eq!(
+            decode_text_bytes(b"caf\xe9".to_vec(), Some("utf-8")),
+            "café"
+        );
+        // Undeclared, genuine UTF-8.
+        assert_eq!(decode_text_bytes("café".as_bytes().to_vec(), None), "café");
+    }
+
+    #[test]
+    fn charset_parameter_is_read_from_content_type() {
+        assert_eq!(
+            content_type_charset("text/plain; format=flowed; charset=\"iso-8859-1\"").as_deref(),
+            Some("iso-8859-1")
+        );
+        assert_eq!(content_type_charset("text/plain"), None);
+    }
+
+    /// `SENT` and `DRAFT` say what a message is. Moving out of those views
+    /// must never strip them — a sent mail would vanish from Sent for good.
+    #[test]
+    fn moving_out_of_sent_or_drafts_never_removes_those_labels() {
+        for source in ["sentitems", "SENT", "drafts", "DRAFT"] {
+            let payload = move_label_payload(Some(source), "Label_7");
+            assert_eq!(
+                payload,
+                serde_json::json!({ "addLabelIds": ["Label_7"], "removeLabelIds": [] }),
+                "source {source:?}"
+            );
+            let payload = move_label_payload(Some(source), "CATEGORY_UPDATES");
+            assert_eq!(
+                payload["removeLabelIds"],
+                serde_json::json!([]),
+                "source {source:?}"
+            );
+            let payload = move_label_payload(Some(source), ARCHIVE_FOLDER_ALIAS);
+            assert_eq!(
+                payload,
+                serde_json::json!({ "removeLabelIds": ["INBOX"] }),
+                "source {source:?}"
+            );
+        }
+    }
+
+    fn listed(id: &str, internal_date_ms: i64) -> crate::model::MessageHeader {
+        message_header_from(&GmailMessage {
+            id: id.to_string(),
+            thread_id: None,
+            snippet: String::new(),
+            label_ids: Vec::new(),
+            internal_date: Some(internal_date_ms.to_string()),
+            payload: None,
+        })
+    }
+
+    /// A continuation page asks about the span it covers. Asking for the
+    /// label's most recent attachment-bearing messages, as before, only ever
+    /// matched the first page.
+    #[test]
+    fn attachment_lookup_is_windowed_on_the_page() {
+        let page = vec![
+            listed("message-b", 1_700_000_500_000),
+            listed("message-a", 1_700_000_000_000),
+        ];
+        assert_eq!(
+            attachment_window_query(&page, None).as_deref(),
+            Some("after:1699999940 before:1700000560")
+        );
+        assert_eq!(
+            attachment_window_query(&page, Some("from:\"alice\"")).as_deref(),
+            Some("(from:\"alice\") after:1699999940 before:1700000560")
+        );
+        assert_eq!(attachment_window_query(&[], None), None);
+    }
+
+    #[test]
+    fn attachment_hits_flag_only_their_rows() {
+        let mut page = vec![listed("message-a", 1), listed("message-b", 2)];
+        let hits: HashSet<String> = ["message-b".to_string()].into();
+        mark_attachment_hits(&mut page, &hits);
+        assert!(!page[0].has_attachments);
+        assert!(page[1].has_attachments);
+    }
     use crate::providers::{ARCHIVE_FOLDER_ALIAS, INBOX_FOLDER_ALIAS, JUNK_FOLDER_ALIAS};
     use crate::search_query::SearchQuery;
 

@@ -174,7 +174,7 @@ pub async fn list_messages_tagged(
             .select("INBOX")
             .context(tr!("technical-operation-failed", { operation: "SELECT INBOX" }))?;
         let uids = session
-            .uid_search(format!("KEYWORD {tag_id}"))
+            .uid_search(format!("KEYWORD {tag_id} {}", super::messages::NOT_DELETED))
             .with_context(|| {
                 tr!("technical-operation-failed", {
                     operation: format!("UID SEARCH KEYWORD {tag_id}")
@@ -193,10 +193,7 @@ pub async fn list_messages_tagged(
             .collect::<Vec<_>>()
             .join(",");
         let fetches = session
-            .uid_fetch(
-                set,
-                "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])",
-            )
+            .uid_fetch(set, super::messages::LISTING_FETCH)
             .context(tr!("technical-operation-failed", { operation: "UID FETCH (tag)" }))?;
         let mut messages: Vec<MessageHeader> = fetches
             .iter()

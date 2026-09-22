@@ -29,8 +29,19 @@ const PAGE_CURSOR_PREFIX: &str = "aviary:imap-page:v1:";
 /// Header fields every listing FETCH asks for. `REFERENCES`/`IN-REPLY-TO`
 /// ride along at negligible cost and are what [`derived_conversation_id`]
 /// threads the mailbox with — IMAP has no native conversation id.
-const LISTING_FETCH: &str = "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS \
-     (FROM SUBJECT DATE MESSAGE-ID REFERENCES IN-REPLY-TO)])";
+/// `CONTENT-TYPE`/`CONTENT-DISPOSITION` feed [`headers_suggest_attachments`],
+/// without which a listed or searched message never has an attachment and a
+/// `avec:pj` search filters every result away.
+pub(super) const LISTING_FETCH: &str = "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS \
+     (FROM SUBJECT DATE MESSAGE-ID REFERENCES IN-REPLY-TO CONTENT-TYPE CONTENT-DISPOSITION)])";
+
+/// Opening a message. `BODY.PEEK[]` rather than `RFC822`, which is the old
+/// spelling of `BODY[]` and sets `\Seen` as a side effect (RFC 3501 §6.4.5):
+/// a message opened by j/k traversal or rehydrated at startup would be read on
+/// the server without the user having decided so. Marking read is the
+/// runtime's explicit `mark_read`. The response comes back as `BODY[]`, which
+/// `Fetch::body` reads.
+const MESSAGE_FETCH: &str = "(UID FLAGS INTERNALDATE BODY.PEEK[])";
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct PageCursor {
@@ -60,12 +71,36 @@ fn decode_page_cursor(cursor: &str) -> Result<PageCursor> {
 /// Builds one IMAP SEARCH key without putting UTF-8 bytes in an RFC 3501
 /// quoted string. The synchronous `imap` API accepts a raw command fragment,
 /// including the CRLF separating a literal declaration from its octets.
+///
+/// A key never carries `CHARSET` itself: RFC 3501 allows the specification
+/// once, at the head of the command, so two non-ASCII terms each prefixing
+/// their own would be a syntax error. [`search_command`] adds it.
 fn search_key(field: &str, value: &str) -> String {
     if value.is_ascii() && !value.contains(['\r', '\n']) {
         let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
         format!("{field} \"{escaped}\"")
     } else {
-        format!("CHARSET UTF-8 {field} {{{}}}\r\n{value}", value.len())
+        format!("{field} {{{}}}\r\n{value}", value.len())
+    }
+}
+
+/// Whether a key built by [`search_key`] carries a literal. A quoted value
+/// can never contain a CRLF (those go out as literals), so the literal
+/// declaration's `}` + CRLF is unambiguous.
+fn uses_literal(key: &str) -> bool {
+    key.contains("}\r\n")
+}
+
+/// Assembles the argument of a `SEARCH` from its keys, which IMAP joins with
+/// an implicit AND. `CHARSET UTF-8` is written once, up front, and only when
+/// a literal needs it: some servers reject a charset they were not asked to
+/// decode anything with.
+fn search_command(keys: &[String]) -> String {
+    let joined = keys.join(" ");
+    if keys.iter().any(|key| uses_literal(key)) {
+        format!("CHARSET UTF-8 {joined}")
+    } else {
+        joined
     }
 }
 
@@ -529,9 +564,26 @@ fn list_physical_folder_messages(
     if total == 0 || skip >= total {
         return Ok(Vec::new());
     }
-    let end = total - skip;
-    let start = end.saturating_sub(top.saturating_sub(1)).max(1);
-    let range = format!("{start}:{end}");
+    // A message flagged `\\Deleted` is gone as far as the user is concerned
+    // (it is what a move leaves behind on a server without UIDPLUS), so it
+    // must neither show nor count towards `skip`, which is a count of *shown*
+    // messages carried by the page cursor. Asking which ones are flagged is
+    // one SEARCH whose answer is nearly always empty; the plain sequence
+    // window then stays exact and costs nothing more.
+    let deleted: HashSet<u32> = session
+        .search("DELETED")
+        .context(tr!("technical-operation-failed", { operation: "SEARCH DELETED" }))?;
+    let range = if deleted.is_empty() {
+        let end = total - skip;
+        let start = end.saturating_sub(top.saturating_sub(1)).max(1);
+        format!("{start}:{end}")
+    } else {
+        let window = visible_sequence_window(total, &deleted, skip, top);
+        if window.is_empty() {
+            return Ok(Vec::new());
+        }
+        sequence_set(&window)
+    };
     let fetches = session
         .fetch(range, LISTING_FETCH)
         .context(tr!("technical-operation-failed", { operation: "FETCH (page)" }))?;
@@ -542,6 +594,48 @@ fn list_physical_folder_messages(
     // FETCH returns ascending sequence numbers; the UI expects newest first.
     out.sort_by_key(|header| std::cmp::Reverse(header.received));
     Ok(out)
+}
+
+/// Sequence numbers of the page `[skip, skip + top)` counted newest first
+/// over the messages that are *not* in `deleted`.
+fn visible_sequence_window(total: u32, deleted: &HashSet<u32>, skip: u32, top: u32) -> Vec<u32> {
+    (1..=total)
+        .rev()
+        .filter(|seq| !deleted.contains(seq))
+        .skip(skip as usize)
+        .take(top as usize)
+        .collect()
+}
+
+/// Compact IMAP sequence set (`3:7,9,12:14`) for any list of numbers.
+fn sequence_set(numbers: &[u32]) -> String {
+    let mut sorted = numbers.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut out: Vec<String> = Vec::new();
+    let mut iter = sorted.into_iter();
+    let Some(mut start) = iter.next() else {
+        return String::new();
+    };
+    let mut end = start;
+    let flush = |start: u32, end: u32, out: &mut Vec<String>| {
+        out.push(if start == end {
+            start.to_string()
+        } else {
+            format!("{start}:{end}")
+        });
+    };
+    for n in iter {
+        if n == end + 1 {
+            end = n;
+        } else {
+            flush(start, end, &mut out);
+            start = n;
+            end = n;
+        }
+    }
+    flush(start, end, &mut out);
+    out.join(",")
 }
 
 /// Minimal incremental synchronization based on UIDVALIDITY/UIDNEXT.
@@ -612,8 +706,8 @@ pub async fn get_message(auth: &ImapAuth<'_>, id: &str) -> Result<Message> {
             || tr!("technical-operation-failed", { operation: format!("SELECT {folder}") }),
         )?;
         let fetches = session
-            .uid_fetch(uid.to_string(), "(UID FLAGS INTERNALDATE RFC822)")
-            .context(tr!("technical-operation-failed", { operation: "UID FETCH RFC822" }))?;
+            .uid_fetch(uid.to_string(), MESSAGE_FETCH)
+            .context(tr!("technical-operation-failed", { operation: "UID FETCH BODY.PEEK[]" }))?;
         let fetch = fetches
             .iter()
             .next()
@@ -626,7 +720,7 @@ pub async fn get_message(auth: &ImapAuth<'_>, id: &str) -> Result<Message> {
             .ok_or_else(|| anyhow!("RFC822 illisible"))?;
         // Build the header straight from the parsed RFC822. This is the only
         // path where we have the full message in hand — `f.header()` is None
-        // here because the FETCH attribute list asked for RFC822, not
+        // here because the FETCH attribute list asked for BODY[], not
         // BODY[HEADER], and IMAP fetches don't return the embedded headers
         // section unless explicitly requested.
         let mut header = message_header_from_parsed(&folder, uid, fetch, &parsed);
@@ -717,45 +811,167 @@ fn message_header_from_parsed(
 pub async fn delete_message(auth: &ImapAuth<'_>, id: &str) -> Result<()> {
     let (folder, uid) = parse_id(id)?;
     with_session(auth, move |session| {
+        // Resolve the trash before touching the message: without one there is
+        // nowhere safe to put it, and deleting would mean destroying.
+        let trash = guess_trash_name(session).ok_or_else(|| anyhow!(tr!("imap-error-no-trash")))?;
         session.select(&folder).with_context(
             || tr!("technical-operation-failed", { operation: format!("SELECT {folder}") }),
         )?;
-        // Try MOVE first (RFC 6851). Falls back to copy+\Deleted+EXPUNGE for
-        // servers that don't advertise it. We keep this simple: try MOVE to
-        // "Trash" and if that fails, mark deleted and EXPUNGE (which is
-        // destructive but compatible).
-        let trash = guess_trash_name(session).unwrap_or_else(|| "Trash".to_string());
-        let mv = session.uid_mv(uid.to_string(), &trash);
-        if mv.is_err() {
-            session
-                .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
-                .context(tr!("technical-operation-failed", { operation: "UID STORE \\Deleted" }))?;
-            session
-                .expunge()
-                .context(tr!("technical-operation-failed", { operation: "EXPUNGE" }))?;
+        if trash == folder {
+            // Deleting from the trash itself is the one deliberate purge.
+            // Still scoped to this UID: a bare EXPUNGE would also erase what
+            // other clients merely flagged `\Deleted`.
+            let caps = ServerCaps::query(session);
+            return purge_uid(session, uid, caps);
         }
-        Ok(())
+        relocate_uid(session, uid, &trash)
     })
     .await
 }
 
-fn guess_trash_name(session: &mut ImapSession) -> Option<String> {
-    let names = session.list(Some(""), Some("*")).ok()?;
-    for entry in names.iter() {
-        let attrs: Vec<String> = entry
-            .attributes()
-            .iter()
-            .map(|a| format!("{a:?}").to_ascii_lowercase())
-            .collect();
-        if attrs.iter().any(|a| a.contains("trash")) {
-            return Some(entry.name().to_string());
-        }
-        let lower = entry.name().to_ascii_lowercase();
-        if lower == "trash" || lower.contains("deleted") {
-            return Some(entry.name().to_string());
+/// What the server advertised, as far as moving messages is concerned.
+/// `None` where it is passed around means the `CAPABILITY` query failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ServerCaps {
+    /// RFC 6851 `MOVE`.
+    mv: bool,
+    /// RFC 4315 `UIDPLUS`, which is what provides `UID EXPUNGE`.
+    uidplus: bool,
+}
+
+impl ServerCaps {
+    pub(super) fn query(session: &mut impl UidMailbox) -> Option<Self> {
+        session.server_caps()
+    }
+}
+
+/// The UID-scoped commands a relocation is made of, over the mailbox that is
+/// currently selected. A trait so the command sequence can be checked in tests
+/// without a server — the whole point of this code is *which* commands never
+/// get sent.
+pub(super) trait UidMailbox {
+    fn server_caps(&mut self) -> Option<ServerCaps>;
+    fn uid_move(&mut self, uid: u32, target: &str) -> Result<()>;
+    fn uid_copy(&mut self, uid: u32, target: &str) -> Result<()>;
+    fn uid_mark_deleted(&mut self, uid: u32) -> Result<()>;
+    fn uid_expunge(&mut self, uid: u32) -> Result<()>;
+}
+
+impl UidMailbox for ImapSession {
+    fn server_caps(&mut self) -> Option<ServerCaps> {
+        match self.capabilities() {
+            Ok(caps) => Some(ServerCaps {
+                mv: caps.has_str("MOVE"),
+                uidplus: caps.has_str("UIDPLUS"),
+            }),
+            Err(error) => {
+                log::debug!("IMAP CAPABILITY failed: {error}");
+                None
+            }
         }
     }
-    None
+
+    fn uid_move(&mut self, uid: u32, target: &str) -> Result<()> {
+        self.uid_mv(uid.to_string(), target).with_context(
+            || tr!("technical-operation-failed", { operation: format!("UID MOVE → {target}") }),
+        )
+    }
+
+    fn uid_copy(&mut self, uid: u32, target: &str) -> Result<()> {
+        imap::Session::uid_copy(self, uid.to_string(), target).with_context(
+            || tr!("technical-operation-failed", { operation: format!("UID COPY → {target}") }),
+        )
+    }
+
+    fn uid_mark_deleted(&mut self, uid: u32) -> Result<()> {
+        self.uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
+            .context(tr!("technical-operation-failed", { operation: "UID STORE \\Deleted" }))?;
+        Ok(())
+    }
+
+    fn uid_expunge(&mut self, uid: u32) -> Result<()> {
+        imap::Session::uid_expunge(self, uid.to_string())
+            .context(tr!("technical-operation-failed", { operation: "UID EXPUNGE" }))?;
+        Ok(())
+    }
+}
+
+/// Moves `uid` out of the selected mailbox into `target` without ever
+/// destroying it: `UID MOVE` where the server may have it, otherwise `UID
+/// COPY` and only then removal from the source. A failed COPY aborts with the
+/// message untouched.
+fn relocate_uid(session: &mut impl UidMailbox, uid: u32, target: &str) -> Result<()> {
+    let caps = ServerCaps::query(session);
+    // Try MOVE when advertised, and also when the capabilities are unknown: a
+    // server without it answers BAD and nothing has happened yet.
+    if caps.is_none_or(|caps| caps.mv) {
+        match session.uid_move(uid, target) {
+            Ok(()) => return Ok(()),
+            Err(error) => log::debug!("IMAP UID MOVE failed, falling back to COPY: {error:#}"),
+        }
+    }
+    session.uid_copy(uid, target)?;
+    purge_uid(session, uid, caps)
+}
+
+/// Removes `uid` from the selected mailbox, and nothing else. `UID EXPUNGE`
+/// (RFC 4315) is the only expunge that is scoped; a plain `EXPUNGE` would
+/// also erase every message another client had merely flagged `\Deleted`.
+/// Without UIDPLUS the message is left flagged, which every client displays
+/// as deleted and the server purges on its own schedule.
+pub(super) fn purge_uid(
+    session: &mut impl UidMailbox,
+    uid: u32,
+    caps: Option<ServerCaps>,
+) -> Result<()> {
+    session.uid_mark_deleted(uid)?;
+    if caps.is_some_and(|caps| caps.uidplus) {
+        session.uid_expunge(uid)?;
+    } else {
+        log::info!("IMAP server lacks UIDPLUS: UID {uid} left flagged \\Deleted, not expunged");
+    }
+    Ok(())
+}
+
+/// The account's trash, from `LIST`. The RFC 6154 `\Trash` attribute is
+/// authoritative; name heuristics (`Trash`, `Corbeille`, `Deleted Items`…) are
+/// only a fallback for servers without SPECIAL-USE, and nothing is invented
+/// when neither finds a mailbox.
+fn guess_trash_name(session: &mut ImapSession) -> Option<String> {
+    let names = session.list(Some(""), Some("*")).ok()?;
+    let entries: Vec<(String, Option<String>, Vec<String>)> = names
+        .iter()
+        .map(|entry| {
+            (
+                entry.name().to_string(),
+                entry.delimiter().map(str::to_string),
+                entry
+                    .attributes()
+                    .iter()
+                    .map(|a| format!("{a:?}").to_ascii_lowercase())
+                    .collect(),
+            )
+        })
+        .collect();
+    pick_trash_mailbox(&entries)
+}
+
+/// Pure half of [`guess_trash_name`]: `(name, delimiter, lowercased attrs)`.
+fn pick_trash_mailbox(entries: &[(String, Option<String>, Vec<String>)]) -> Option<String> {
+    let selectable = || {
+        entries
+            .iter()
+            .filter(|(_, _, attrs)| !attrs.iter().any(|a| a.contains("noselect")))
+    };
+    selectable()
+        .find(|(_, _, attrs)| attrs.iter().any(|a| a.contains("trash")))
+        .or_else(|| {
+            selectable().find(|(name, delimiter, attrs)| {
+                well_known_for(name, delimiter.as_deref(), attrs)
+                    .is_some_and(|known| known.alias == "deleteditems")
+            })
+        })
+        .map(|(name, _, _)| name.clone())
 }
 
 pub async fn set_flag(auth: &ImapAuth<'_>, id: &str, flagged: bool) -> Result<()> {
@@ -832,13 +1048,16 @@ pub(super) fn search_keys(query: &SearchQuery) -> Vec<String> {
     if let Some(after) = query.after {
         keys.push(format!("SINCE {}", after.format("%d-%b-%Y")));
     }
-    if keys.is_empty() {
-        // `SEARCH` needs at least one key; ALL keeps a flag-only query
-        // meaningful instead of erroring.
-        keys.push("ALL".into());
-    }
+    // Messages flagged `\\Deleted` are hidden everywhere (see
+    // `message_header_from_fetch`); excluding them here keeps them from using
+    // up the result limit. It also gives `SEARCH` its mandatory key when the
+    // query has no other.
+    keys.push(NOT_DELETED.into());
     keys
 }
+
+/// SEARCH key excluding what a move without UIDPLUS leaves behind.
+pub(super) const NOT_DELETED: &str = "NOT DELETED";
 
 /// Mailboxes an account-wide search walks before giving up.
 ///
@@ -855,8 +1074,7 @@ pub async fn search(
     folder_id: Option<Option<&str>>,
     limit: usize,
 ) -> Result<Vec<MessageHeader>> {
-    // IMAP joins keys with an implicit AND.
-    let keys = search_keys(query).join(" ");
+    let keys = search_command(&search_keys(query));
     let scoped: Option<Vec<String>> = folder_id.map(|folder| resolve_folders(folder));
     with_session(auth, move |session| {
         let folders = match scoped {
@@ -937,7 +1155,10 @@ pub async fn list_from_sender(
             || tr!("technical-operation-failed", { operation: format!("SELECT {folder}") }),
         )?;
         let uids = session
-            .uid_search(search_key("FROM", &needle))
+            .uid_search(search_command(&[
+                search_key("FROM", &needle),
+                NOT_DELETED.to_string(),
+            ]))
             .context(tr!("technical-operation-failed", { operation: "UID SEARCH FROM" }))?;
         if uids.is_empty() {
             return Ok(Vec::new());
@@ -972,12 +1193,15 @@ pub async fn list_from_sender(
 /// does not fail loudly: the server would answer a differently-parenthesized
 /// query, hence the test pinning it.
 fn thread_search_keys(conversation_id: &str) -> String {
-    format!(
-        "OR OR {} {} {}",
-        search_key("HEADER MESSAGE-ID", conversation_id),
-        search_key("HEADER REFERENCES", conversation_id),
-        search_key("HEADER IN-REPLY-TO", conversation_id),
-    )
+    search_command(&[
+        format!(
+            "OR OR {} {} {}",
+            search_key("HEADER MESSAGE-ID", conversation_id),
+            search_key("HEADER REFERENCES", conversation_id),
+            search_key("HEADER IN-REPLY-TO", conversation_id),
+        ),
+        NOT_DELETED.to_string(),
+    ])
 }
 
 /// Mailboxes a thread lookup visits. A conversation lives in the inbox and
@@ -1097,6 +1321,12 @@ pub(super) fn message_header_from_fetch(
     f: &imap::types::Fetch,
 ) -> Option<MessageHeader> {
     let uid = f.uid?;
+    // Every listing goes through here. A `\\Deleted` message is what a move
+    // or a delete leaves in its source mailbox on a server without UIDPLUS
+    // (see `purge_uid`), or another client's pending deletion: not shown.
+    if is_flagged_deleted(f.flags()) {
+        return None;
+    }
     let header_bytes = f.header()?;
     let parsed = MessageParser::default().parse_headers(header_bytes)?;
     let subject = parsed.subject().unwrap_or("").to_string();
@@ -1125,10 +1355,10 @@ pub(super) fn message_header_from_fetch(
         preview: String::new(),
         is_read,
         is_flagged,
-        // Listing path doesn't fetch BODYSTRUCTURE, so we can't tell at this
-        // stage. The icon will appear once the message is opened and we
-        // backfill `has_attachments` on the displayed row.
-        has_attachments: false,
+        // Listing path doesn't fetch BODYSTRUCTURE: the top-level
+        // Content-Type is the estimate, corrected by `get_message` once the
+        // message is opened and its parts are in hand.
+        has_attachments: headers_suggest_attachments(&parsed),
         tags: custom_flags(f),
         last_action: last_action_from_flags(f.flags()),
         // IMAP flags are not timestamped.
@@ -1136,6 +1366,54 @@ pub(super) fn message_header_from_fetch(
         conversation_id: derived_conversation_id(&parsed),
         internet_message_id: parsed.message_id().map(str::to_string),
     })
+}
+
+fn is_flagged_deleted(flags: &[imap::types::Flag<'_>]) -> bool {
+    flags
+        .iter()
+        .any(|flag| matches!(flag, imap::types::Flag::Deleted))
+}
+
+/// Whether a message whose *headers* alone are known carries attachments.
+///
+/// `multipart/mixed` is the MIME container for "a body plus files" (RFC 2046
+/// §5.1.3), a top-level `attachment` disposition is a file by definition, and
+/// a single-part message that is neither text nor a container is itself the
+/// file (a scanner sending a bare PDF). `multipart/alternative`/`related` —
+/// text, HTML and their inline images — are not. Imprecise at the edges (a
+/// signed message hides its structure, some mailers use `mixed` for inline
+/// content), which is why an opened message recomputes it from its parts.
+fn headers_suggest_attachments(parsed: &mail_parser::Message<'_>) -> bool {
+    let disposition_attachment = parsed
+        .content_disposition()
+        .is_some_and(|disposition| disposition.ctype().eq_ignore_ascii_case("attachment"));
+    let content_type = parsed
+        .content_type()
+        .map(|ct| (ct.ctype().to_string(), ct.subtype().map(str::to_string)));
+    content_type_suggests_attachments(
+        content_type
+            .as_ref()
+            .map(|(main, sub)| (main.as_str(), sub.as_deref())),
+        disposition_attachment,
+    )
+}
+
+fn content_type_suggests_attachments(
+    content_type: Option<(&str, Option<&str>)>,
+    disposition_attachment: bool,
+) -> bool {
+    if disposition_attachment {
+        return true;
+    }
+    let Some((main, sub)) = content_type else {
+        return false;
+    };
+    let main = main.to_ascii_lowercase();
+    match main.as_str() {
+        "multipart" => sub.is_some_and(|sub| sub.eq_ignore_ascii_case("mixed")),
+        "text" | "message" => false,
+        _ => true,
+    }
 }
 
 /// First entry of a `Message-ID` list header, brackets already stripped by
@@ -1579,10 +1857,7 @@ mod folder_name_tests {
 
     #[test]
     fn non_ascii_search_uses_utf8_literal_octet_length() {
-        assert_eq!(
-            search_key("TEXT", "réunion"),
-            "CHARSET UTF-8 TEXT {8}\r\nréunion"
-        );
+        assert_eq!(search_key("TEXT", "réunion"), "TEXT {8}\r\nréunion");
         assert_eq!(search_key("TEXT", "C#"), "TEXT \"C#\"");
     }
 
@@ -1805,7 +2080,7 @@ fn well_known_move_alias(target: &str) -> Option<(&'static str, gpui_kit::Shared
 }
 
 /// Move a message to another mailbox. Tries `UID MOVE` (RFC 6851) and falls
-/// back to copy + `\Deleted` + EXPUNGE on servers that don't advertise it.
+/// back to `UID COPY` + `\Deleted` + `UID EXPUNGE` (see [`relocate_uid`]).
 /// IMAP changes the UID across mailboxes, so on success we return the freshly
 /// minted message id (`<encoded_target>:<new_uid>`) — but only when MOVE
 /// surfaces it; the COPY+EXPUNGE fallback gives no easy way to learn the new
@@ -1840,23 +2115,7 @@ pub async fn move_message(
         session.select(&folder).with_context(
             || tr!("technical-operation-failed", { operation: format!("SELECT {folder}") }),
         )?;
-        let mv = session.uid_mv(uid.to_string(), &target_for_session);
-        if mv.is_err() {
-            session
-                .uid_copy(uid.to_string(), &target_for_session)
-                .with_context(|| {
-                    tr!("technical-operation-failed", {
-                        operation: format!("UID COPY → {target_for_session}")
-                    })
-                })?;
-            session
-                .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
-                .context(tr!("technical-operation-failed", { operation: "UID STORE \\Deleted" }))?;
-            session
-                .expunge()
-                .context(tr!("technical-operation-failed", { operation: "EXPUNGE" }))?;
-        }
-        Ok(())
+        relocate_uid(session, uid, &target_for_session)
     })
     .await?;
     // We didn't track the new UID; the caller will reload the destination
@@ -1866,9 +2125,15 @@ pub async fn move_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{derived_conversation_id, search_keys, thread_search_keys, LISTING_FETCH};
+    use super::{
+        content_type_suggests_attachments, derived_conversation_id, headers_suggest_attachments,
+        is_flagged_deleted, pick_trash_mailbox, relocate_uid, search_command, search_keys,
+        sequence_set, thread_search_keys, visible_sequence_window, ServerCaps, UidMailbox,
+        LISTING_FETCH, MESSAGE_FETCH,
+    };
     use crate::search_query::SearchQuery;
     use mail_parser::MessageParser;
+    use std::collections::HashSet;
 
     fn conversation_of(headers: &str) -> Option<String> {
         let parsed = MessageParser::default()
@@ -1952,7 +2217,7 @@ mod tests {
             keys,
             "OR OR HEADER MESSAGE-ID \"root@example.test\" \
              HEADER REFERENCES \"root@example.test\" \
-             HEADER IN-REPLY-TO \"root@example.test\""
+             HEADER IN-REPLY-TO \"root@example.test\" NOT DELETED"
         );
     }
 
@@ -1990,13 +2255,295 @@ mod tests {
     #[test]
     fn attachment_operator_is_dropped_rather_than_faked() {
         let keys = search_keys(&SearchQuery::parse("avec:pj"));
-        assert_eq!(keys, vec!["ALL".to_string()]);
+        assert_eq!(keys, vec!["NOT DELETED".to_string()]);
     }
 
     /// A non-ASCII term must go out as a literal, not inside a quoted string.
     #[test]
     fn non_ascii_terms_use_a_literal() {
         let keys = search_keys(&SearchQuery::parse("réunion"));
-        assert!(keys[0].starts_with("CHARSET UTF-8 TEXT {"), "{keys:?}");
+        assert!(keys[0].starts_with("TEXT {"), "{keys:?}");
+    }
+
+    /// RFC 3501 allows one charset specification, at the head of the
+    /// command. With it on every key, two non-ASCII terms were a syntax error
+    /// and one after an ASCII key was misplaced.
+    #[test]
+    fn charset_is_declared_once_at_the_head_of_the_command() {
+        let command = search_command(&search_keys(&SearchQuery::parse("de:alice réunion")));
+        assert_eq!(
+            command,
+            "CHARSET UTF-8 FROM \"alice\" TEXT {8}\r\nréunion NOT DELETED"
+        );
+
+        let command = search_command(&search_keys(&SearchQuery::parse("réunion café")));
+        assert_eq!(
+            command,
+            "CHARSET UTF-8 TEXT {8}\r\nréunion TEXT {5}\r\ncafé NOT DELETED"
+        );
+        assert_eq!(command.matches("CHARSET").count(), 1);
+    }
+
+    /// An all-ASCII query asks for no charset at all.
+    #[test]
+    fn ascii_search_declares_no_charset() {
+        let command = search_command(&search_keys(&SearchQuery::parse("de:alice facture")));
+        assert_eq!(command, "FROM \"alice\" TEXT \"facture\" NOT DELETED");
+    }
+
+    /// A non-ASCII thread root makes the three alternatives literals, still
+    /// under a single charset.
+    #[test]
+    fn thread_search_with_a_non_ascii_root_declares_the_charset_once() {
+        let keys = thread_search_keys("réu@example.test");
+        assert!(
+            keys.starts_with("CHARSET UTF-8 OR OR HEADER MESSAGE-ID {"),
+            "{keys:?}"
+        );
+        assert_eq!(keys.matches("CHARSET").count(), 1);
+    }
+
+    #[test]
+    fn content_type_estimates_attachments() {
+        assert!(content_type_suggests_attachments(
+            Some(("multipart", Some("mixed"))),
+            false
+        ));
+        assert!(content_type_suggests_attachments(
+            Some(("application", Some("pdf"))),
+            false
+        ));
+        assert!(content_type_suggests_attachments(
+            Some(("text", Some("plain"))),
+            true
+        ));
+        assert!(!content_type_suggests_attachments(
+            Some(("multipart", Some("alternative"))),
+            false
+        ));
+        assert!(!content_type_suggests_attachments(
+            Some(("multipart", Some("related"))),
+            false
+        ));
+        assert!(!content_type_suggests_attachments(
+            Some(("text", Some("html"))),
+            false
+        ));
+        assert!(!content_type_suggests_attachments(None, false));
+    }
+
+    /// The listing FETCH must carry the Content-Type the estimate reads, and a
+    /// listed `multipart/mixed` header must come out with the paperclip — the
+    /// `avec:pj` filter re-applied locally drops everything otherwise.
+    #[test]
+    fn listed_headers_estimate_attachments_from_content_type() {
+        assert!(LISTING_FETCH.contains("CONTENT-TYPE"), "{LISTING_FETCH}");
+        let parsed = MessageParser::default()
+            .parse_headers(
+                "From: Contact A <contact-a@example.test>\r\n\
+                 Subject: Rapport\r\n\
+                 Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n"
+                    .as_bytes(),
+            )
+            .expect("synthetic headers parse");
+        assert!(headers_suggest_attachments(&parsed));
+        let parsed = MessageParser::default()
+            .parse_headers(
+                "From: Contact A <contact-a@example.test>\r\n\
+                 Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n"
+                    .as_bytes(),
+            )
+            .expect("synthetic headers parse");
+        assert!(!headers_suggest_attachments(&parsed));
+    }
+
+    /// Opening a message must not set `\Seen` behind the user's back.
+    #[test]
+    fn opening_a_message_peeks() {
+        assert!(MESSAGE_FETCH.contains("BODY.PEEK[]"), "{MESSAGE_FETCH}");
+        assert!(!MESSAGE_FETCH.contains("RFC822"), "{MESSAGE_FETCH}");
+    }
+
+    /// Records the commands a relocation sends, and fails the ones asked to.
+    #[derive(Default)]
+    struct Recorder {
+        caps: Option<ServerCaps>,
+        fail: Vec<&'static str>,
+        sent: Vec<String>,
+    }
+
+    impl Recorder {
+        fn with(caps: Option<ServerCaps>, fail: &[&'static str]) -> Self {
+            Self {
+                caps,
+                fail: fail.to_vec(),
+                sent: Vec::new(),
+            }
+        }
+
+        fn run(&mut self, command: &'static str, detail: String) -> anyhow::Result<()> {
+            self.sent.push(detail);
+            if self.fail.contains(&command) {
+                anyhow::bail!("{command} refused");
+            }
+            Ok(())
+        }
+    }
+
+    impl UidMailbox for Recorder {
+        fn server_caps(&mut self) -> Option<ServerCaps> {
+            self.caps
+        }
+        fn uid_move(&mut self, uid: u32, target: &str) -> anyhow::Result<()> {
+            self.run("MOVE", format!("UID MOVE {uid} {target}"))
+        }
+        fn uid_copy(&mut self, uid: u32, target: &str) -> anyhow::Result<()> {
+            self.run("COPY", format!("UID COPY {uid} {target}"))
+        }
+        fn uid_mark_deleted(&mut self, uid: u32) -> anyhow::Result<()> {
+            self.run("STORE", format!("UID STORE {uid} +FLAGS (\\Deleted)"))
+        }
+        fn uid_expunge(&mut self, uid: u32) -> anyhow::Result<()> {
+            self.run("EXPUNGE", format!("UID EXPUNGE {uid}"))
+        }
+    }
+
+    const FULL: ServerCaps = ServerCaps {
+        mv: true,
+        uidplus: true,
+    };
+    const BARE: ServerCaps = ServerCaps {
+        mv: false,
+        uidplus: false,
+    };
+
+    #[test]
+    fn relocation_uses_move_when_available() {
+        let mut session = Recorder::with(Some(FULL), &[]);
+        relocate_uid(&mut session, 7, "Corbeille").unwrap();
+        assert_eq!(session.sent, vec!["UID MOVE 7 Corbeille"]);
+    }
+
+    /// A failed MOVE used to fall into `\Deleted` + EXPUNGE with no COPY:
+    /// the message was destroyed instead of trashed.
+    #[test]
+    fn failed_move_copies_before_removing_and_expunges_only_that_uid() {
+        let mut session = Recorder::with(Some(FULL), &["MOVE"]);
+        relocate_uid(&mut session, 7, "Trash").unwrap();
+        assert_eq!(
+            session.sent,
+            vec![
+                "UID MOVE 7 Trash",
+                "UID COPY 7 Trash",
+                "UID STORE 7 +FLAGS (\\Deleted)",
+                "UID EXPUNGE 7",
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_copy_leaves_the_message_untouched() {
+        let mut session = Recorder::with(Some(BARE), &["COPY"]);
+        assert!(relocate_uid(&mut session, 7, "Trash").is_err());
+        assert_eq!(session.sent, vec!["UID COPY 7 Trash"]);
+    }
+
+    /// Without UIDPLUS there is no scoped expunge; a plain one would purge
+    /// what other clients flagged, so the message is only flagged.
+    #[test]
+    fn without_uidplus_the_message_is_flagged_but_never_expunged() {
+        let mut session = Recorder::with(Some(BARE), &[]);
+        relocate_uid(&mut session, 7, "Archives").unwrap();
+        assert_eq!(
+            session.sent,
+            vec!["UID COPY 7 Archives", "UID STORE 7 +FLAGS (\\Deleted)"]
+        );
+    }
+
+    /// Unknown capabilities: MOVE is attempted, and the fallback still never
+    /// expunges.
+    #[test]
+    fn unknown_capabilities_try_move_then_copy_without_expunge() {
+        let mut session = Recorder::with(None, &["MOVE"]);
+        relocate_uid(&mut session, 7, "Trash").unwrap();
+        assert_eq!(
+            session.sent,
+            vec![
+                "UID MOVE 7 Trash",
+                "UID COPY 7 Trash",
+                "UID STORE 7 +FLAGS (\\Deleted)",
+            ]
+        );
+    }
+
+    /// `skip` counts *shown* messages (the page cursor carries the length of
+    /// the previous page), so flagged ones must be stepped over, not counted:
+    /// otherwise page 2 would repeat or drop messages.
+    #[test]
+    fn deleted_messages_neither_show_nor_shift_the_pages() {
+        let deleted: HashSet<u32> = [9, 7].into();
+        // 10 messages, 9 and 7 flagged: visible newest first = 10 8 6 5 4 3 2 1.
+        assert_eq!(visible_sequence_window(10, &deleted, 0, 3), vec![10, 8, 6]);
+        assert_eq!(visible_sequence_window(10, &deleted, 3, 3), vec![5, 4, 3]);
+        assert_eq!(visible_sequence_window(10, &deleted, 6, 3), vec![2, 1]);
+        assert!(visible_sequence_window(10, &deleted, 8, 3).is_empty());
+        assert_eq!(sequence_set(&[10, 8, 6, 5, 4]), "4:6,8,10");
+        assert_eq!(sequence_set(&[3]), "3");
+    }
+
+    #[test]
+    fn every_search_excludes_flagged_messages() {
+        let keys = search_keys(&SearchQuery::parse("facture"));
+        assert!(keys.contains(&"NOT DELETED".to_string()), "{keys:?}");
+        assert!(thread_search_keys("root@example.test").ends_with(" NOT DELETED"));
+        assert!(is_flagged_deleted(&[
+            imap::types::Flag::Seen,
+            imap::types::Flag::Deleted
+        ]));
+        assert!(!is_flagged_deleted(&[imap::types::Flag::Seen]));
+    }
+
+    fn entry(name: &str, attrs: &[&str]) -> (String, Option<String>, Vec<String>) {
+        (
+            name.to_string(),
+            Some("/".to_string()),
+            attrs.iter().map(|a| a.to_ascii_lowercase()).collect(),
+        )
+    }
+
+    /// The `\Trash` attribute wins over a mailbox that merely has a trashy
+    /// name, wherever it sits in the listing.
+    #[test]
+    fn trash_attribute_beats_name_heuristics() {
+        let entries = vec![
+            entry("INBOX", &[]),
+            entry("Deleted Messages", &[]),
+            entry("Corbeille", &["Trash"]),
+        ];
+        assert_eq!(pick_trash_mailbox(&entries).as_deref(), Some("Corbeille"));
+    }
+
+    #[test]
+    fn trash_falls_back_on_localized_names() {
+        let entries = vec![entry("INBOX", &[]), entry("Projets/Corbeille", &[])];
+        assert_eq!(
+            pick_trash_mailbox(&entries).as_deref(),
+            Some("Projets/Corbeille")
+        );
+        let entries = vec![entry("INBOX", &[]), entry("Deleted Items", &[])];
+        assert_eq!(
+            pick_trash_mailbox(&entries).as_deref(),
+            Some("Deleted Items")
+        );
+    }
+
+    /// No trash means no deletion — never an invented `Trash` the server
+    /// would refuse, which used to drop the message into the destructive path.
+    #[test]
+    fn no_trash_is_reported_rather_than_invented() {
+        let entries = vec![entry("INBOX", &[]), entry("Projets", &[])];
+        assert_eq!(pick_trash_mailbox(&entries), None);
+        let entries = vec![entry("Trash", &["NoSelect"])];
+        assert_eq!(pick_trash_mailbox(&entries), None);
     }
 }

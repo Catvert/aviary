@@ -276,18 +276,166 @@ pub(crate) fn build_rfc822(
         .context(tr!("mail-error-build-multipart-mixed"))
 }
 
+/// Plain-text alternative of an outgoing HTML body (`text/plain` part of the
+/// `multipart/alternative` Gmail and SMTP send).
+///
+/// Parsed with `html5ever` (through `scraper`) rather than by stripping angle
+/// brackets: that decodes every entity the way a browser would — `&amp;`,
+/// `&lt;`, `&#233;`, `&#x2014;` — and lets whole subtrees the recipient never
+/// sees (`<head>`, `<style>`, `<script>`, `<title>`) be dropped with their
+/// content, which is where a pasted signature's CSS used to leak into the
+/// text part. Block elements become line breaks, list items `- ` bullets,
+/// and runs of blank lines are folded into one.
 fn strip_html(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for character in html.chars() {
-        match character {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(character),
-            _ => {}
+    let document = scraper::Html::parse_document(html);
+    let mut text = PlainText::default();
+    text.walk(document.root_element());
+    text.finish()
+}
+
+#[derive(Default)]
+struct PlainText {
+    out: String,
+    /// Depth of `<pre>` ancestors: whitespace is kept verbatim inside.
+    pre: usize,
+    /// Depth of `<ul>`/`<ol>` ancestors, to indent nested bullets.
+    lists: usize,
+    /// A bullet was just written: the `<p>` or `<div>` a client wraps an
+    /// item's text in must not push that text onto the next line.
+    bullet_pending: bool,
+    /// Depth of `<li>` ancestors: a paragraph inside an item is one line of
+    /// the list, not a block surrounded by blank lines.
+    items: usize,
+}
+
+impl PlainText {
+    fn walk(&mut self, element: scraper::ElementRef<'_>) {
+        for child in element.children() {
+            match child.value() {
+                scraper::Node::Text(text) => self.push_text(text),
+                scraper::Node::Element(_) => {
+                    if let Some(child) = scraper::ElementRef::wrap(child) {
+                        self.element(child);
+                    }
+                }
+                _ => {}
+            }
         }
     }
-    out
+
+    fn element(&mut self, element: scraper::ElementRef<'_>) {
+        let name = element.value().name();
+        match name {
+            "head" | "style" | "script" | "title" | "template" | "noscript" => {}
+            "br" => self.out.push('\n'),
+            "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                self.paragraph_break();
+                self.walk(element);
+                self.paragraph_break();
+            }
+            "ul" | "ol" => {
+                self.line_break();
+                self.lists += 1;
+                self.walk(element);
+                self.lists -= 1;
+                self.line_break();
+            }
+            "li" => {
+                self.line_break();
+                for _ in 1..self.lists.max(1) {
+                    self.out.push_str("  ");
+                }
+                self.out.push_str("- ");
+                self.bullet_pending = true;
+                self.items += 1;
+                self.walk(element);
+                self.items -= 1;
+                self.bullet_pending = false;
+                self.line_break();
+            }
+            "pre" => {
+                self.line_break();
+                self.pre += 1;
+                self.walk(element);
+                self.pre -= 1;
+                self.line_break();
+            }
+            "td" | "th" => {
+                if !self.out.is_empty() && !self.out.ends_with(['\n', ' ', '\t']) {
+                    self.out.push('\t');
+                }
+                self.walk(element);
+            }
+            "div" | "tr" | "table" | "blockquote" | "hr" | "section" | "article" | "header"
+            | "footer" | "address" | "center" | "dl" | "dt" | "dd" | "figure" | "tbody"
+            | "thead" | "tfoot" => {
+                self.line_break();
+                self.walk(element);
+                self.line_break();
+            }
+            _ => self.walk(element),
+        }
+    }
+
+    /// Source whitespace collapses to one space, as it renders, except inside
+    /// `<pre>`. A non-breaking space is not whitespace here, so `&nbsp;`
+    /// spacing survives and is turned into a plain space by `finish`.
+    fn push_text(&mut self, text: &str) {
+        if self.pre > 0 {
+            if !text.is_empty() {
+                self.bullet_pending = false;
+            }
+            self.out.push_str(text);
+            return;
+        }
+        for character in text.chars() {
+            if character.is_ascii_whitespace() {
+                if !self.out.is_empty() && !self.out.ends_with([' ', '\n', '\t']) {
+                    self.out.push(' ');
+                }
+            } else {
+                self.bullet_pending = false;
+                self.out.push(character);
+            }
+        }
+    }
+
+    fn line_break(&mut self) {
+        if self.bullet_pending {
+            return;
+        }
+        if !self.out.is_empty() && !self.out.ends_with('\n') {
+            self.out.push('\n');
+        }
+    }
+
+    fn paragraph_break(&mut self) {
+        if self.bullet_pending {
+            return;
+        }
+        self.line_break();
+        if self.items == 0 && !self.out.is_empty() && !self.out.ends_with("\n\n") {
+            self.out.push('\n');
+        }
+    }
+
+    fn finish(self) -> String {
+        let mut result = String::with_capacity(self.out.len());
+        let mut blank_run = 0usize;
+        for line in self.out.replace('\u{a0}', " ").lines() {
+            let line = line.trim_end();
+            if line.is_empty() {
+                blank_run += 1;
+                continue;
+            }
+            if !result.is_empty() {
+                result.push_str(if blank_run > 0 { "\n\n" } else { "\n" });
+            }
+            blank_run = 0;
+            result.push_str(line);
+        }
+        result
+    }
 }
 
 /// Borrowed snapshot of an IMAP+SMTP account's runtime credentials. The
@@ -925,6 +1073,56 @@ fn graph_outgoing<'a>(msg: &'a OutgoingMessage<'a>) -> graph::OutgoingMessage<'a
         body_is_html: msg.body_is_html,
         attachments: msg.attachments,
         files: msg.files,
+    }
+}
+
+#[cfg(test)]
+mod strip_html_tests {
+    use super::strip_html;
+
+    #[test]
+    fn entities_are_decoded() {
+        assert_eq!(strip_html("<p>Tom &amp; Jerry</p>"), "Tom & Jerry");
+        assert_eq!(strip_html("a &lt; b &gt; c"), "a < b > c");
+        assert_eq!(
+            strip_html("caf&eacute; &#233;t&#xE9; &quot;x&quot; &#x2014; a&nbsp;b"),
+            "café été \"x\" — a b"
+        );
+    }
+
+    #[test]
+    fn head_style_and_script_are_dropped_with_their_content() {
+        let html = "<html><head><title>Titre</title><style>p { color: red; }</style></head>\
+                    <body><p>Bonjour</p><script>alert(1)</script>\
+                    <div class=\"aviary-signature\"><style>.sig { font: 10px Arial; }</style>\
+                    <p>Contact A</p></div></body></html>";
+        assert_eq!(strip_html(html), "Bonjour\n\nContact A");
+    }
+
+    #[test]
+    fn blocks_become_lines_and_blank_runs_fold() {
+        let html = "<p>Premier</p>\n\n<p>Second<br>ligne</p><p></p><p></p>\
+                    <div>Troisième</div><div>Quatrième</div><h2>Titre</h2>fin";
+        assert_eq!(
+            strip_html(html),
+            "Premier\n\nSecond\nligne\n\nTroisième\nQuatrième\n\nTitre\n\nfin"
+        );
+    }
+
+    #[test]
+    fn list_items_become_bullets() {
+        let html = "<p>Liste :</p><ul><li>un</li><li><p>deux</p></li>\
+                    <li>trois<ol><li>imbriqué</li></ol></li></ul><p>Après</p>";
+        assert_eq!(
+            strip_html(html),
+            "Liste :\n\n- un\n- deux\n- trois\n  - imbriqué\n\nAprès"
+        );
+    }
+
+    #[test]
+    fn source_whitespace_collapses_but_pre_is_kept() {
+        let html = "<p>  un\n   deux  </p><pre>a\n  b</pre>";
+        assert_eq!(strip_html(html), "un deux\n\na\n  b");
     }
 }
 

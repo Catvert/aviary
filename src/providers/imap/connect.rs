@@ -59,8 +59,17 @@ pub fn open_session(auth: &ImapAuth<'_>) -> Result<ImapSession> {
         })?;
     let session = client
         .login(auth.imap_username, auth.password)
-        .map_err(|(e, _client)| anyhow::anyhow!(tr!("imap-error-login", { error: e })))?;
+        .map_err(|(e, _client)| login_error(e))?;
     Ok(session)
+}
+
+/// A refused or interrupted LOGIN, with the `imap::Error` kept as the cause
+/// rather than flattened into the message: `runtime::operations` walks the
+/// chain to tell a dropped connection (retry) from a rejected password (don't).
+/// The cause is rendered by `{:#}`, which is how the runtime reports it, so
+/// the catalog entry no longer embeds it.
+fn login_error(error: imap::Error) -> anyhow::Error {
+    anyhow::Error::new(error).context(tr!("imap-error-login"))
 }
 
 /// Retry a failed connection once if the keyring password changed after the
@@ -190,5 +199,30 @@ impl OwnedAuth {
             smtp_username: &self.smtp_username,
             password: &self.password,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::login_error;
+
+    /// The transport failure must stay reachable in the chain — that is what
+    /// the outbox retry policy downcasts — and appear once in the report.
+    #[test]
+    fn login_failure_keeps_its_cause_in_the_chain() {
+        let error = login_error(imap::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset by peer",
+        )));
+        assert!(error.chain().any(|cause| matches!(
+            cause.downcast_ref::<imap::Error>(),
+            Some(imap::Error::Io(io)) if io.kind() == std::io::ErrorKind::ConnectionReset
+        )));
+        let rendered = format!("{error:#}");
+        assert_eq!(
+            rendered.matches("connection reset by peer").count(),
+            1,
+            "{rendered}"
+        );
     }
 }

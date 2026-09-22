@@ -37,7 +37,7 @@ pub async fn send_reply(
 /// mailbox (RFC 6154 `\Drafts` attribute, then a name-based fallback) and
 /// uploads the formatted RFC822 with `\Draft \Seen` flags. When `replace_id`
 /// is `Some` (encoded as `<folder>:<uid>` like every IMAP message id), the
-/// old draft is `\Deleted`+EXPUNGE'd after the new one lands so the user
+/// old draft is `\Deleted` + `UID EXPUNGE`'d after the new one lands so the user
 /// doesn't accumulate duplicates while iterating.
 ///
 /// Always returns `None` for the new id: APPENDUID (RFC 4315 UIDPLUS) is
@@ -96,17 +96,19 @@ fn drop_old_draft(session: &mut ImapSession, folder: &str, uid: u32) -> Result<(
     session.select(folder).with_context(
         || tr!("technical-operation-failed", { operation: format!("SELECT {folder}") }),
     )?;
-    session
-        .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
-        .context(tr!("technical-operation-failed", { operation: "UID STORE \\Deleted" }))?;
-    session
-        .expunge()
-        .context(tr!("technical-operation-failed", { operation: "EXPUNGE" }))?;
-    Ok(())
+    remove_uid(session, uid)
+}
+
+/// Hard-removes one draft, scoped to its UID: a plain `EXPUNGE` would also
+/// purge whatever other clients flagged `\Deleted` in the Drafts mailbox.
+fn remove_uid(session: &mut ImapSession, uid: u32) -> Result<()> {
+    let caps = super::messages::ServerCaps::query(session);
+    super::messages::purge_uid(session, uid, caps)
 }
 
 /// Delete an IMAP draft by its message id (`<encoded folder>:<uid>`). Hard
-/// remove (`\Deleted` + EXPUNGE) rather than moving to Trash — once a draft
+/// remove (`\Deleted` + `UID EXPUNGE` when the server has UIDPLUS, the
+/// flag alone otherwise) rather than moving to Trash — once a draft
 /// has been sent we don't want a second copy lingering in Deleted Items.
 pub async fn delete_draft(auth: &ImapAuth<'_>, draft_id: &str) -> Result<()> {
     let Some((folder, uid)) = parse_old_id(draft_id) else {
@@ -116,13 +118,7 @@ pub async fn delete_draft(auth: &ImapAuth<'_>, draft_id: &str) -> Result<()> {
         session.select(&folder).with_context(
             || tr!("technical-operation-failed", { operation: format!("SELECT {folder}") }),
         )?;
-        session
-            .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
-            .context(tr!("technical-operation-failed", { operation: "UID STORE \\Deleted" }))?;
-        session
-            .expunge()
-            .context(tr!("technical-operation-failed", { operation: "EXPUNGE" }))?;
-        Ok(())
+        remove_uid(session, uid)
     })
     .await
 }

@@ -64,9 +64,11 @@ pub struct MessageHeader {
     pub is_read: bool,
     pub is_flagged: bool,
     /// True if the message has any non-inline attachments. Surfaced from the
-    /// listing endpoint (Graph: `hasAttachments`; Gmail: derived from the
-    /// payload parts; IMAP: derived from BODYSTRUCTURE) so the inbox row can
-    /// show a paperclip icon without fetching the full body.
+    /// listing endpoint (Graph: `hasAttachments`; Gmail: a parallel
+    /// `has:attachment` query, windowed on the page's dates beyond page one;
+    /// IMAP: estimated from `Content-Type`/`Content-Disposition`, corrected
+    /// when the message is opened) so the inbox row can show a paperclip icon
+    /// without fetching the full body.
     pub has_attachments: bool,
     /// Tag identifiers applied to this message, in the same per-provider
     /// format as `Message::tags` (Graph: category display name, Gmail: label
