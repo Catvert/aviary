@@ -326,7 +326,10 @@ impl AviaryApp {
                         .on_click(move |_, _, cx| {
                             entity.update(cx, |this, cx| {
                                 this.pending_forward_id = None;
-                                this.pending_reply_id = Some(mid.clone());
+                                this.pending_reply_id = Some(crate::model::MessageRef {
+                                    account_id: aid.clone(),
+                                    id: mid.clone(),
+                                });
                                 this.open_message(aid.clone(), mid.clone(), cx);
                             });
                         }),
@@ -342,7 +345,10 @@ impl AviaryApp {
                         .on_click(move |_, _, cx| {
                             entity.update(cx, |this, cx| {
                                 this.pending_reply_id = None;
-                                this.pending_forward_id = Some(mid.clone());
+                                this.pending_forward_id = Some(crate::model::MessageRef {
+                                    account_id: aid.clone(),
+                                    id: mid.clone(),
+                                });
                                 this.open_message(aid.clone(), mid.clone(), cx);
                             });
                         }),

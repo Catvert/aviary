@@ -2,10 +2,13 @@
 //!
 //! Every mutation the user can take back — move, delete, archive, tag,
 //! read/flagged, kanban move, and sending itself — goes through
-//! `schedule_action`: the UI state is updated optimistically, the commands are
-//! held for `action_delay_secs` (`send_delay_secs` for a send) behind a
-//! notification whose "cancel" button restores what the optimistic update
-//! removed, and only then are they submitted to the durable outbox.
+//! `schedule_action`: the UI state is updated optimistically and the commands
+//! are written to the durable outbox right away, due in `action_delay_secs`
+//! (`send_delay_secs` for a send), behind a notification whose "cancel"
+//! button takes the rows back (`Cmd::CancelScheduledOperations`) and restores
+//! what the optimistic update removed. Because the rows are on disk from the
+//! start, closing Aviary inside the window no longer loses the action: it runs
+//! at the next drain.
 //!
 //! The `PendingCancelEffect` of an action is exactly what undo has to put
 //! back, which is why the optimistic removals live here too.
@@ -13,8 +16,9 @@
 use crate::model::{AccountId, MessageHeader, MessageRef};
 use crate::runtime::{Cmd, MessageMutationKind};
 use crate::ui::app::{
-    AviaryApp, BulkDeferral, BulkReply, MessageState, OptimisticMessageRemoval,
-    OptimisticSelection, PendingAction, PendingActionNotification, PendingCancelEffect,
+    AviaryApp, BulkCompletions, BulkDeferral, BulkKey, BulkReply, MessageState,
+    OptimisticMessageRemoval, OptimisticSelection, PendingAction, PendingActionNotification,
+    PendingCancelEffect,
 };
 use crate::ui::state::SenderHistoryState;
 use gpui_kit::component::{
@@ -56,6 +60,25 @@ fn unread_conversation_members(
         .collect()
 }
 
+/// Claims and arms one batch; `None` as the completion copy keeps it silent
+/// unless something fails. Split out of `register_bulk_completion` so the
+/// aggregation can be exercised without a gpui context.
+fn arm_bulk_completion(
+    completions: &mut BulkCompletions,
+    references: &[BulkKey],
+    completed_message: Option<SharedString>,
+    notification_key: SharedString,
+) -> u64 {
+    let completion_id = completions.claim(references);
+    completions.arm(
+        completion_id,
+        references,
+        completed_message.map(Into::into).unwrap_or_default(),
+        notification_key,
+    );
+    completion_id
+}
+
 impl AviaryApp {
     /// Books one terminal provider reply against the batch it belongs to.
     /// `error` set means the mutation failed for good.
@@ -63,13 +86,14 @@ impl AviaryApp {
         &mut self,
         account_id: &AccountId,
         message_id: &str,
+        kind: MessageMutationKind,
         error: Option<String>,
     ) -> BulkReply {
         let reference = MessageRef {
             account_id: account_id.clone(),
             id: message_id.to_string(),
         };
-        self.bulk_completions.record(&reference, error)
+        self.bulk_completions.record(&(reference, kind), error)
     }
 
     /// Books a deferral, which is not terminal: the operation stays in the
@@ -78,12 +102,13 @@ impl AviaryApp {
         &mut self,
         account_id: &AccountId,
         message_id: &str,
+        kind: MessageMutationKind,
     ) -> BulkDeferral {
         let reference = MessageRef {
             account_id: account_id.clone(),
             id: message_id.to_string(),
         };
-        self.bulk_completions.note_deferral(&reference)
+        self.bulk_completions.note_deferral(&(reference, kind))
     }
 
     /// Starts aggregating the replies of commands that are about to be
@@ -93,7 +118,7 @@ impl AviaryApp {
     /// silent unless something fails, which is what an implicit action wants.
     fn begin_bulk_completion(
         &mut self,
-        references: Vec<MessageRef>,
+        references: Vec<BulkKey>,
         completed_message: Option<SharedString>,
         notification_key: SharedString,
         cx: &mut Context<Self>,
@@ -101,11 +126,28 @@ impl AviaryApp {
         if references.len() < 2 {
             return;
         }
-        let completion_id = self.bulk_completions.claim(&references);
-        self.bulk_completions.arm(
-            completion_id,
+        self.register_bulk_completion(references, completed_message, notification_key, cx);
+    }
+
+    /// Registers a batch whatever its size. `begin_bulk_completion` leaves a
+    /// single message to report itself, which is right for a gesture — one
+    /// message moved is worth its own "message moved" — but wrong for a
+    /// silent side effect: a lone blocked-sender message junked on arrival
+    /// would then be toasted as a move the user never made.
+    fn register_bulk_completion(
+        &mut self,
+        references: Vec<BulkKey>,
+        completed_message: Option<SharedString>,
+        notification_key: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        if references.is_empty() {
+            return;
+        }
+        let completion_id = arm_bulk_completion(
+            &mut self.bulk_completions,
             &references,
-            completed_message.map(Into::into).unwrap_or_default(),
+            completed_message,
             notification_key,
         );
         cx.spawn(async move |this, cx| {
@@ -120,12 +162,16 @@ impl AviaryApp {
     /// Submits commands right away — no undo window — while still folding
     /// their replies into one batch. Used by the side effects of reading,
     /// which the user did not ask for explicitly and must not have to cancel.
+    ///
+    /// Silent on success even for a single message: the batch is registered
+    /// whatever its size, so the reply is never treated as a lone gesture that
+    /// deserves its own "message moved". A failure still speaks, once.
     fn send_batch_now(&mut self, commands: Vec<Cmd>, cx: &mut Context<Self>) {
         let references = Self::command_message_references(&commands);
         self.pending_action_seq = self.pending_action_seq.wrapping_add(1);
         let notification_key: SharedString =
             format!("bulk-action:{}", self.pending_action_seq).into();
-        self.begin_bulk_completion(references, None, notification_key, cx);
+        self.register_bulk_completion(references, None, notification_key, cx);
         for command in commands {
             self.send(command);
         }
@@ -353,15 +399,18 @@ impl AviaryApp {
     /// The messages a batch of commands acts on, in submission order. Derived
     /// from the commands themselves rather than passed alongside them: the two
     /// could only drift apart, and a batch is exactly what its commands touch.
-    fn command_message_references(commands: &[Cmd]) -> Vec<MessageRef> {
+    fn command_message_references(commands: &[Cmd]) -> Vec<BulkKey> {
         commands
             .iter()
             .filter_map(|command| {
-                let (_, account_id, message_id) = Self::command_message_mutation(command)?;
-                Some(MessageRef {
-                    account_id: account_id.clone(),
-                    id: message_id.to_string(),
-                })
+                let (kind, account_id, message_id) = Self::command_message_mutation(command)?;
+                Some((
+                    MessageRef {
+                        account_id: account_id.clone(),
+                        id: message_id.to_string(),
+                    },
+                    kind,
+                ))
             })
             .collect()
     }
@@ -909,19 +958,32 @@ impl AviaryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The command names the account; an id alone is ambiguous across
+        // IMAP accounts.
+        let account_id =
+            Self::command_message_mutation(&command).map(|(_, account_id, _)| account_id.clone());
+        let same_account = |candidate: &AccountId| {
+            account_id
+                .as_ref()
+                .is_none_or(|account| account == candidate)
+        };
         let was_displayed = match self.mailbox.active_tab {
             Some(index) => self
                 .mailbox
                 .open_tabs
                 .get(index)
                 .and_then(|tab| tab.message())
-                .is_some_and(|message| message.header.id == message_id),
-            None => self.mailbox.selected_id.as_deref() == Some(message_id),
+                .is_some_and(|message| {
+                    message.header.id == message_id && same_account(&message.header.account_id)
+                }),
+            None => self.mailbox.selected_id.as_ref().is_some_and(|selected| {
+                selected.id == message_id && same_account(&selected.account_id)
+            }),
         };
         let neighbor = was_displayed
-            .then(|| self.message_neighbor_after_removal(message_id))
+            .then(|| self.message_neighbor_after_removal(account_id.as_ref(), message_id))
             .flatten();
-        let removal = self.remove_message_optimistically(message_id);
+        let removal = self.remove_message_optimistically_matching(account_id.as_ref(), message_id);
         if was_displayed {
             if let Some(message) = neighbor {
                 self.open_message(message.account_id, message.id, cx);
@@ -1024,18 +1086,7 @@ impl AviaryApp {
         let displayed_reference = self
             .displayed_message()
             .map(|message| MessageRef::from(message.as_ref()))
-            .or_else(|| {
-                let id = self.mailbox.selected_id.clone()?;
-                let header = self
-                    .mailbox
-                    .messages
-                    .iter()
-                    .find(|message| message.id == id)?;
-                Some(MessageRef {
-                    account_id: header.account_id.clone(),
-                    id,
-                })
-            });
+            .or_else(|| self.mailbox.selected_id.clone());
         let neighbor = displayed_reference
             .as_ref()
             .filter(|reference| references.contains(reference))
@@ -1080,24 +1131,31 @@ impl AviaryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let reference = MessageRef {
+            account_id: account_id.clone(),
+            id: message_id.to_string(),
+        };
+        let same = |message: &MessageHeader| {
+            message.account_id == reference.account_id && message.id == reference.id
+        };
         let header_tags = self
             .mailbox
             .messages
             .iter()
-            .find(|message| message.id == message_id)
+            .find(|message| same(message))
             .map(|message| message.tags.clone())
             .or_else(|| {
                 self.mailbox
                     .search
                     .results
                     .as_ref()
-                    .and_then(|messages| messages.iter().find(|message| message.id == message_id))
+                    .and_then(|messages| messages.iter().find(|message| same(message)))
                     .map(|message| message.tags.clone())
             })
             .or_else(|| match &self.sender_history {
                 SenderHistoryState::Loaded { messages, .. } => messages
                     .iter()
-                    .find(|message| message.id == message_id)
+                    .find(|message| same(message))
                     .map(|message| message.tags.clone()),
                 _ => None,
             })
@@ -1105,7 +1163,7 @@ impl AviaryApp {
                 self.mailbox
                     .selected
                     .as_ref()
-                    .filter(|message| message.header.id == message_id)
+                    .filter(|message| same(&message.header))
                     .map(|message| message.header.tags.clone())
             })
             .unwrap_or_default();
@@ -1113,7 +1171,7 @@ impl AviaryApp {
             .mailbox
             .selected
             .as_ref()
-            .filter(|message| message.header.id == message_id)
+            .filter(|message| same(&message.header))
             .map(|message| message.tags.clone());
         let key = self
             .tags_by_account
@@ -1127,7 +1185,7 @@ impl AviaryApp {
                 crate::ui::util::tag_storage_key(provider, tag)
             })
             .unwrap_or_else(|| tag_id.to_string());
-        self.apply_message_tag(message_id, &key, added);
+        self.apply_message_tag(&reference, &key, added);
         let delay = self.action_delay_secs();
         self.schedule_action(
             vec![command],
@@ -1137,7 +1195,7 @@ impl AviaryApp {
             tr!("undo-tags-cancelled"),
             None,
             PendingCancelEffect::MessageTags {
-                message_id: message_id.to_string(),
+                reference,
                 header_tags,
                 message_tags,
             },
@@ -1199,11 +1257,12 @@ impl AviaryApp {
                 .unwrap_or_else(|| format!("pending-action:{action_id}").into()),
             _ => format!("pending-action:{action_id}").into(),
         };
-        // The batch is registered when the commands are actually submitted,
-        // never when they are scheduled: an action cancelled inside its undo
-        // window sends nothing, and a batch waiting on replies that will never
-        // come would swallow the reply of whatever the user does next to the
-        // same message.
+        // The batch is registered when the undo window closes, never when the
+        // action is scheduled: an action cancelled inside its window runs
+        // nothing, and a batch waiting on replies that will never come would
+        // swallow the reply of whatever the user does next to the same
+        // message. The outbox runs a durable schedule a grace period after
+        // that moment, so no reply can precede the registration.
         let references = Self::command_message_references(&commands);
         if delay_secs == 0 {
             self.begin_bulk_completion(references, completed_message, notification_key.clone(), cx);
@@ -1213,10 +1272,25 @@ impl AviaryApp {
             return notification_key;
         }
 
+        // Straight into the durable outbox, due when the window closes: the
+        // action survives Aviary being closed inside the window, and undo
+        // takes the rows back before they come due.
+        let durable = commands.iter().all(Cmd::is_durable_operation);
+        let commands = if durable {
+            self.send(Cmd::ScheduleOperations {
+                schedule_id: action_id,
+                delay_secs,
+                commands,
+            });
+            Vec::new()
+        } else {
+            commands
+        };
         self.pending_actions.insert(
             action_id,
             PendingAction {
                 commands,
+                durable,
                 notification_key: notification_key.clone(),
                 started_message,
                 canceled_message,
@@ -1238,6 +1312,11 @@ impl AviaryApp {
                             let canceled = app
                                 .update(cx, |this, cx| {
                                     let action = this.pending_actions.remove(&action_id)?;
+                                    if action.durable {
+                                        this.send(Cmd::CancelScheduledOperations {
+                                            schedule_id: action_id,
+                                        });
+                                    }
                                     let notification_key = action.notification_key.clone();
                                     match action.cancel_effect {
                                         PendingCancelEffect::None => {}
@@ -1268,16 +1347,18 @@ impl AviaryApp {
                                             }
                                         }
                                         PendingCancelEffect::MessageTags {
-                                            message_id,
+                                            reference,
                                             header_tags,
                                             message_tags,
                                         } => {
-                                            this.update_header(&message_id, |header| {
+                                            this.update_header_for(&reference, |header| {
                                                 header.tags.clone_from(&header_tags);
                                             });
                                             if let (Some(message), Some(tags)) = (
                                                 this.mailbox.selected_mut().filter(|message| {
-                                                    message.header.id == message_id
+                                                    message.header.account_id
+                                                        == reference.account_id
+                                                        && message.header.id == reference.id
                                                 }),
                                                 message_tags,
                                             ) {
@@ -1355,6 +1436,9 @@ impl AviaryApp {
                 let Some(action) = this.pending_actions.remove(&action_id) else {
                     return;
                 };
+                // Registered now, when undo stops being possible: a durable
+                // action runs a grace period after this timer, so its replies
+                // cannot arrive before the batch exists.
                 this.begin_bulk_completion(
                     references,
                     completed_message,
@@ -1375,8 +1459,35 @@ impl AviaryApp {
         notification_key
     }
 
-    pub(super) fn remove_message_optimistically(&mut self, id: &str) -> OptimisticMessageRemoval {
-        self.remove_message_optimistically_matching(None, id)
+    /// Hands over, at quit, the commands of undo windows that could not be
+    /// stored durably when they were scheduled. Durable ones need nothing:
+    /// their rows are already on disk and run at the next drain.
+    pub(crate) fn flush_undurable_pending_actions(&mut self) {
+        for (_, action) in std::mem::take(&mut self.pending_actions) {
+            for command in action.commands {
+                self.send(command);
+            }
+        }
+    }
+
+    /// Undo came back from the outbox. Everything taken back is the normal
+    /// case — the UI already restored its state when the button was clicked.
+    /// Fewer means some rows had already started: say so, and let a refresh
+    /// show what the provider actually holds.
+    pub(crate) fn on_scheduled_operations_cancelled(
+        &mut self,
+        schedule_id: u64,
+        cancelled: usize,
+        expected: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if cancelled >= expected {
+            return;
+        }
+        log::warn!("undo {schedule_id}: {cancelled}/{expected} operations taken back");
+        self.toast(window, cx, Notification::warning(tr!("undo-too-late")));
+        self.send_refresh();
     }
 
     pub(super) fn remove_message_optimistically_ref(
@@ -1414,19 +1525,27 @@ impl AviaryApp {
             SenderHistoryState::Loaded { messages, .. } => take_header(messages, account_id, id),
             _ => None,
         };
-        let selection_matches = self.mailbox.selected_id.as_deref() == Some(id)
-            && account_id.is_none_or(|account_id| {
-                self.mailbox
-                    .selected
-                    .as_ref()
-                    .is_none_or(|message| &message.header.account_id == account_id)
-            });
+        if let Some((_, header)) = mailbox.as_ref().or(search.as_ref()) {
+            let origin = super::ListingOrigin {
+                folder: mailbox.is_some().then(|| self.listing_scope()),
+                search_request: search.is_some().then_some(self.mailbox.search.request_id),
+            };
+            let reference = MessageRef {
+                account_id: header.account_id.clone(),
+                id: header.id.clone(),
+            };
+            self.optimistic_removal_origins.insert(reference, origin);
+        }
+        let selection_matches = self.mailbox.selected_id.as_ref().is_some_and(|selected| {
+            selected.id == id
+                && account_id.is_none_or(|account_id| &selected.account_id == account_id)
+        });
         let selection = selection_matches.then(|| {
             let selected = self.mailbox.selected.take();
-            self.mailbox.selected_id = None;
+            let message_id = self.mailbox.selected_id.take();
             let thread = self.mailbox.thread.take();
             OptimisticSelection {
-                message_id: id.to_string(),
+                message_id,
                 message: selected,
                 thread,
             }
@@ -1485,12 +1604,21 @@ impl AviaryApp {
     pub(super) fn restore_optimistic_message(&mut self, removal: OptimisticMessageRemoval) {
         fn restore_header(list: &mut Vec<MessageHeader>, removed: Option<(usize, MessageHeader)>) {
             if let Some((index, message)) = removed {
-                if !list.iter().any(|current| current.id == message.id) {
+                if !list.iter().any(|current| {
+                    current.id == message.id && current.account_id == message.account_id
+                }) {
                     list.insert(index.min(list.len()), message);
                 }
             }
         }
 
+        if let Some((_, header)) = removal.mailbox.as_ref().or(removal.search.as_ref()) {
+            let reference = MessageRef {
+                account_id: header.account_id.clone(),
+                id: header.id.clone(),
+            };
+            self.optimistic_removal_origins.remove(&reference);
+        }
         restore_header(&mut self.mailbox.messages, removal.mailbox);
         if let Some(messages) = &mut self.mailbox.search.results {
             restore_header(messages, removal.search);
@@ -1500,15 +1628,17 @@ impl AviaryApp {
         }
         if let Some(selection) = removal.selection {
             if self.mailbox.selected_id.is_none() {
-                self.mailbox.selected_id = Some(selection.message_id);
+                self.mailbox.selected_id = selection.message_id;
                 self.mailbox.selected = selection.message;
                 self.mailbox.thread = selection.thread;
             }
         }
         if let Some((index, message, was_active)) = removal.open_tab {
             if !self.mailbox.open_tabs.iter().any(|tab| {
-                tab.message()
-                    .is_some_and(|current| current.header.id == message.header.id)
+                tab.message().is_some_and(|current| {
+                    current.header.id == message.header.id
+                        && current.header.account_id == message.header.account_id
+                })
             }) {
                 let index = index.min(self.mailbox.open_tabs.len());
                 if let Some(active) = self.mailbox.active_tab.as_mut() {
@@ -1587,5 +1717,57 @@ mod tests {
         }];
 
         assert!(unread_conversation_members(&headers, &members, "newest").is_empty());
+    }
+
+    fn move_key(id: &str) -> BulkKey {
+        (reference(id), MessageMutationKind::Move)
+    }
+
+    /// A lone message junked because its sender is blocked is still a silent
+    /// batch: its success must not come back as a `Single` reply, which the
+    /// reducers toast as "message moved".
+    #[test]
+    fn a_silent_single_member_batch_stays_silent_on_success() {
+        let mut completions = BulkCompletions::default();
+        let key = move_key("spam");
+        arm_bulk_completion(
+            &mut completions,
+            std::slice::from_ref(&key),
+            None,
+            "bulk-action:1".into(),
+        );
+
+        let reply = completions.record(&key, None);
+
+        assert!(reply.is_bulk());
+        let completion = reply
+            .completion()
+            .expect("the only member closes the batch");
+        assert_eq!((completion.succeeded, completion.failed), (1, 0));
+        assert!(completion.message.is_empty());
+        // Nothing left behind: the next move of the same message is its own.
+        assert!(matches!(completions.record(&key, None), BulkReply::Single));
+    }
+
+    /// Silent means silent on success only: a failure closes the batch with
+    /// its error, reported once.
+    #[test]
+    fn a_silent_single_member_batch_reports_its_failure_once() {
+        let mut completions = BulkCompletions::default();
+        let key = move_key("spam");
+        arm_bulk_completion(
+            &mut completions,
+            std::slice::from_ref(&key),
+            None,
+            "bulk-action:2".into(),
+        );
+
+        let completion = completions
+            .record(&key, Some("refused".to_string()))
+            .completion()
+            .expect("the failure closes the batch");
+
+        assert_eq!((completion.succeeded, completion.failed), (0, 1));
+        assert_eq!(completion.first_error.as_deref(), Some("refused"));
     }
 }

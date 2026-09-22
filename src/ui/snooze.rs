@@ -276,39 +276,54 @@ impl AviaryApp {
     /// deadline that fell while Aviary was closed is not missed.
     ///
     /// A woken message is marked unread, which is the whole point of putting it
-    /// off: it comes back needing attention. Only the ones still loaded — the
-    /// read state of a message no longer in any list cannot be read, let alone
-    /// changed, and its deadline is dropped either way rather than kept alive
-    /// forever against an id the provider may have retired.
+    /// off: it comes back needing attention. The deadline is only dropped once
+    /// that can actually happen — its account restored and online. At startup
+    /// the first pass runs before any account is ready and before any listing
+    /// is loaded; draining the deadlines then would have woken nothing and
+    /// marked nothing. A message whose header is not loaded is marked unread by
+    /// reference: the command needs its identity, not its header.
     pub(crate) fn wake_due_snoozes(&mut self, cx: &mut Context<Self>) {
-        let due = self.settings.take_due_snoozes(Utc::now());
+        let due = wakeable_snoozes(&self.settings.accounts, Utc::now(), |account_id| {
+            self.account(account_id).is_some() && !self.offline_accounts.contains(account_id)
+        });
         if due.is_empty() {
             return;
         }
+        for reference in &due {
+            self.settings
+                .unsnooze_message(&reference.account_id, &reference.id);
+        }
         self.settings.save();
-        let woken: Vec<_> = due
+        let loaded: Vec<_> = due
             .iter()
-            .filter_map(|(account_id, id)| {
+            .filter_map(|reference| {
                 self.mailbox
                     .messages
                     .iter()
-                    .find(|header| &header.account_id == account_id && &header.id == id)
+                    .find(|header| {
+                        header.account_id == reference.account_id && header.id == reference.id
+                    })
                     .cloned()
             })
             .collect();
-        let unread: Vec<_> = woken
+        // Only a loaded header that is already unread can be skipped; one we
+        // cannot see is marked anyway.
+        let unread: Vec<_> = due
             .iter()
-            .filter(|header| header.is_read)
-            .map(|header| MessageRef {
-                account_id: header.account_id.clone(),
-                id: header.id.clone(),
+            .filter(|reference| {
+                !loaded.iter().any(|header| {
+                    header.account_id == reference.account_id
+                        && header.id == reference.id
+                        && !header.is_read
+                })
             })
+            .cloned()
             .collect();
         if !unread.is_empty() {
             self.bulk_mark_unread_silently(unread, cx);
         }
         if self.settings.global.notifications_enabled {
-            for header in &woken {
+            for header in &loaded {
                 crate::notify::new_message(header, self.notification_tx.clone());
             }
         }
@@ -331,6 +346,31 @@ impl AviaryApp {
             self.mailbox.show_snoozed_only = false;
         }
     }
+}
+
+/// Deadlines due at `now` whose account can take the "mark unread" right
+/// away. The others stay due — still hidden, still in the settings — until a
+/// later tick finds their account ready: waking a message is only done once,
+/// so it must not be spent while its command has nowhere to go.
+pub(crate) fn wakeable_snoozes(
+    accounts: &std::collections::HashMap<AccountId, super::settings::AccountSettings>,
+    now: DateTime<Utc>,
+    ready: impl Fn(&AccountId) -> bool,
+) -> Vec<MessageRef> {
+    accounts
+        .iter()
+        .filter(|(account_id, _)| ready(account_id))
+        .flat_map(|(account_id, account)| {
+            account
+                .snoozed_messages
+                .iter()
+                .filter(move |entry| entry.until <= now)
+                .map(move |entry| MessageRef {
+                    account_id: account_id.clone(),
+                    id: entry.id.clone(),
+                })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -415,5 +455,71 @@ mod tests {
         let deadline = deadline.with_timezone(&Local);
         assert_eq!(deadline.hour(), MORNING_HOUR);
         assert_eq!(deadline.date_naive().day(), 3);
+    }
+
+    fn snoozed(entries: &[(&str, DateTime<Utc>)]) -> super::super::settings::AccountSettings {
+        super::super::settings::AccountSettings {
+            snoozed_messages: entries
+                .iter()
+                .map(|(id, until)| super::super::settings::SnoozedMessage {
+                    id: id.to_string(),
+                    until: *until,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// At startup no account is ready yet: a due deadline must survive that
+    /// first pass instead of being drained with nothing marked unread.
+    #[test]
+    fn a_due_deadline_waits_for_its_account() {
+        let now = Utc::now();
+        let account = AccountId("account-a@example.test".into());
+        let accounts = std::collections::HashMap::from([(
+            account.clone(),
+            snoozed(&[("INBOX:42", now - Duration::minutes(5))]),
+        )]);
+
+        assert!(wakeable_snoozes(&accounts, now, |_| false).is_empty());
+        assert_eq!(
+            wakeable_snoozes(&accounts, now, |candidate| candidate == &account),
+            vec![MessageRef {
+                account_id: account,
+                id: "INBOX:42".into()
+            }]
+        );
+    }
+
+    /// Only what has come due is woken, and only for the accounts that are
+    /// ready; ids repeat across accounts (IMAP), so the reference keeps both.
+    #[test]
+    fn only_due_deadlines_of_ready_accounts_are_woken() {
+        let now = Utc::now();
+        let ready = AccountId("account-a@example.test".into());
+        let waiting = AccountId("account-b@example.test".into());
+        let accounts = std::collections::HashMap::from([
+            (
+                ready.clone(),
+                snoozed(&[
+                    ("INBOX:1", now - Duration::seconds(1)),
+                    ("INBOX:2", now + Duration::hours(1)),
+                ]),
+            ),
+            (
+                waiting.clone(),
+                snoozed(&[("INBOX:1", now - Duration::hours(1))]),
+            ),
+        ]);
+
+        let woken = wakeable_snoozes(&accounts, now, |candidate| candidate == &ready);
+
+        assert_eq!(
+            woken,
+            vec![MessageRef {
+                account_id: ready,
+                id: "INBOX:1".into()
+            }]
+        );
     }
 }

@@ -1403,12 +1403,21 @@ impl CacheDb {
                 |row| row.get(0),
             )
             .optional()?;
-        let cached: Option<(String, Option<String>, i64, i64)> = tx
+        type CachedRow = (String, Option<String>, i64, i64, Option<String>);
+        let cached: Option<CachedRow> = tx
             .query_row(
-                "SELECT header_json,body_json,last_access,cache_bytes FROM messages
+                "SELECT header_json,body_json,last_access,cache_bytes,conversation_id FROM messages
                  WHERE account_id=?1 AND message_id=?2",
                 params![account_id.0, message_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .optional()?;
         tx.execute(
@@ -1417,23 +1426,57 @@ impl CacheDb {
             params![account_id.0, Self::folder_key(source_folder_id), message_id],
         )?;
         if let Some(new_id) = new_id.filter(|id| *id != message_id) {
-            if let Some((header_json, body_json, last_access, cache_bytes)) = cached {
+            if let Some((header_json, body_json, last_access, cache_bytes, conversation_id)) =
+                cached
+            {
                 let mut header: MessageHeader = serde_json::from_str(&header_json)?;
                 header.id = new_id.to_string();
                 let header_json = serde_json::to_string(&header)?;
+                // A sync may already have stored the message under its new id.
+                // Remove that row with a real DELETE rather than letting
+                // `INSERT OR REPLACE` do it: REPLACE does not fire delete
+                // triggers, so its full-text entry would linger as a ghost
+                // hit. Its folder memberships go with the cascade and are
+                // restored below.
+                let memberships: Vec<(String, i64)> = {
+                    let mut statement = tx.prepare(
+                        "SELECT folder_id,received FROM folder_messages
+                         WHERE account_id=?1 AND message_id=?2",
+                    )?;
+                    let rows = statement
+                        .query_map(params![account_id.0, new_id], |row| {
+                            Ok((row.get(0)?, row.get(1)?))
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    rows
+                };
                 tx.execute(
-                    "INSERT OR REPLACE INTO messages(
-                       account_id,message_id,header_json,body_json,last_access,cache_bytes
-                     ) VALUES(?1,?2,?3,?4,?5,?6)",
+                    "DELETE FROM messages WHERE account_id=?1 AND message_id=?2",
+                    params![account_id.0, new_id],
+                )?;
+                tx.execute(
+                    "INSERT INTO messages(
+                       account_id,message_id,header_json,body_json,last_access,cache_bytes,
+                       conversation_id
+                     ) VALUES(?1,?2,?3,?4,?5,?6,?7)",
                     params![
                         account_id.0,
                         new_id,
                         header_json,
                         body_json,
                         last_access,
-                        cache_bytes
+                        cache_bytes,
+                        conversation_id
                     ],
                 )?;
+                for (folder_id, received) in memberships {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO folder_messages(
+                           account_id,folder_id,message_id,received
+                         ) VALUES(?1,?2,?3,?4)",
+                        params![account_id.0, folder_id, new_id, received],
+                    )?;
+                }
                 tx.execute(
                     "INSERT INTO message_inline_images(
                        account_id,message_id,position,cid,mime,bytes
@@ -2752,5 +2795,67 @@ mod tests {
             .expect("move");
 
         assert_eq!(search_ids(&mut db, "convocation"), vec!["new-id"]);
+    }
+
+    /// The reinsert used to drop the `conversation_id` column, so a moved
+    /// message fell out of its thread's count.
+    #[test]
+    fn moving_a_message_keeps_its_conversation() {
+        let mut db = test_db();
+        let account_id = AccountId("account-a".into());
+        let mut message = message();
+        message.header = header("old-id", "Convocation", "Contact <c@example.test>", "");
+        message.header.conversation_id = Some("conversation-a".into());
+        db.store_message(&account_id, &message).expect("store");
+
+        db.move_message(&account_id, "old-id", None, "target", Some("new-id"))
+            .expect("move");
+
+        let conversation: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT conversation_id FROM messages WHERE account_id=?1 AND message_id=?2",
+                params![account_id.0, "new-id"],
+                |row| row.get(0),
+            )
+            .expect("moved row");
+        assert_eq!(conversation.as_deref(), Some("conversation-a"));
+    }
+
+    /// When a sync already stored the new id, the move replaces that row; its
+    /// index entry must go with it instead of lingering as a duplicate hit.
+    #[test]
+    fn moving_onto_an_existing_id_leaves_no_ghost_search_hit() {
+        let mut db = test_db();
+        let account_id = AccountId("account-a".into());
+        let mut message = message();
+        message.header = header("old-id", "Convocation", "Contact <c@example.test>", "");
+        db.store_message(&account_id, &message).expect("store");
+        db.store_headers(
+            &account_id,
+            Some("target"),
+            &[header(
+                "new-id",
+                "Convocation",
+                "Contact <c@example.test>",
+                "",
+            )],
+        )
+        .expect("synced copy");
+
+        db.move_message(&account_id, "old-id", None, "target", Some("new-id"))
+            .expect("move");
+
+        assert_eq!(search_ids(&mut db, "convocation"), vec!["new-id"]);
+        let in_target: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM folder_messages
+                 WHERE account_id=?1 AND folder_id='target' AND message_id='new-id'",
+                params![account_id.0],
+                |row| row.get(0),
+            )
+            .expect("membership");
+        assert_eq!(in_target, 1);
     }
 }

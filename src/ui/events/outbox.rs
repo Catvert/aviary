@@ -33,7 +33,7 @@ impl AviaryApp {
         cx: &mut Context<Self>,
     ) {
         log::warn!("durable mutation {operation_id} deferred");
-        let deferral = self.note_bulk_deferral(&account_id, &message_id);
+        let deferral = self.note_bulk_deferral(&account_id, &message_id, kind);
         if !deferral.first {
             return;
         }
@@ -56,16 +56,28 @@ impl AviaryApp {
 
     /// Nothing to change on screen — the optimistic update already stands.
     /// Returns whether the root view needs a redraw.
+    ///
+    /// A move or a deletion has already been booked by its own, richer reply
+    /// (`MessageMoved`, `MessageDeleted`), which the runtime emits before this
+    /// acknowledgement; booking it twice would take a reply from the next
+    /// batch of the same kind on that message.
     pub(super) fn on_mutation_succeeded(
         &mut self,
         account_id: AccountId,
         operation_id: i64,
         message_id: String,
+        kind: MessageMutationKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         log::debug!("durable mutation {operation_id} completed");
-        let reply = self.take_bulk_message_completion(&account_id, &message_id, None);
+        if matches!(
+            kind,
+            MessageMutationKind::Move | MessageMutationKind::Delete
+        ) {
+            return false;
+        }
+        let reply = self.take_bulk_message_completion(&account_id, &message_id, kind, None);
         self.report_bulk_completion(reply, window, cx);
         false
     }
@@ -84,15 +96,18 @@ impl AviaryApp {
     ) {
         log::error!("durable mutation {operation_id} failed");
         let reply =
-            self.take_bulk_message_completion(&account_id, &message_id, Some(error.clone()));
+            self.take_bulk_message_completion(&account_id, &message_id, kind, Some(error.clone()));
         let reference = MessageRef {
             account_id: account_id.clone(),
             id: message_id,
         };
         // The rollback is per message whatever the batch does: this one came
         // back, the others may still succeed.
-        if let Some(header) = header {
-            self.restore_confirmed_header(account_id, header);
+        match header {
+            Some(header) => self.restore_confirmed_header(account_id, header),
+            None => {
+                self.optimistic_removal_origins.remove(&reference);
+            }
         }
         match reply {
             BulkReply::Single => {
@@ -147,9 +162,10 @@ impl AviaryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let reply = self.take_bulk_message_completion(&account_id, &id, None);
+        let reply =
+            self.take_bulk_message_completion(&account_id, &id, MessageMutationKind::Delete, None);
         self.set_message_pinned(&account_id, &id, false);
-        self.remove_message_everywhere(&id);
+        self.remove_message_everywhere(&account_id, &id);
         self.update_tray_unread();
         if !reply.is_bulk() {
             self.toast(
@@ -201,6 +217,12 @@ impl AviaryApp {
                 }
                 Notification::success(completion.message)
             }
+            // A silent submission registers a batch even for one message:
+            // counting "none of 1" would read worse than the plain failure.
+            (1, 0) => Notification::error(tr!("operation-failed", {
+                error: completion.first_error.as_deref().unwrap_or_default()
+            }))
+            .autohide(false),
             (_, 0) => Self::bulk_failure_notification(
                 NotificationType::Error,
                 tr!("bulk-all-failed", { total: total }),

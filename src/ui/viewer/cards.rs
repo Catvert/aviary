@@ -170,7 +170,14 @@ impl AviaryApp {
                     tr!("viewer-thread-reply-from", { name: util::display_name(&header.from) }),
                 )
             };
-            let state = self.mailbox.thread_bodies.get(&header.id).cloned();
+            let state = self
+                .mailbox
+                .thread_bodies
+                .get(&MessageRef {
+                    account_id: header.account_id.clone(),
+                    id: header.id.clone(),
+                })
+                .cloned();
             cards.push(SentCard {
                 id_prefix: "sent-thr",
                 icon,
@@ -502,7 +509,14 @@ impl AviaryApp {
             .into_any_element()];
 
         for h in others {
-            let state = self.mailbox.thread_bodies.get(&h.id).cloned();
+            let state = self
+                .mailbox
+                .thread_bodies
+                .get(&MessageRef {
+                    account_id: h.account_id.clone(),
+                    id: h.id.clone(),
+                })
+                .cloned();
             let expanded = state.is_some();
             let account_id = h.account_id.clone();
             let id = h.id.clone();
@@ -579,10 +593,14 @@ impl AviaryApp {
     /// presence of an entry in `thread_bodies` *is* the expanded state, so
     /// collapsing simply drops it.
     fn toggle_thread_body(&mut self, account_id: &AccountId, id: &str) {
-        if self.mailbox.thread_bodies.remove(id).is_none() {
+        let reference = MessageRef {
+            account_id: account_id.clone(),
+            id: id.to_string(),
+        };
+        if self.mailbox.thread_bodies.remove(&reference).is_none() {
             self.mailbox
                 .thread_bodies
-                .insert(id.to_string(), ThreadBodyState::Loading);
+                .insert(reference, ThreadBodyState::Loading);
             self.send(Cmd::LoadThreadMessage {
                 account_id: account_id.clone(),
                 id: id.to_string(),

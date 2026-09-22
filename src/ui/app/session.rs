@@ -128,10 +128,10 @@ impl AviaryApp {
                     .as_deref()
                     .map(MessageRef::from)
                     .or_else(|| {
-                        self.mailbox.selected_id.as_ref().and_then(|id| {
+                        self.mailbox.selected_id.as_ref().and_then(|selected| {
                             self.pending_rehydrate
                                 .iter()
-                                .find(|reference| &reference.id == id)
+                                .find(|reference| *reference == selected)
                                 .cloned()
                         })
                     }),

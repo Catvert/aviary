@@ -56,7 +56,7 @@ impl SearchScope {
 
 /// Identifies a durable mutation closely enough for the UI to keep the
 /// pending, in-progress, and final notification in one toast.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MessageMutationKind {
     Delete,
     Move,
@@ -76,7 +76,12 @@ pub struct RecipientUsage {
 /// Complete outgoing message shared by `Cmd::SendMail` and `Cmd::SaveDraft`.
 /// The body is already HTML produced by the
 /// blocks (`body_is_html: true` en pratique).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Persisted inside the durable outbox, hence `#[serde(default)]`: a field
+/// added later must not make an unsent message written by an older build
+/// unreadable.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OutgoingMail {
     pub to: Vec<String>,
     pub cc: Vec<String>,
@@ -109,7 +114,11 @@ impl OutgoingMail {
 
 /// Concrete, account-resolved snapshot of a quick action. Settings may change
 /// after the click, so runtime execution never refers back to mutable UI state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Persisted in the durable outbox: `#[serde(default)]` keeps rows written by
+/// an older build readable when a field is added.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct QuickActionExecution {
     pub execution_id: u64,
     pub action_name: String,
@@ -124,6 +133,7 @@ pub enum QuickActionStep {
     },
     Reply {
         mail: OutgoingMail,
+        #[serde(default)]
         reply_all: bool,
     },
     RemoveTag {
@@ -305,6 +315,22 @@ pub enum Cmd {
     CancelQuickAction {
         account_id: AccountId,
         execution_id: u64,
+    },
+    /// Commands held behind an undo window (move, delete, read, flag, tag,
+    /// send). They are written to the durable outbox right away, due in
+    /// `delay_secs`, so closing Aviary inside the window does not lose them;
+    /// undo is `CancelScheduledOperations`. Only commands for which
+    /// `Cmd::is_durable_operation` holds may be carried.
+    ScheduleOperations {
+        /// UI-chosen id, only meaningful within this process.
+        schedule_id: u64,
+        delay_secs: u32,
+        commands: Vec<Cmd>,
+    },
+    /// Takes back a `ScheduleOperations` that has not come due. Replies with
+    /// `Evt::ScheduledOperationsCancelled`.
+    CancelScheduledOperations {
+        schedule_id: u64,
     },
     SetAutoRefresh {
         account_id: AccountId,
@@ -510,6 +536,23 @@ pub enum Cmd {
     },
 }
 
+impl Cmd {
+    /// Whether the durable outbox can carry this command, and so whether it
+    /// may be held behind an undo window through `Cmd::ScheduleOperations`.
+    pub(crate) fn is_durable_operation(&self) -> bool {
+        matches!(
+            self,
+            Self::DeleteMessage { .. }
+                | Self::MoveMessage { .. }
+                | Self::SetFlag { .. }
+                | Self::MarkRead { .. }
+                | Self::AddTag { .. }
+                | Self::RemoveTag { .. }
+                | Self::SendMail { .. }
+        )
+    }
+}
+
 #[derive(Debug)]
 pub enum Evt {
     LanguageToolStatus(LanguageToolStatus),
@@ -557,8 +600,12 @@ pub enum Evt {
         provider: Provider,
         error: String,
     },
+    /// Authoritative listing of `folder_id` (`None` = inbox). The folder is
+    /// carried so the UI can drop a reply that lands after the user switched
+    /// folders, instead of overwriting the one on screen with it.
     Messages {
         account_id: AccountId,
+        folder_id: Option<String>,
         messages: Vec<MessageHeader>,
     },
     /// First local response to a refresh. It displays the mailbox without
@@ -582,6 +629,7 @@ pub enum Evt {
     },
     MoreMessages {
         account_id: AccountId,
+        folder_id: Option<String>,
         messages: Vec<MessageHeader>,
         has_more: bool,
     },
@@ -599,8 +647,12 @@ pub enum Evt {
         messages: Vec<MessageHeader>,
         has_more: bool,
     },
+    /// Mail that arrived in `folder_id` since the last check. Notifications
+    /// and the blocked-sender rules apply whatever the UI shows; only the
+    /// insertion into the displayed list depends on the folder.
     NewMessages {
         account_id: AccountId,
+        folder_id: Option<String>,
         messages: Vec<MessageHeader>,
     },
     MessageChanges {
@@ -666,6 +718,9 @@ pub enum Evt {
         account_id: AccountId,
         operation_id: i64,
         message_id: String,
+        /// Which mutation was acknowledged, so the UI books the reply against
+        /// the right batch when several are in flight on one message.
+        kind: MessageMutationKind,
     },
     /// A non-transient mutation failure needs reconciliation with the server.
     MutationFailed {
@@ -698,6 +753,14 @@ pub enum Evt {
         account_id: AccountId,
         execution_id: u64,
         action_name: String,
+    },
+    /// Reply to `Cmd::CancelScheduledOperations`: how many of the scheduled
+    /// operations were removed before coming due. Fewer than `expected` means
+    /// some had already started and will run.
+    ScheduledOperationsCancelled {
+        schedule_id: u64,
+        cancelled: usize,
+        expected: usize,
     },
     QuickActionFailed {
         account_id: AccountId,
@@ -1059,6 +1122,7 @@ impl Evt {
             | Self::QuickActionCompleted { .. }
             | Self::QuickActionStarted { .. }
             | Self::QuickActionCancelled { .. }
+            | Self::ScheduledOperationsCancelled { .. }
             | Self::QuickActionFailed { .. }
             | Self::QuickActionSendUncertain { .. }
             | Self::QuickActionMessageState { .. }
@@ -1158,6 +1222,7 @@ impl Evt {
             | Self::QuickActionCompleted { .. }
             | Self::QuickActionStarted { .. }
             | Self::QuickActionCancelled { .. }
+            | Self::ScheduledOperationsCancelled { .. }
             | Self::QuickActionFailed { .. }
             | Self::QuickActionSendUncertain { .. }
             | Self::QuickActionMessageState { .. }
@@ -1235,6 +1300,7 @@ impl Evt {
             | Self::QuickActionCompleted { .. }
             | Self::QuickActionStarted { .. }
             | Self::QuickActionCancelled { .. }
+            | Self::ScheduledOperationsCancelled { .. }
             | Self::QuickActionFailed { .. }
             | Self::QuickActionSendUncertain { .. }
             | Self::QuickActionMessageState { .. }
@@ -1395,6 +1461,7 @@ impl Evt {
             | Self::IcalFeedUpdated { .. }
             | Self::MailCacheStats { .. }
             | Self::MailCacheCleared
+            | Self::ScheduledOperationsCancelled { .. }
             | Self::Status(_)
             | Self::Error(_) => None,
         }
@@ -1413,6 +1480,7 @@ mod tests {
     fn event_classification_matches_what_the_views_expect() {
         let messages = Evt::Messages {
             account_id: AccountId("account@example.test".into()),
+            folder_id: None,
             messages: Vec::new(),
         };
         assert!(messages.invalidates_message_list());

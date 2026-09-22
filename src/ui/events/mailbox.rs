@@ -4,7 +4,7 @@ use super::super::app::AviaryApp;
 use super::super::compose::ComposeInit;
 use super::super::state::{SenderHistoryState, ThreadBodyState, ViewerTab};
 use super::super::util;
-use crate::model::{AccountId, Message, MessageHeader};
+use crate::model::{AccountId, Message, MessageHeader, MessageRef};
 use crate::runtime::Cmd;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{Context, Window};
@@ -38,31 +38,57 @@ fn preserve_last_action(old: &[MessageHeader], new: &mut [MessageHeader]) {
 impl AviaryApp {
     /// Restores the last provider-confirmed header after a permanent failure.
     /// The following refresh reconciles folder/search membership in full.
+    ///
+    /// A header still on screen is simply replaced. One that the optimistic
+    /// move or deletion took out is only put back into the listing it was
+    /// taken from: the user may have opened another folder — or started
+    /// another search — since, and the confirmed header says nothing about
+    /// folder membership.
     pub(super) fn restore_confirmed_header(
         &mut self,
         account_id: AccountId,
         header: MessageHeader,
     ) {
+        let reference = MessageRef {
+            account_id: account_id.clone(),
+            id: header.id.clone(),
+        };
+        let origin = self.optimistic_removal_origins.remove(&reference);
         if !self.event_relevant(&account_id) {
             return;
         }
+        let same = |message: &MessageHeader| {
+            message.account_id == reference.account_id && message.id == reference.id
+        };
         if let Some(existing) = self
             .mailbox
             .messages
             .iter_mut()
-            .find(|message| message.account_id == account_id && message.id == header.id)
+            .find(|message| same(message))
         {
             *existing = header.clone();
-        } else {
+        } else if origin
+            .as_ref()
+            .and_then(|origin| origin.folder.as_ref())
+            .is_some_and(|folder| folder == &self.listing_scope())
+        {
             self.mailbox.messages.push(header.clone());
         }
+        let search_request = self.mailbox.search.request_id;
+        let mut reinserted_in_search = false;
         if let Some(messages) = &mut self.mailbox.search.results {
-            if let Some(existing) = messages
-                .iter_mut()
-                .find(|message| message.account_id == account_id && message.id == header.id)
-            {
+            if let Some(existing) = messages.iter_mut().find(|message| same(message)) {
                 *existing = header.clone();
+            } else if origin
+                .as_ref()
+                .is_some_and(|origin| origin.search_request == Some(search_request))
+            {
+                messages.push(header.clone());
+                reinserted_in_search = true;
             }
+        }
+        if reinserted_in_search {
+            self.sort_search_results();
         }
         if let Some(selected) = self.mailbox.selected_mut() {
             if selected.header.account_id == account_id && selected.header.id == header.id {
@@ -79,11 +105,17 @@ impl AviaryApp {
     pub(super) fn on_messages(
         &mut self,
         account_id: AccountId,
+        folder_id: Option<String>,
         mut messages: Vec<MessageHeader>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.uses_unified_pagination() || !self.event_relevant(&account_id) {
+        // Same guard as `on_cached_messages`: a listing that lands after the
+        // user switched folders must not replace the one on screen.
+        if self.uses_unified_pagination()
+            || !self.event_relevant(&account_id)
+            || self.mailbox.selected_folder_id != folder_id
+        {
             return;
         }
         preserve_last_action(&self.mailbox.messages, &mut messages);
@@ -165,10 +197,14 @@ impl AviaryApp {
     pub(super) fn on_more_messages(
         &mut self,
         account_id: AccountId,
+        folder_id: Option<String>,
         messages: Vec<MessageHeader>,
         has_more: bool,
     ) {
-        if !self.event_relevant(&account_id) || !self.can_paginate_account(&account_id) {
+        if !self.event_relevant(&account_id)
+            || !self.can_paginate_account(&account_id)
+            || self.mailbox.selected_folder_id != folder_id
+        {
             return;
         }
         util::dedup_append(&mut self.mailbox.messages, messages);
@@ -250,6 +286,7 @@ impl AviaryApp {
     pub(super) fn on_new_messages(
         &mut self,
         account_id: AccountId,
+        folder_id: Option<String>,
         messages: Vec<MessageHeader>,
         cx: &mut Context<Self>,
     ) {
@@ -270,7 +307,9 @@ impl AviaryApp {
                 }
             }
         }
-        if !self.event_relevant(&account_id) {
+        // Only the insertion into the displayed list depends on the folder:
+        // new inbox mail must not appear inside another folder's listing.
+        if !self.event_relevant(&account_id) || self.mailbox.selected_folder_id != folder_id {
             return;
         }
         let mut new = messages;
@@ -292,7 +331,7 @@ impl AviaryApp {
             return;
         }
         for id in deleted {
-            self.remove_message_everywhere(&id);
+            self.remove_message_everywhere(&account_id, &id);
         }
         for mut header in upserts {
             if let Some(existing) = self
@@ -327,17 +366,21 @@ impl AviaryApp {
         if self.awaits_notification_open(&account_id, &message.header.id) {
             self.pending_notification_open = None;
         }
+        let reference = MessageRef {
+            account_id: account_id.clone(),
+            id: message.header.id.clone(),
+        };
+        let pending_reply = self.pending_reply_id.as_ref() == Some(&reference);
+        let pending_forward = self.pending_forward_id.as_ref() == Some(&reference);
         let explicitly_pending =
             self.pending_kanban_open
                 .as_ref()
                 .is_some_and(|(pending_account, pending_id)| {
                     pending_account == &account_id && pending_id == &message.header.id
                 })
-                || self.pending_reply_id.as_deref() == Some(message.header.id.as_str())
-                || self.pending_forward_id.as_deref() == Some(message.header.id.as_str());
-        if !explicitly_pending
-            && self.mailbox.selected_id.as_deref() != Some(message.header.id.as_str())
-        {
+                || pending_reply
+                || pending_forward;
+        if !explicitly_pending && self.mailbox.selected_id.as_ref() != Some(&reference) {
             return;
         }
         if message.draft_id.is_some() {
@@ -354,7 +397,7 @@ impl AviaryApp {
             self.open_inline_compose(ComposeInit::draft(account_id, message), window, cx);
             return;
         }
-        self.update_header(&message.header.id.clone(), |header| header.is_read = true);
+        self.update_header_for(&reference, |header| header.is_read = true);
         if let Some(conversation_id) = &message.header.conversation_id {
             self.send(Cmd::LoadThread {
                 account_id: account_id.clone(),
@@ -372,17 +415,17 @@ impl AviaryApp {
             self.open_message_tab(message, cx);
             return;
         }
-        if self.pending_reply_id.as_deref() == Some(message.header.id.as_str()) {
+        if pending_reply {
             self.pending_reply_id = None;
             let init = self.reply_all_init(account_id.clone(), &message);
             self.open_compose_window(init, window, cx);
         }
-        if self.pending_forward_id.as_deref() == Some(message.header.id.as_str()) {
+        if pending_forward {
             self.pending_forward_id = None;
             self.open_inline_compose(ComposeInit::forward(account_id, &message), window, cx);
         }
         message.header.is_read = true;
-        self.mailbox.selected_id = Some(message.header.id.clone());
+        self.mailbox.selected_id = Some(reference);
         self.mailbox.selected = Some(Rc::new(message));
         if self.sender_history_expanded {
             self.refresh_sender_history_for_displayed();
@@ -399,20 +442,24 @@ impl AviaryApp {
         cx: &mut Context<Self>,
     ) {
         let mut message = *message;
-        if self.mailbox.selected_id.as_deref() != Some(message.header.id.as_str()) {
+        let reference = MessageRef {
+            account_id: account_id.clone(),
+            id: message.header.id.clone(),
+        };
+        if self.mailbox.selected_id.as_ref() != Some(&reference) {
             return;
         }
-        if self.pending_reply_id.as_deref() == Some(message.header.id.as_str()) {
+        if self.pending_reply_id.as_ref() == Some(&reference) {
             self.pending_reply_id = None;
             let init = self.reply_all_init(account_id.clone(), &message);
             self.open_compose_window(init, window, cx);
         }
-        if self.pending_forward_id.as_deref() == Some(message.header.id.as_str()) {
+        if self.pending_forward_id.as_ref() == Some(&reference) {
             self.pending_forward_id = None;
             self.open_inline_compose(ComposeInit::forward(account_id, &message), window, cx);
         }
         message.header.is_read = true;
-        self.update_header(&message.header.id, |header| header.is_read = true);
+        self.update_header_for(&reference, |header| header.is_read = true);
         self.mailbox.selected = Some(Rc::new(message));
         self.sender_history = SenderHistoryState::Idle;
     }
@@ -470,12 +517,21 @@ impl AviaryApp {
         }
     }
 
-    pub(super) fn on_thread_message_loaded(&mut self, id: String, message: Box<Message>) {
-        self.update_header(&id, |header| header.is_read = true);
+    pub(super) fn on_thread_message_loaded(
+        &mut self,
+        account_id: AccountId,
+        id: String,
+        message: Box<Message>,
+    ) {
+        let reference = MessageRef {
+            account_id,
+            id: id.clone(),
+        };
+        self.update_header_for(&reference, |header| header.is_read = true);
         // Also refresh the selection and any tab displaying this message:
         // session.json stores only identities, reconstructed through this
         // cache-first event.
-        if self.mailbox.selected_id.as_deref() == Some(id.as_str()) {
+        if self.mailbox.selected_id.as_ref() == Some(&reference) {
             let mut refreshed = (*message).clone();
             refreshed.header.is_read = true;
             self.mailbox.selected = Some(Rc::new(refreshed));
@@ -503,29 +559,36 @@ impl AviaryApp {
         self.finish_session_rehydrate(&message);
         self.mailbox
             .thread_bodies
-            .insert(id, ThreadBodyState::Loaded(message));
+            .insert(reference, ThreadBodyState::Loaded(message));
     }
 
     pub(super) fn on_thread_message_error(
         &mut self,
+        account_id: AccountId,
         id: String,
         error: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.mailbox
-            .thread_bodies
-            .insert(id, ThreadBodyState::Error(error.clone()));
+        self.mailbox.thread_bodies.insert(
+            MessageRef { account_id, id },
+            ThreadBodyState::Error(error.clone()),
+        );
         self.notify_error(error, window, cx);
     }
 
-    pub(super) fn on_thread(&mut self, conversation_id: String, messages: Vec<MessageHeader>) {
-        let relevant = self
-            .mailbox
-            .selected
-            .as_ref()
-            .and_then(|message| message.header.conversation_id.as_deref())
-            == Some(conversation_id.as_str());
+    /// Conversation ids are only comparable inside one account: the thread
+    /// is kept only when it belongs to the displayed message's account too.
+    pub(super) fn on_thread(
+        &mut self,
+        account_id: AccountId,
+        conversation_id: String,
+        messages: Vec<MessageHeader>,
+    ) {
+        let relevant = self.mailbox.selected.as_ref().is_some_and(|message| {
+            message.header.account_id == account_id
+                && message.header.conversation_id.as_deref() == Some(conversation_id.as_str())
+        });
         if relevant {
             self.mailbox.thread_bodies.clear();
             self.mailbox.thread = Some((conversation_id, messages));
@@ -578,17 +641,22 @@ impl AviaryApp {
     /// the header, so both are updated.
     pub(super) fn on_message_action_noted(
         &mut self,
+        account_id: AccountId,
         id: String,
         action: crate::model::LastAction,
         at: chrono::DateTime<chrono::Utc>,
     ) {
-        self.update_header(&id, |header| {
+        let reference = MessageRef {
+            account_id,
+            id: id.clone(),
+        };
+        self.update_header_for(&reference, |header| {
             header.last_action = Some(action);
             header.last_action_at = Some(at);
         });
         for tab in &mut self.mailbox.open_tabs {
             if let Some(message) = tab.message_mut() {
-                if message.header.id == id {
+                if message.header.id == id && message.header.account_id == reference.account_id {
                     message.header.last_action = Some(action);
                     message.header.last_action_at = Some(at);
                 }

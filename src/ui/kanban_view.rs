@@ -516,7 +516,7 @@ impl AviaryApp {
     ) -> impl IntoElement {
         if let Some((account_id, message_id)) = self.kanban.preview.clone() {
             let target_is_requested = self.mailbox.active_tab.is_none()
-                && self.mailbox.selected_id.as_deref() == Some(message_id.as_str())
+                && self.mailbox.is_selected(&account_id, &message_id)
                 && self.mailbox.selected.as_ref().is_none_or(|message| {
                     message.header.account_id == account_id && message.header.id == message_id
                 });

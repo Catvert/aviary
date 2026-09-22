@@ -37,7 +37,10 @@ impl AviaryApp {
     }
 
     /// The undo window elapsed and the execution left for the provider: the
-    /// optimistic effect is now confirmed and no longer cancellable.
+    /// optimistic effect is no longer cancellable, but it is kept until the
+    /// execution ends — `complete_optimistic_quick_action` drops it on
+    /// success, `fail_optimistic_quick_action` still needs it to roll back
+    /// the steps that did not go through.
     pub(super) fn on_quick_action_started(
         &mut self,
         execution_id: u64,
@@ -45,7 +48,6 @@ impl AviaryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.cancel_optimistic_quick_action(execution_id, cx);
         self.toast(
             window,
             cx,
@@ -54,6 +56,8 @@ impl AviaryApp {
         );
     }
 
+    /// The durable row was removed before it came due: nothing reached the
+    /// provider, so the optimistic mail-view change is put back.
     pub(super) fn on_quick_action_cancelled(
         &mut self,
         execution_id: u64,
@@ -61,6 +65,7 @@ impl AviaryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_optimistic_quick_action(execution_id, cx);
         self.toast(
             window,
             cx,
@@ -167,11 +172,16 @@ impl AviaryApp {
     /// step touched are carried, so `None` means "left alone", not "false".
     pub(super) fn on_quick_action_message_state(
         &mut self,
+        account_id: AccountId,
         message_id: String,
         read: Option<bool>,
         flagged: Option<bool>,
     ) {
-        self.update_header(&message_id, |header| {
+        let reference = crate::model::MessageRef {
+            account_id,
+            id: message_id,
+        };
+        self.update_header_for(&reference, |header| {
             if let Some(read) = read {
                 header.is_read = read;
             }
@@ -179,11 +189,9 @@ impl AviaryApp {
                 header.is_flagged = flagged;
             }
         });
-        if let Some(message) = self
-            .mailbox
-            .selected_mut()
-            .filter(|message| message.header.id == message_id)
-        {
+        if let Some(message) = self.mailbox.selected_mut().filter(|message| {
+            message.header.account_id == reference.account_id && message.header.id == reference.id
+        }) {
             if let Some(read) = read {
                 message.header.is_read = read;
             }

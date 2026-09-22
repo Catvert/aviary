@@ -728,9 +728,15 @@ impl AviaryApp {
         targets
     }
 
-    pub(crate) fn message_neighbor_after_removal(&self, id: &str) -> Option<MessageHeader> {
+    pub(crate) fn message_neighbor_after_removal(
+        &self,
+        account_id: Option<&AccountId>,
+        id: &str,
+    ) -> Option<MessageHeader> {
         let targets = self.navigable_message_targets();
-        let removed = targets.iter().position(|(_, message)| message.id == id)?;
+        let removed = targets.iter().position(|(_, message)| {
+            message.id == id && account_id.is_none_or(|account| &message.account_id == account)
+        })?;
         let neighbor = neighbor_index_after_removal(targets.len(), removed)?;
         Some(targets[neighbor].1.clone())
     }
@@ -767,13 +773,15 @@ impl AviaryApp {
         if targets.is_empty() {
             return;
         }
-        let current_id = self
+        let current_ref = self
             .displayed_message()
-            .map(|message| message.header.id.clone())
+            .map(|message| MessageRef::from(message.as_ref()))
             .or_else(|| self.mailbox.selected_id.clone());
-        let current = current_id
-            .as_deref()
-            .and_then(|id| targets.iter().position(|(_, message)| message.id == id));
+        let current = current_ref.as_ref().and_then(|current| {
+            targets.iter().position(|(_, message)| {
+                message.id == current.id && message.account_id == current.account_id
+            })
+        });
         let target = match movement {
             super::super::shortcuts::ListMovement::Previous => {
                 current.map_or(0, |index| index.saturating_sub(1))
@@ -1483,11 +1491,11 @@ impl AviaryApp {
         // A collapsed group stands in for its members, so it has to look
         // selected when any of them is the one being read.
         let selected = match group {
-            Some(group) => group.members.iter().any(|member| {
-                member.account_id == aid
-                    && self.mailbox.selected_id.as_deref() == Some(member.id.as_str())
-            }),
-            None => self.mailbox.selected_id.as_deref() == Some(m.id.as_str()),
+            Some(group) => group
+                .members
+                .iter()
+                .any(|member| self.mailbox.is_selected(&member.account_id, &member.id)),
+            None => self.mailbox.is_selected(&m.account_id, &m.id),
         };
         let snoozed_until = self.settings.snoozed_until(&aid, &mid);
         let bulk_selectable = context_scope == "mailbox";

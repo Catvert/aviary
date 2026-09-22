@@ -110,7 +110,10 @@ pub struct MailboxState {
     /// not made any call yet. Allows returning to Mail without
     /// repeatedly reload the same list.
     pub messages_loaded: bool,
-    pub selected_id: Option<String>,
+    /// Message the list selection points at. A full reference rather than a
+    /// bare id: IMAP ids (`INBOX:42`) repeat from one account to the next, so
+    /// an id alone would let another account's reply land in the reader.
+    pub selected_id: Option<MessageRef>,
     /// Shared: the reader hands the displayed message to a dozen sub-elements
     /// on every frame, and a `Message` owns its body, its inline images and
     /// its attachment bytes — copying that per frame is megabytes of churn
@@ -123,7 +126,9 @@ pub struct MailboxState {
     /// Last row used as the range-selection anchor for Shift+click.
     pub selection_anchor: Option<MessageRef>,
     pub thread: Option<(String, Vec<MessageHeader>)>,
-    pub thread_bodies: HashMap<String, ThreadBodyState>,
+    /// Bodies of expanded thread entries, keyed by account *and* id for the
+    /// same reason as `selected_id`.
+    pub thread_bodies: HashMap<MessageRef, ThreadBodyState>,
     /// Quoted sub-messages explicitly expanded by the user. Others remain
     /// collapsed by default, Outlook-style.
     pub expanded_quoted_sections: HashSet<String>,
@@ -183,6 +188,13 @@ impl MailboxState {
     /// the current frame still holds.
     pub(crate) fn selected_mut(&mut self) -> Option<&mut Message> {
         self.selected.as_mut().map(Rc::make_mut)
+    }
+
+    /// Whether the list selection is this exact message.
+    pub(crate) fn is_selected(&self, account_id: &AccountId, id: &str) -> bool {
+        self.selected_id
+            .as_ref()
+            .is_some_and(|selected| &selected.account_id == account_id && selected.id == id)
     }
 }
 

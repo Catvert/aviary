@@ -143,7 +143,7 @@ fn current_header(this: &AviaryApp) -> Option<MessageHeader> {
     if let Some(message) = this.displayed_message() {
         return Some(message.header.clone());
     }
-    let selected = this.mailbox.selected_id.as_deref()?;
+    let selected = this.mailbox.selected_id.as_ref()?;
     this.mailbox
         .search
         .results
@@ -151,7 +151,7 @@ fn current_header(this: &AviaryApp) -> Option<MessageHeader> {
         .into_iter()
         .flatten()
         .chain(this.mailbox.messages.iter())
-        .find(|message| message.id == selected)
+        .find(|message| message.id == selected.id && message.account_id == selected.account_id)
         .cloned()
 }
 

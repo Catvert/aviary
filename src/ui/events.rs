@@ -42,7 +42,7 @@ impl AviaryApp {
             (NotificationActionKind::Reply, Some(reference)) => {
                 self.enter_main_view(MainView::Mail, cx);
                 self.pending_notification_open = Some(reference.clone());
-                self.pending_reply_id = Some(reference.id.clone());
+                self.pending_reply_id = Some(reference.clone());
                 self.open_message(reference.account_id, reference.id, cx);
             }
             (NotificationActionKind::MarkRead, Some(reference)) => {
@@ -347,8 +347,9 @@ impl AviaryApp {
             } => self.on_account_restore_failed(account_id, provider, error),
             Evt::Messages {
                 account_id,
+                folder_id,
                 messages,
-            } => self.on_messages(account_id, messages, window, cx),
+            } => self.on_messages(account_id, folder_id, messages, window, cx),
             Evt::CachedMessages {
                 account_id,
                 folder_id,
@@ -361,9 +362,10 @@ impl AviaryApp {
             } => self.on_conversation_totals(account_id, folder_id, totals),
             Evt::MoreMessages {
                 account_id,
+                folder_id,
                 messages,
                 has_more,
-            } => self.on_more_messages(account_id, messages, has_more),
+            } => self.on_more_messages(account_id, folder_id, messages, has_more),
             Evt::UnifiedMessages {
                 request_id,
                 messages,
@@ -380,8 +382,9 @@ impl AviaryApp {
             } => self.on_unified_more_messages(request_id, messages, has_more),
             Evt::NewMessages {
                 account_id,
+                folder_id,
                 messages,
-            } => self.on_new_messages(account_id, messages, cx),
+            } => self.on_new_messages(account_id, folder_id, messages, cx),
             Evt::MessageChanges {
                 account_id,
                 folder_id,
@@ -444,9 +447,16 @@ impl AviaryApp {
                 account_id,
                 operation_id,
                 message_id,
+                kind,
             } => {
-                notify_root =
-                    self.on_mutation_succeeded(account_id, operation_id, message_id, window, cx);
+                notify_root = self.on_mutation_succeeded(
+                    account_id,
+                    operation_id,
+                    message_id,
+                    kind,
+                    window,
+                    cx,
+                );
             }
             Evt::MutationFailed {
                 account_id,
@@ -502,6 +512,13 @@ impl AviaryApp {
                 action_name,
                 ..
             } => self.on_quick_action_cancelled(execution_id, action_name, window, cx),
+            Evt::ScheduledOperationsCancelled {
+                schedule_id,
+                cancelled,
+                expected,
+            } => {
+                self.on_scheduled_operations_cancelled(schedule_id, cancelled, expected, window, cx)
+            }
             Evt::QuickActionFailed {
                 account_id,
                 remaining,
@@ -520,26 +537,26 @@ impl AviaryApp {
                 remaining,
             } => self.on_quick_action_send_uncertain(account_id, remaining, window, cx),
             Evt::QuickActionMessageState {
+                account_id,
                 message_id,
                 read,
                 flagged,
-                ..
-            } => self.on_quick_action_message_state(message_id, read, flagged),
+            } => self.on_quick_action_message_state(account_id, message_id, read, flagged),
             Evt::ThreadMessageLoaded {
-                account_id: _,
+                account_id,
                 id,
                 message,
-            } => self.on_thread_message_loaded(id, message),
+            } => self.on_thread_message_loaded(account_id, id, message),
             Evt::ThreadMessageError {
-                account_id: _,
+                account_id,
                 id,
                 error,
-            } => self.on_thread_message_error(id, error, window, cx),
+            } => self.on_thread_message_error(account_id, id, error, window, cx),
             Evt::Thread {
-                account_id: _,
+                account_id,
                 conversation_id,
                 messages,
-            } => self.on_thread(conversation_id, messages),
+            } => self.on_thread(account_id, conversation_id, messages),
             Evt::SearchResults {
                 request_id,
                 account_id,
@@ -729,11 +746,11 @@ impl AviaryApp {
                 self.on_message_deleted(account_id, id, window, cx)
             }
             Evt::MessageActionNoted {
-                account_id: _,
+                account_id,
                 id,
                 action,
                 at,
-            } => self.on_message_action_noted(id, action, at),
+            } => self.on_message_action_noted(account_id, id, action, at),
             Evt::MailSent {
                 account_id: _,
                 compose_id,

@@ -1214,25 +1214,6 @@ impl Settings {
             .map(|entry| entry.until)
     }
 
-    /// Deadlines that have come due, cleared from the settings as they are
-    /// returned. Draining rather than reading is what makes waking a message
-    /// happen once: the caller marks each unread, and a second pass over the
-    /// same entries would fight the user marking it read again.
-    pub(crate) fn take_due_snoozes(&mut self, now: DateTime<Utc>) -> Vec<(AccountId, String)> {
-        let mut due = Vec::new();
-        for (account_id, account) in &mut self.accounts {
-            account.snoozed_messages.retain(|entry| {
-                if entry.until <= now {
-                    due.push((account_id.clone(), entry.id.clone()));
-                    false
-                } else {
-                    true
-                }
-            });
-        }
-        due
-    }
-
     fn path() -> Option<PathBuf> {
         directories::ProjectDirs::from("be", "acetics", "aviary")
             .map(|d| d.config_dir().join("settings.json"))
@@ -1267,7 +1248,13 @@ impl Settings {
                 }
             }
         }
-        serde_json::from_value(value)
+        let mut settings: Self = serde_json::from_value(value)?;
+        // AI keys in use start as whatever plaintext fallback the file holds
+        // (a pre-keyring file, or a key the keyring refused); the keyring is
+        // read — and those plaintext keys migrated — in the background by
+        // `AviaryApp::load_ai_keys`, never here on the startup path.
+        settings.global.ai.api_keys = settings.global.ai.plaintext_api_keys.clone();
+        Ok(settings)
     }
 
     pub fn save(&self) {
@@ -1373,6 +1360,22 @@ mod tests {
 
         assert!(loaded.global.force_uniform_font_family);
         assert!(loaded.global.force_uniform_font_size);
+    }
+
+    /// A pre-keyring `settings.json` still carries its AI keys in plaintext:
+    /// they must load and be usable at once, pending their migration.
+    #[test]
+    fn legacy_plaintext_ai_keys_load_as_keys_in_use() {
+        let mut json = serde_json::to_value(Settings::default()).expect("serialization");
+        let ai = json["ai"].as_object_mut().expect("ai object");
+        assert!(!ai.contains_key("openai_api_key"));
+        ai.insert("openai_api_key".into(), "sk-test-legacy".into());
+
+        let loaded =
+            Settings::from_json(&serde_json::to_string(&json).unwrap()).expect("deserialization");
+
+        assert_eq!(loaded.global.ai.plaintext_api_keys.openai, "sk-test-legacy");
+        assert_eq!(loaded.global.ai.api_keys.openai, "sk-test-legacy");
     }
 
     #[test]

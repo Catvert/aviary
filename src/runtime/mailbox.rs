@@ -435,9 +435,13 @@ async fn refresh_inbox_inner(account: Arc<BgAccount>, folder_id: Option<String>,
             for m in &mut msgs {
                 m.account_id = account.id.clone();
             }
-            let mut seen = account.seen_ids.lock().await;
-            *seen = msgs.iter().map(|h| h.id.clone()).collect();
-            drop(seen);
+            // `seen_ids` is the auto-refresh baseline, and auto-refresh only
+            // ever watches the inbox: seeding it with another folder's ids
+            // would make its next tick report the whole inbox as new mail.
+            if folder_id.is_none() {
+                let mut seen = account.seen_ids.lock().await;
+                *seen = msgs.iter().map(|h| h.id.clone()).collect();
+            }
             account
                 .global
                 .cache
@@ -449,11 +453,15 @@ async fn refresh_inbox_inner(account: Arc<BgAccount>, folder_id: Option<String>,
             });
             account.emit(Evt::Messages {
                 account_id: account.id.clone(),
+                folder_id: folder_id.clone(),
                 messages: msgs,
             });
             emit_conversation_totals(&account, folder_id.clone()).await;
             sync_cached_folder(account.clone(), &auth, folder_id).await;
-            super::operations::drain_account(account).await;
+            // Detached: this refresh may run inside the throttled-retry task,
+            // which a newer throttle aborts, and an abort must never cut a
+            // send in flight.
+            super::operations::spawn_drain(account);
         }
         Err(e) => {
             if let Some(pause) = super::throttle_pause(&e) {
@@ -598,17 +606,19 @@ pub(super) async fn load_more(
                 m.account_id = account.id.clone();
             }
             let returned = msgs.len();
-            let mut seen = account.seen_ids.lock().await;
-            for m in &msgs {
-                seen.insert(m.id.clone());
+            if folder_id.is_none() {
+                let mut seen = account.seen_ids.lock().await;
+                for m in &msgs {
+                    seen.insert(m.id.clone());
+                }
             }
-            drop(seen);
             account
                 .global
                 .cache
                 .store_headers(account.id.clone(), folder_id.clone(), msgs.clone());
             account.emit(Evt::MoreMessages {
                 account_id: account.id.clone(),
+                folder_id: folder_id.clone(),
                 messages: msgs,
                 has_more: returned >= limit,
             });
@@ -668,18 +678,22 @@ async fn auto_refresh_check(account: Arc<BgAccount>, limit: usize) -> bool {
                 if !new_msgs.is_empty() {
                     account.emit(Evt::NewMessages {
                         account_id: account.id.clone(),
+                        folder_id: folder_id.clone(),
                         messages: new_msgs,
                     });
                 }
             } else {
                 account.emit(Evt::Messages {
                     account_id: account.id.clone(),
+                    folder_id: folder_id.clone(),
                     messages: msgs,
                 });
             }
             emit_conversation_totals(&account, folder_id.clone()).await;
             sync_cached_folder(account.clone(), &auth, folder_id).await;
-            super::operations::drain_account(account).await;
+            // Detached for the same reason as in `refresh_inbox`: this loop is
+            // aborted whenever the refresh interval changes.
+            super::operations::spawn_drain(account);
             true
         }
         Err(e) => {

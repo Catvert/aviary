@@ -637,6 +637,19 @@ async fn run(
             } => {
                 operations::cancel_quick_action(global.clone(), account_id, execution_id).await;
             }
+            // Awaited, not spawned: a cancel queued right behind must find the
+            // rows already stored.
+            Cmd::ScheduleOperations {
+                schedule_id,
+                delay_secs,
+                commands,
+            } => {
+                operations::schedule_operations(global.clone(), schedule_id, delay_secs, commands)
+                    .await;
+            }
+            Cmd::CancelScheduledOperations { schedule_id } => {
+                operations::cancel_scheduled_operations(global.clone(), schedule_id).await;
+            }
             Cmd::LoadTags { account_id } => {
                 global.spawn_on(&account_id, tags::load).await;
             }

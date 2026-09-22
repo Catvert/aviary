@@ -113,20 +113,7 @@ impl AviaryApp {
                 .mailbox
                 .selected_id
                 .as_ref()
-                .is_some_and(|selected_id| {
-                    self.mailbox.messages.iter().any(|message| {
-                        message.id == *selected_id && message.account_id == account_id
-                    }) || self
-                        .mailbox
-                        .search
-                        .results
-                        .as_ref()
-                        .is_some_and(|messages| {
-                            messages.iter().any(|message| {
-                                message.id == *selected_id && message.account_id == account_id
-                            })
-                        })
-                });
+                .is_some_and(|selected| selected.account_id == account_id);
 
         let mut compose_ids: std::collections::HashSet<u64> = self
             .composes

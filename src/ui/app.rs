@@ -229,7 +229,7 @@ enum PendingCancelEffect {
     MessageFlags(Vec<(MessageRef, bool)>),
     MessageReads(Vec<(MessageRef, bool)>),
     MessageTags {
-        message_id: String,
+        reference: MessageRef,
         header_tags: Vec<String>,
         message_tags: Option<Vec<String>>,
     },
@@ -260,7 +260,7 @@ struct OptimisticMessageRemoval {
 }
 
 struct OptimisticSelection {
-    message_id: String,
+    message_id: Option<MessageRef>,
     message: Option<Rc<Message>>,
     thread: Option<(String, Vec<MessageHeader>)>,
 }
@@ -285,8 +285,23 @@ struct PendingSentRestore {
     session: SentMessageSession,
 }
 
+/// Which listing a message was shown in, as far as a rollback needs to know.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct ListingOrigin {
+    /// Folder and account scope of `mailbox.messages`, when it held the
+    /// message.
+    pub(super) folder: Option<(Option<String>, Option<AccountId>, Option<AccountId>)>,
+    /// Search request whose results held the message.
+    pub(super) search_request: Option<u64>,
+}
+
 struct PendingAction {
+    /// Commands still held in memory. Empty when `durable`: those already sit
+    /// in the outbox, due when the window closes.
     commands: Vec<Cmd>,
+    /// The commands were handed to the outbox with a deadline
+    /// (`Cmd::ScheduleOperations`); undo has to take them back from there.
+    durable: bool,
     notification_key: SharedString,
     started_message: SharedString,
     canceled_message: SharedString,
@@ -302,7 +317,7 @@ struct PendingAction {
 /// happens — seven moved, three refused. Counting both sides is what makes a
 /// partial outcome sayable.
 struct PendingBulkCompletion {
-    remaining: HashSet<MessageRef>,
+    remaining: HashSet<BulkKey>,
     succeeded: usize,
     failed: usize,
     /// First permanent failure, verbatim: a summary that only counts failures
@@ -398,13 +413,23 @@ pub(crate) struct QuickActionState {
     pub(crate) menu: Option<super::quick_actions::QuickActionMenu>,
 }
 
+/// What a provider reply is booked against: the message *and* the kind of
+/// mutation it acknowledges. Two batches can be in flight on the same message —
+/// a selection marked read, then moved before the first batch landed — and
+/// keying on the message alone let the second batch swallow the first one's
+/// replies.
+pub(crate) type BulkKey = (MessageRef, MessageMutationKind);
+
 /// Bulk actions waiting for their per-message provider replies, aggregated into
 /// one completion toast per batch.
 #[derive(Default)]
 struct BulkCompletions {
     pending: HashMap<u64, PendingBulkCompletion>,
-    /// Reverse index: a reply names a message, the toast belongs to a batch.
-    by_message: HashMap<MessageRef, u64>,
+    /// Reverse index: a reply names a message and a mutation kind, the toast
+    /// belongs to a batch. Several batches of the same kind on one message are
+    /// answered in submission order — the outbox drains an account's rows in
+    /// order — hence a queue, oldest first.
+    by_message: HashMap<BulkKey, std::collections::VecDeque<u64>>,
     seq: u64,
 }
 
@@ -412,11 +437,14 @@ impl BulkCompletions {
     /// Claims a batch id and indexes its messages. Split from `arm` because
     /// the notification key only exists once the action has been scheduled,
     /// while the index has to be in place before any command goes out.
-    fn claim(&mut self, references: &[MessageRef]) -> u64 {
+    fn claim(&mut self, keys: &[BulkKey]) -> u64 {
         self.seq = self.seq.wrapping_add(1);
         let completion_id = self.seq;
-        for reference in references {
-            self.by_message.insert(reference.clone(), completion_id);
+        for key in keys {
+            self.by_message
+                .entry(key.clone())
+                .or_default()
+                .push_back(completion_id);
         }
         completion_id
     }
@@ -425,14 +453,14 @@ impl BulkCompletions {
     fn arm(
         &mut self,
         completion_id: u64,
-        references: &[MessageRef],
+        keys: &[BulkKey],
         message: String,
         notification_key: SharedString,
     ) {
         self.pending.insert(
             completion_id,
             PendingBulkCompletion {
-                remaining: references.iter().cloned().collect(),
+                remaining: keys.iter().cloned().collect(),
                 succeeded: 0,
                 failed: 0,
                 first_error: None,
@@ -445,8 +473,15 @@ impl BulkCompletions {
 
     /// Books one terminal reply — `error` set means it failed for good — and
     /// says whether it closed the batch.
-    fn record(&mut self, reference: &MessageRef, error: Option<String>) -> BulkReply {
-        let Some(completion_id) = self.by_message.remove(reference) else {
+    fn record(&mut self, key: &BulkKey, error: Option<String>) -> BulkReply {
+        let Some(queue) = self.by_message.get_mut(key) else {
+            return BulkReply::Single;
+        };
+        let completion_id = queue.pop_front();
+        if queue.is_empty() {
+            self.by_message.remove(key);
+        }
+        let Some(completion_id) = completion_id else {
             return BulkReply::Single;
         };
         let Some(batch) = self.pending.get_mut(&completion_id) else {
@@ -454,7 +489,7 @@ impl BulkCompletions {
             // silent beats one toast per straggler.
             return BulkReply::Pending;
         };
-        batch.remaining.remove(reference);
+        batch.remaining.remove(key);
         match error {
             Some(error) => {
                 batch.failed += 1;
@@ -482,8 +517,8 @@ impl BulkCompletions {
 
     /// Books a deferral, which is *not* terminal: the operation stays in the
     /// outbox, so the message keeps its place in the batch.
-    fn note_deferral(&mut self, reference: &MessageRef) -> BulkDeferral {
-        let Some(completion_id) = self.by_message.get(reference) else {
+    fn note_deferral(&mut self, key: &BulkKey) -> BulkDeferral {
+        let Some(completion_id) = self.by_message.get(key).and_then(|queue| queue.front()) else {
             return BulkDeferral {
                 bulk: false,
                 first: true,
@@ -498,12 +533,15 @@ impl BulkCompletions {
 
     /// Drops a batch whole: undo took its commands back, or the aggregation
     /// window closed.
-    fn forget(&mut self, completion_id: u64, references: &[MessageRef]) {
-        for reference in references {
-            // Only if it still points at this batch: a later action on the
-            // same message owns the index by then.
-            if self.by_message.get(reference) == Some(&completion_id) {
-                self.by_message.remove(reference);
+    fn forget(&mut self, completion_id: u64, keys: &[BulkKey]) {
+        for key in keys {
+            // Only this batch's entry: a later action on the same message
+            // keeps its own place in the queue.
+            if let Some(queue) = self.by_message.get_mut(key) {
+                queue.retain(|queued| *queued != completion_id);
+                if queue.is_empty() {
+                    self.by_message.remove(key);
+                }
             }
         }
         self.pending.remove(&completion_id);
@@ -609,9 +647,9 @@ pub struct AviaryApp {
     /// arrives.
     pub pending_notification_open: Option<MessageRef>,
     /// Message to reply to as soon as its body arrives.
-    pub pending_reply_id: Option<String>,
+    pub pending_reply_id: Option<MessageRef>,
     /// Message to forward as soon as its body and attachments arrive.
-    pub pending_forward_id: Option<String>,
+    pub pending_forward_id: Option<MessageRef>,
     /// Quick-action executions in flight, their optimistic effects, and the
     /// shared menu.
     pub(crate) quick_actions: QuickActionState,
@@ -619,13 +657,18 @@ pub struct AviaryApp {
     /// message so duplicate clicks are disabled across selection and tabs.
     pub invitation_responses_in_flight: HashSet<MessageRef>,
 
-    /// Mutations held for a few seconds before being sent to the runtime. While
-    /// they remain here, the notification's undo button can guarantee that no
-    /// provider call has occurred.
+    /// Undo windows still open. Their commands already sit in the durable
+    /// outbox, due when the window closes, so quitting inside it loses
+    /// nothing; while an entry remains here the notification's undo button
+    /// can still take them back before any provider call.
     pending_actions: HashMap<u64, PendingAction>,
     pending_action_seq: u64,
     /// Bulk actions waiting for their per-message provider replies.
     bulk_completions: BulkCompletions,
+    /// Listing each optimistically removed message was taken out of, so a
+    /// failed move or deletion only puts it back where it came from — not
+    /// into whatever folder the user has opened since.
+    pub(super) optimistic_removal_origins: HashMap<MessageRef, ListingOrigin>,
     /// Invalidates deferred opens when newer navigation occurs.
     pending_message_open_seq: u64,
 
@@ -697,6 +740,10 @@ impl AviaryApp {
         let (notification_tx, mut notification_rx) = crate::notify::channel();
 
         cx.on_app_quit(|app, cx| {
+            // Anything an undo window still holds in memory — only commands
+            // the outbox cannot carry, the others were stored when scheduled —
+            // is handed over now rather than dropped with the process.
+            app.flush_undurable_pending_actions();
             app.persist_session(cx);
             app.session_store.flush();
             async {}
@@ -869,6 +916,8 @@ impl AviaryApp {
             .detach();
         }
 
+        Self::load_ai_keys(settings.global.ai.plaintext_api_keys.clone(), window, cx);
+
         #[cfg(target_os = "linux")]
         let tray = if settings.global.tray_enabled {
             let (handle, mut tray_rx) = crate::tray::spawn();
@@ -981,11 +1030,7 @@ impl AviaryApp {
         let mut mailbox = MailboxState {
             selected_folder_id: restored_session.mailbox.selected_folder_id.clone(),
             unified_selected_account: restored_session.mailbox.unified_selected_account.clone(),
-            selected_id: restored_session
-                .mailbox
-                .selected_message
-                .as_ref()
-                .map(|message| message.id.clone()),
+            selected_id: restored_session.mailbox.selected_message.clone(),
             selected: None,
             search: MailSearchState {
                 query: restored_session.mailbox.search_query.clone(),
@@ -1065,6 +1110,7 @@ impl AviaryApp {
             pending_actions: HashMap::new(),
             pending_action_seq: 0,
             bulk_completions: BulkCompletions::default(),
+            optimistic_removal_origins: HashMap::new(),
             pending_message_open_seq: 0,
             shortcut_focus,
             search_input,
@@ -1632,13 +1678,21 @@ impl AviaryApp {
         self.ensure_kanban_loaded();
     }
 
-    fn begin_message_open(&mut self, id: &str, cx: &mut Context<Self>) -> u64 {
+    fn begin_message_open(
+        &mut self,
+        account_id: &AccountId,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> u64 {
         self.pending_message_open_seq = self.pending_message_open_seq.wrapping_add(1);
         // The current body disappears as soon as this selection changes.
         // Signaling its Blitz thread immediately prevents renders from piling
         // up when j/k traverses the list faster than messages can rasterize.
         super::blitz_body::cancel_pending_reader(cx);
-        self.mailbox.selected_id = Some(id.to_string());
+        self.mailbox.selected_id = Some(MessageRef {
+            account_id: account_id.clone(),
+            id: id.to_string(),
+        });
         self.mailbox.selected = None;
         self.mailbox.thread = None;
         // Clicking the list returns the reader to the selection.
@@ -1653,7 +1707,7 @@ impl AviaryApp {
     }
 
     pub fn open_message(&mut self, account_id: AccountId, id: String, cx: &mut Context<Self>) {
-        self.begin_message_open(&id, cx);
+        self.begin_message_open(&account_id, &id, cx);
         self.ensure_tags_loaded(&account_id);
         let conversation = self.collapsed_conversation_members(&account_id, &id);
         self.send(Cmd::OpenMessage {
@@ -1675,7 +1729,7 @@ impl AviaryApp {
         id: String,
         cx: &mut Context<Self>,
     ) {
-        let generation = self.begin_message_open(&id, cx);
+        let generation = self.begin_message_open(&account_id, &id, cx);
         self.ensure_tags_loaded(&account_id);
         // Do not let the previous open occupy Graph while debouncing the new
         // selection.
@@ -1685,7 +1739,7 @@ impl AviaryApp {
             timer.await;
             let _ = this.update(cx, |this, cx| {
                 if this.pending_message_open_seq == generation
-                    && this.mailbox.selected_id.as_deref() == Some(id.as_str())
+                    && this.mailbox.is_selected(&account_id, &id)
                 {
                     // Reading a thread happens here rather than on the key
                     // press: j/k passing over a row is not opening it, and
@@ -1705,14 +1759,9 @@ impl AviaryApp {
         cx.notify();
     }
 
-    /// Locally marks a header as read/starred in every list.
-    pub(crate) fn update_header(&mut self, id: &str, f: impl Fn(&mut MessageHeader)) {
-        self.update_first_header_matching(|header| header.id == id, f);
-    }
-
-    /// Account-aware counterpart used by cross-account bulk operations. Two
-    /// accounts can hold the same provider id — IMAP ids are folder-local — so
-    /// this is what an operation carrying a `MessageRef` should use.
+    /// Locally updates a header (read, flagged, tags…) in every list. Always
+    /// keyed by account *and* id: two accounts can hold the same provider id —
+    /// IMAP ids are folder-local — so an id alone would touch the wrong one.
     pub(crate) fn update_header_for(
         &mut self,
         reference: &MessageRef,
@@ -1763,6 +1812,17 @@ impl AviaryApp {
         self.invalidate_message_list();
     }
 
+    /// What `mailbox.messages` currently lists: folder, unified account scope
+    /// and account context. Compared whole — a rollback that cannot tell the
+    /// listing apart leaves the message to the refresh that follows it.
+    pub(super) fn listing_scope(&self) -> (Option<String>, Option<AccountId>, Option<AccountId>) {
+        (
+            self.mailbox.selected_folder_id.clone(),
+            self.mailbox.unified_selected_account.clone(),
+            self.current_account_id.clone(),
+        )
+    }
+
     pub(crate) fn invalidate_message_list(&mut self) {
         self.message_list_revision = self.message_list_revision.wrapping_add(1);
         self.message_list_cache = None;
@@ -1796,18 +1856,16 @@ impl AviaryApp {
             .retain(|motion_key| visible.contains(motion_key));
     }
 
-    fn apply_message_tag(&mut self, id: &str, key: &str, added: bool) {
-        self.update_header(id, |header| {
+    fn apply_message_tag(&mut self, reference: &MessageRef, key: &str, added: bool) {
+        self.update_header_for(reference, |header| {
             header.tags.retain(|tag| tag != key);
             if added {
                 header.tags.push(key.to_string());
             }
         });
-        if let Some(message) = self
-            .mailbox
-            .selected_mut()
-            .filter(|message| message.header.id == id)
-        {
+        if let Some(message) = self.mailbox.selected_mut().filter(|message| {
+            message.header.account_id == reference.account_id && message.header.id == reference.id
+        }) {
             message.tags.retain(|tag| tag != key);
             if added {
                 message.tags.push(key.to_string());
@@ -1889,39 +1947,63 @@ impl AviaryApp {
         }
     }
 
-    pub(super) fn remove_message_everywhere(&mut self, id: &str) {
-        if let Some(sent) = self.mailbox.sent_messages.remove(id) {
-            for message in sent {
-                self.mailbox
-                    .expanded_sent_messages
-                    .remove(&message.message.header.id);
+    /// Drops a message the provider says is gone from every place Aviary
+    /// shows or remembers it. Keyed by account and id: IMAP ids repeat from
+    /// one account to the next, and deleting `INBOX:42` in one mailbox must
+    /// not take another mailbox's `INBOX:42` with it.
+    pub(super) fn remove_message_everywhere(&mut self, account_id: &AccountId, id: &str) {
+        let same = |message: &MessageHeader| &message.account_id == account_id && message.id == id;
+        let same_ref =
+            |reference: &MessageRef| &reference.account_id == account_id && reference.id == id;
+        // The reply panels only name the message they sit above, not its
+        // account: they belong to this message if the reader shows it.
+        let displayed_here = self.mailbox.selected.as_ref().is_some_and(|message| {
+            &message.header.account_id == account_id && message.header.id == id
+        }) || self.mailbox.is_selected(account_id, id)
+            || self
+                .mailbox
+                .open_tabs
+                .iter()
+                .any(|tab| tab.message_ref().as_ref().is_some_and(same_ref));
+        // `sent_messages` is keyed by the original's provider id alone; only
+        // drop the snapshots that belong to this account.
+        let sent_belongs_here = self.mailbox.sent_messages.get(id).is_some_and(|sent| {
+            sent.iter()
+                .all(|message| &message.message.header.account_id == account_id)
+        });
+        if sent_belongs_here {
+            if let Some(sent) = self.mailbox.sent_messages.remove(id) {
+                for message in sent {
+                    self.mailbox
+                        .expanded_sent_messages
+                        .remove(&message.message.header.id);
+                }
             }
         }
-        self.mailbox.messages.retain(|m| m.id != id);
+        self.optimistic_removal_origins.remove(&MessageRef {
+            account_id: account_id.clone(),
+            id: id.to_string(),
+        });
+        self.mailbox.messages.retain(|m| !same(m));
         self.mailbox
             .selected_messages
-            .retain(|reference| reference.id != id);
-        if self
-            .mailbox
-            .selection_anchor
-            .as_ref()
-            .is_some_and(|reference| reference.id == id)
-        {
+            .retain(|reference| !same_ref(reference));
+        if self.mailbox.selection_anchor.as_ref().is_some_and(same_ref) {
             self.mailbox.selection_anchor = None;
         }
         if let Some(res) = &mut self.mailbox.search.results {
-            res.retain(|m| m.id != id);
+            res.retain(|m| !same(m));
         }
         self.invalidate_message_list();
         if let SenderHistoryState::Loaded { messages, .. } = &mut self.sender_history {
-            messages.retain(|m| m.id != id);
+            messages.retain(|m| !same(m));
         }
-        if self.mailbox.selected_id.as_deref() == Some(id) {
+        if self.mailbox.is_selected(account_id, id) {
             self.mailbox.selected = None;
             self.mailbox.selected_id = None;
             self.mailbox.thread = None;
         }
-        for board in self.kanban.accounts.values_mut() {
+        if let Some(board) = self.kanban.accounts.get_mut(account_id) {
             for column in &mut board.columns {
                 column.messages.retain(|message| message.id != id);
             }
@@ -1931,31 +2013,37 @@ impl AviaryApp {
             .kanban
             .preview
             .as_ref()
-            .is_some_and(|(_, message_id)| message_id == id)
+            .is_some_and(|(preview_account, message_id)| {
+                preview_account == account_id && message_id == id
+            })
         {
             self.kanban.preview = None;
         }
-        if let Some(ix) = self.mailbox.open_tabs.iter().position(|tab| {
-            tab.message_ref()
-                .is_some_and(|reference| reference.id == id)
-        }) {
+        if let Some(ix) = self
+            .mailbox
+            .open_tabs
+            .iter()
+            .position(|tab| tab.message_ref().as_ref().is_some_and(same_ref))
+        {
             self.close_viewer_tab(ix);
         }
         self.pending_rehydrate
-            .retain(|reference| reference.id != id);
-        self.pending_sent_restore
-            .retain(|pending| pending.related_to != id && pending.session.message.id != id);
+            .retain(|reference| !same_ref(reference));
+        self.pending_sent_restore.retain(|pending| {
+            !(pending.session.message.account_id == *account_id
+                && (pending.related_to == id || pending.session.message.id == id))
+        });
         if self
             .inline_reply
             .as_ref()
-            .is_some_and(|r| r.message_id == id)
+            .is_some_and(|r| displayed_here && r.message_id == id)
         {
             self.inline_reply = None;
         }
         if self
             .pending_inline_reply
             .as_ref()
-            .is_some_and(|reply| reply.message_id == id)
+            .is_some_and(|reply| displayed_here && reply.message_id == id)
         {
             self.pending_inline_reply = None;
         }
@@ -2023,6 +2111,8 @@ impl AviaryApp {
 mod bulk_completion_tests {
     use super::*;
 
+    const MOVE: MessageMutationKind = MessageMutationKind::Move;
+
     fn reference(id: &str) -> MessageRef {
         MessageRef {
             account_id: AccountId("account-a".into()),
@@ -2030,10 +2120,14 @@ mod bulk_completion_tests {
         }
     }
 
-    fn batch(references: &[MessageRef], message: &str) -> BulkCompletions {
+    fn key(id: &str, kind: MessageMutationKind) -> BulkKey {
+        (reference(id), kind)
+    }
+
+    fn batch(keys: &[BulkKey], message: &str) -> BulkCompletions {
         let mut completions = BulkCompletions::default();
-        let id = completions.claim(references);
-        completions.arm(id, references, message.to_string(), "batch-key".into());
+        let id = completions.claim(keys);
+        completions.arm(id, keys, message.to_string(), "batch-key".into());
         completions
     }
 
@@ -2041,19 +2135,19 @@ mod bulk_completion_tests {
     /// true on its own, and the user is told both, once.
     #[test]
     fn a_partial_batch_reports_both_counts_on_its_last_reply() {
-        let references = [reference("a"), reference("b"), reference("c")];
-        let mut completions = batch(&references, "3 moved");
+        let keys = [key("a", MOVE), key("b", MOVE), key("c", MOVE)];
+        let mut completions = batch(&keys, "3 moved");
 
         assert!(matches!(
-            completions.record(&references[0], None),
+            completions.record(&keys[0], None),
             BulkReply::Pending
         ));
         assert!(matches!(
-            completions.record(&references[1], Some("mailbox full".into())),
+            completions.record(&keys[1], Some("mailbox full".into())),
             BulkReply::Pending
         ));
         let completion = completions
-            .record(&references[2], None)
+            .record(&keys[2], None)
             .completion()
             .expect("last reply closes the batch");
 
@@ -2067,12 +2161,15 @@ mod bulk_completion_tests {
     /// the outcomes the action's own wording cannot express.
     #[test]
     fn a_batch_that_fully_succeeds_carries_its_copy() {
-        let references = [reference("a"), reference("b")];
-        let mut completions = batch(&references, "2 deleted");
+        let keys = [
+            key("a", MessageMutationKind::Delete),
+            key("b", MessageMutationKind::Delete),
+        ];
+        let mut completions = batch(&keys, "2 deleted");
 
-        completions.record(&references[0], None);
+        completions.record(&keys[0], None);
         let completion = completions
-            .record(&references[1], None)
+            .record(&keys[1], None)
             .completion()
             .expect("closes the batch");
 
@@ -2084,12 +2181,12 @@ mod bulk_completion_tests {
     /// is one nobody reads.
     #[test]
     fn only_the_first_error_of_a_batch_is_kept() {
-        let references = [reference("a"), reference("b")];
-        let mut completions = batch(&references, "");
+        let keys = [key("a", MOVE), key("b", MOVE)];
+        let mut completions = batch(&keys, "");
 
-        completions.record(&references[0], Some("first".into()));
+        completions.record(&keys[0], Some("first".into()));
         let completion = completions
-            .record(&references[1], Some("second".into()))
+            .record(&keys[1], Some("second".into()))
             .completion()
             .expect("closes the batch");
 
@@ -2100,22 +2197,22 @@ mod bulk_completion_tests {
     #[test]
     fn a_message_outside_any_batch_reports_itself() {
         let mut completions = BulkCompletions::default();
-        assert!(!completions.record(&reference("lone"), None).is_bulk());
+        assert!(!completions.record(&key("lone", MOVE), None).is_bulk());
     }
 
     /// Every message of an offline batch is deferred at once, and they all say
     /// the same thing.
     #[test]
     fn only_the_first_deferral_of_a_batch_speaks() {
-        let references = [reference("a"), reference("b")];
-        let completions = &mut batch(&references, "");
+        let keys = [key("a", MOVE), key("b", MOVE)];
+        let completions = &mut batch(&keys, "");
 
-        let first = completions.note_deferral(&references[0]);
+        let first = completions.note_deferral(&keys[0]);
         assert!(first.bulk && first.first);
-        assert!(!completions.note_deferral(&references[1]).first);
+        assert!(!completions.note_deferral(&keys[1]).first);
         // Deferring is not terminal: the messages are still expected.
         assert!(matches!(
-            completions.record(&references[0], None),
+            completions.record(&keys[0], None),
             BulkReply::Pending
         ));
     }
@@ -2125,15 +2222,78 @@ mod bulk_completion_tests {
     /// its index.
     #[test]
     fn forgetting_a_batch_leaves_a_later_one_indexed() {
-        let references = [reference("a")];
+        let keys = [key("a", MOVE)];
         let mut completions = BulkCompletions::default();
-        let old = completions.claim(&references);
-        completions.arm(old, &references, String::new(), "old".into());
-        let new = completions.claim(&references);
-        completions.arm(new, &references, String::new(), "new".into());
+        let old = completions.claim(&keys);
+        completions.arm(old, &keys, String::new(), "old".into());
+        let new = completions.claim(&keys);
+        completions.arm(new, &keys, String::new(), "new".into());
 
-        completions.forget(old, &references);
+        completions.forget(old, &keys);
 
-        assert!(completions.record(&references[0], None).is_bulk());
+        assert!(completions.record(&keys[0], None).is_bulk());
+    }
+
+    /// A selection marked read, then moved before the first batch landed: each
+    /// reply goes to the batch of its own kind, and both batches close.
+    #[test]
+    fn two_batches_on_the_same_messages_keep_their_own_replies() {
+        let read = MessageMutationKind::MarkRead(true);
+        let read_keys = [key("a", read), key("b", read)];
+        let move_keys = [key("a", MOVE), key("b", MOVE)];
+        let mut completions = BulkCompletions::default();
+        let read_batch = completions.claim(&read_keys);
+        completions.arm(read_batch, &read_keys, "read".into(), "read-key".into());
+        let move_batch = completions.claim(&move_keys);
+        completions.arm(move_batch, &move_keys, "moved".into(), "move-key".into());
+
+        assert!(matches!(
+            completions.record(&read_keys[0], None),
+            BulkReply::Pending
+        ));
+        assert!(matches!(
+            completions.record(&move_keys[0], None),
+            BulkReply::Pending
+        ));
+        let read_done = completions
+            .record(&read_keys[1], None)
+            .completion()
+            .expect("the read batch closes on its own replies");
+        assert_eq!(read_done.message, "read");
+        assert_eq!(read_done.total(), 2);
+        let move_done = completions
+            .record(&move_keys[1], Some("refused".into()))
+            .completion()
+            .expect("the move batch closes on its own replies");
+        assert_eq!(move_done.message, "moved");
+        assert_eq!((move_done.succeeded, move_done.failed), (1, 1));
+    }
+
+    /// Two batches of the same kind on one message are answered oldest first,
+    /// so the older one is not left waiting for a reply the newer one took.
+    #[test]
+    fn same_kind_batches_are_answered_in_submission_order() {
+        let flag = MessageMutationKind::SetFlag(true);
+        let first_keys = [key("a", flag), key("b", flag)];
+        let second_keys = [key("a", flag), key("c", flag)];
+        let mut completions = BulkCompletions::default();
+        let first = completions.claim(&first_keys);
+        completions.arm(first, &first_keys, "first".into(), "first".into());
+        let second = completions.claim(&second_keys);
+        completions.arm(second, &second_keys, "second".into(), "second".into());
+
+        completions.record(&first_keys[0], None);
+        let first_done = completions
+            .record(&first_keys[1], None)
+            .completion()
+            .expect("the older batch got the first reply for `a`");
+        assert_eq!(first_done.message, "first");
+
+        completions.record(&second_keys[0], None);
+        let second_done = completions
+            .record(&second_keys[1], None)
+            .completion()
+            .expect("the newer batch got the second reply for `a`");
+        assert_eq!(second_done.message, "second");
     }
 }

@@ -3,7 +3,7 @@
 use super::super::app::{AviaryApp, BulkReply};
 use super::super::state::{SenderHistoryState, ThreadBodyState};
 use super::super::util;
-use crate::model::{AccountId, MailFolder, Message, MessageHeader, Tag};
+use crate::model::{AccountId, MailFolder, Message, MessageHeader, MessageRef, Tag};
 use crate::runtime::{Cmd, MessageMutationKind};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{Context, Window};
@@ -144,11 +144,16 @@ impl AviaryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let reply = self.take_bulk_message_completion(&account_id, &message_id, None);
+        let reply = self.take_bulk_message_completion(
+            &account_id,
+            &message_id,
+            MessageMutationKind::Move,
+            None,
+        );
         // Graph changes a message id when it crosses folders. Keep a local
         // pin attached when the provider reports a replacement id.
         self.replace_pinned_message_id(&account_id, &message_id, new_id.as_deref());
-        self.remove_message_everywhere(&message_id);
+        self.remove_message_everywhere(&account_id, &message_id);
         if let Some(new_id) = new_id {
             log::debug!("message moved, new id: {new_id}");
         }
@@ -357,14 +362,18 @@ impl AviaryApp {
                 util::tag_storage_key(provider, tag)
             })
             .unwrap_or_else(|| tag_id.clone());
-        self.update_header(&message_id, |header| {
+        let reference = MessageRef {
+            account_id: account_id.clone(),
+            id: message_id.clone(),
+        };
+        self.update_header_for(&reference, |header| {
             header.tags.retain(|tag| tag != &key);
             if added {
                 header.tags.push(key.clone());
             }
         });
         if let Some(selected) = self.mailbox.selected_mut() {
-            if selected.header.id == message_id {
+            if selected.header.account_id == account_id && selected.header.id == message_id {
                 selected.tags.retain(|tag| tag != &key);
                 if added {
                     selected.tags.push(key.clone());
