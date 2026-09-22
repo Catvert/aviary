@@ -22,6 +22,69 @@ fn provider_label(provider: AiProvider) -> gpui_kit::SharedString {
 }
 
 impl AviaryApp {
+    /// Reads the AI keys from the OS keyring — migrating any plaintext key
+    /// left in `settings.json` — off the gpui thread, then folds them into
+    /// the settings. Called once from `AviaryApp::new`; until it answers, the
+    /// keys in use are the plaintext ones (and `runtime::ai` reads a missing
+    /// key from the keyring itself).
+    pub(crate) fn load_ai_keys(
+        plaintext: crate::ai::AiApiKeys,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |this, cx| {
+            let load = crate::ai_keys::load(plaintext.clone()).await;
+            let _ = this.update_in(cx, |app, window, cx| {
+                let ai = &mut app.settings.global.ai;
+                if crate::ai_keys::apply_load(ai, &plaintext, &load) {
+                    app.settings.save();
+                }
+                app.refresh_compose_ai_settings(cx);
+                app.sync_ai_key_inputs(window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Hands the writes planned by `ai_keys::plan_save` to the keyring thread
+    /// and records its answers: a refused key goes back to plaintext.
+    fn store_ai_keys(&self, writes: Vec<(AiProvider, String)>, cx: &mut Context<Self>) {
+        if writes.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let results = crate::ai_keys::store(writes).await;
+            let _ = this.update(cx, |app, cx| {
+                if crate::ai_keys::apply_writes(&mut app.settings.global.ai, &results) {
+                    app.settings.save();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Shows the keys just loaded in the (masked) key fields, if the
+    /// preferences were opened before the keyring answered.
+    fn sync_ai_key_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ui) = &self.settings_ui else {
+            return;
+        };
+        let keys = self.settings.global.ai.api_keys.clone();
+        for (input, key) in [
+            (&ui.ai_openai_api_key, keys.openai),
+            (&ui.ai_anthropic_api_key, keys.anthropic),
+            (&ui.ai_gemini_api_key, keys.gemini),
+            (&ui.ai_local_api_key, keys.local),
+        ] {
+            // A field the user has started typing in is left alone.
+            if input.read(cx).value().trim().is_empty() {
+                input.update(cx, |state, cx| state.set_value(key, window, cx));
+            }
+        }
+    }
+
     pub(super) fn render_settings_ai(
         &mut self,
         _window: &mut Window,
@@ -31,6 +94,14 @@ impl AviaryApp {
         let provider_button = self.render_ai_provider_button(cx);
 
         let fields = self.render_ai_provider_fields(cx);
+        // Only a key the keyring refused is still written to settings.json.
+        let key_in_plaintext = !self
+            .settings
+            .global
+            .ai
+            .plaintext_api_keys
+            .get(self.settings.global.ai.provider)
+            .is_empty();
 
         let prompt_list = self.render_ai_prompt_list(cx);
 
@@ -45,6 +116,14 @@ impl AviaryApp {
                     )
                     .child(provider_button)
                     .child(fields)
+                    .when(key_in_plaintext, |el| {
+                        el.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(tr!("settings-ai-key-stored-in-plaintext")),
+                        )
+                    })
                     .child(
                         v_flex()
                             .gap_1()
@@ -323,16 +402,18 @@ impl AviaryApp {
                         .value()
                         .trim()
                         .to_string();
+                    let typed_keys = crate::ai::AiApiKeys {
+                        openai: ui.ai_openai_api_key.read(cx).value().trim().to_string(),
+                        anthropic: ui.ai_anthropic_api_key.read(cx).value().trim().to_string(),
+                        gemini: ui.ai_gemini_api_key.read(cx).value().trim().to_string(),
+                        local: ui.ai_local_api_key.read(cx).value().trim().to_string(),
+                    };
                     let ai = &mut this.settings.global.ai;
-                    ai.openai_api_key = ui.ai_openai_api_key.read(cx).value().trim().to_string();
+                    let key_writes = crate::ai_keys::plan_save(ai, typed_keys);
                     ai.openai_model = ui.ai_openai_model.read(cx).value().trim().to_string();
-                    ai.anthropic_api_key =
-                        ui.ai_anthropic_api_key.read(cx).value().trim().to_string();
                     ai.anthropic_model = ui.ai_anthropic_model.read(cx).value().trim().to_string();
-                    ai.gemini_api_key = ui.ai_gemini_api_key.read(cx).value().trim().to_string();
                     ai.gemini_model = ui.ai_gemini_model.read(cx).value().trim().to_string();
                     ai.local_base_url = ui.ai_local_base_url.read(cx).value().trim().to_string();
-                    ai.local_api_key = ui.ai_local_api_key.read(cx).value().trim().to_string();
                     ai.local_model = ui.ai_local_model.read(cx).value().trim().to_string();
                     ai.system_prompt = ui.ai_system_prompt.read(cx).value().trim().to_string();
                     ai.reader_translation_prompt = ui
@@ -344,6 +425,7 @@ impl AviaryApp {
                     ai.reader_translation_target = reader_translation_target.clone();
                     this.settings.save();
                     this.refresh_compose_ai_settings(cx);
+                    this.store_ai_keys(key_writes, cx);
                     this.viewer_translation.target.update(cx, |state, cx| {
                         state.set_value(reader_translation_target, window, cx);
                     });

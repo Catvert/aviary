@@ -10,9 +10,13 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(super) async fn edit_mail(global: Arc<BgGlobal>, request: AiEditRequest) {
+pub(super) async fn edit_mail(global: Arc<BgGlobal>, mut request: AiEditRequest) {
     let compose_id = request.compose_id;
-    let result = tokio::time::timeout(Duration::from_secs(120), perform(&global, &request)).await;
+    let result = tokio::time::timeout(Duration::from_secs(120), async {
+        resolve_missing_key(&mut request.config).await;
+        perform(&global, &request).await
+    })
+    .await;
     match result {
         Ok(Ok(markdown)) => global.emit(Evt::AiMailEditFinished {
             compose_id,
@@ -26,6 +30,21 @@ pub(super) async fn edit_mail(global: Arc<BgGlobal>, request: AiEditRequest) {
             compose_id,
             error: tr!("ai-error-timeout").to_string(),
         }),
+    }
+}
+
+/// The UI fills the key from its memory copy, which the OS keyring feeds in
+/// the background at startup: a request sent before that load has answered
+/// arrives without one. Rather than report a missing key the user did save,
+/// read it from the keyring here (off the gpui thread, on the keyring thread
+/// of `ai_keys`). `Local` is skipped: its key is optional, and an empty one is
+/// the normal case there, not a sign of that race.
+async fn resolve_missing_key(config: &mut crate::ai::AiConfig) {
+    if matches!(config.provider, AiProvider::Local) || !config.api_key.trim().is_empty() {
+        return;
+    }
+    if let Some(key) = crate::ai_keys::read(config.provider).await {
+        config.api_key = key;
     }
 }
 

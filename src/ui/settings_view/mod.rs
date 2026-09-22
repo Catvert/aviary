@@ -375,26 +375,26 @@ impl SettingsUi {
             ai_openai_api_key: cx.new(|cx| {
                 InputState::new(window, cx)
                     .masked(true)
-                    .default_value(g.ai.openai_api_key.clone())
+                    .default_value(g.ai.api_keys.openai.clone())
             }),
             ai_openai_model: mk(window, cx, g.ai.openai_model.clone()),
             ai_anthropic_api_key: cx.new(|cx| {
                 InputState::new(window, cx)
                     .masked(true)
-                    .default_value(g.ai.anthropic_api_key.clone())
+                    .default_value(g.ai.api_keys.anthropic.clone())
             }),
             ai_anthropic_model: mk(window, cx, g.ai.anthropic_model.clone()),
             ai_gemini_api_key: cx.new(|cx| {
                 InputState::new(window, cx)
                     .masked(true)
-                    .default_value(g.ai.gemini_api_key.clone())
+                    .default_value(g.ai.api_keys.gemini.clone())
             }),
             ai_gemini_model: mk(window, cx, g.ai.gemini_model.clone()),
             ai_local_base_url: mk(window, cx, g.ai.local_base_url.clone()),
             ai_local_api_key: cx.new(|cx| {
                 InputState::new(window, cx)
                     .masked(true)
-                    .default_value(g.ai.local_api_key.clone())
+                    .default_value(g.ai.api_keys.local.clone())
             }),
             ai_local_model: mk(window, cx, g.ai.local_model.clone()),
             ai_system_prompt: cx.new(|cx| {

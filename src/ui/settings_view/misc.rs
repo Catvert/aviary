@@ -483,6 +483,7 @@ impl AviaryApp {
         }
         self.send(Cmd::ClearMailCache);
         self.send(Cmd::ResetLanguageTool);
+        crate::ai_keys::purge();
         self.settings = super::super::settings::Settings::default();
         super::super::settings::AppSession::remove_file();
         self.reset_working_session(window, cx);

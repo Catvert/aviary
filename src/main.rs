@@ -90,6 +90,7 @@ macro_rules! tr {
 }
 
 mod ai;
+mod ai_keys;
 mod auth;
 mod blocks;
 mod dictionaries;
