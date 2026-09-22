@@ -106,7 +106,7 @@ impl AviaryApp {
         if attachments::is_email_attachment(&attachment) && attachment.bytes.is_some() {
             self.open_eml_attachment(account_id, parent_message_id, attachment, window, cx);
         } else {
-            attachments::open(attachment);
+            attachments::open_or_confirm(attachment, window, cx);
         }
     }
 

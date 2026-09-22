@@ -1958,9 +1958,7 @@ impl AviaryApp {
                         .xsmall()
                         .label(tr!("calendar-join"))
                         .icon(IconName::ExternalLink)
-                        .on_click(move |_, _, _| {
-                            let _ = open::that(&url);
-                        }),
+                        .on_click(move |_, _, _| open_web_link(&url)),
                 )
             })
             .when_some(e.web_link.clone(), |el, url| {
@@ -1970,9 +1968,7 @@ impl AviaryApp {
                         .xsmall()
                         .icon(IconName::Globe)
                         .tooltip(tr!("open-in-browser"))
-                        .on_click(move |_, _, _| {
-                            let _ = open::that(&url);
-                        }),
+                        .on_click(move |_, _, _| open_web_link(&url)),
                 )
             })
             .child(
@@ -2381,9 +2377,46 @@ impl gpui_kit::Render for EventDragPreview {
     }
 }
 
+/// Opens an event's web or meeting link, which comes from the provider or an
+/// iCal feed and so is not trusted: only `http`/`https` reach the system
+/// opener, like the reader's links (`blitz_body/net.rs::safe_link`), minus
+/// `mailto:` which has no meaning for these two buttons.
+fn open_web_link(raw: &str) {
+    let Some(url) = safe_web_link(raw) else {
+        log::warn!("refusing to open a calendar link with an unsupported scheme");
+        return;
+    };
+    if let Err(error) = open::that_detached(&url) {
+        log::warn!("opening calendar link: {error:#}");
+    }
+}
+
+fn safe_web_link(raw: &str) -> Option<String> {
+    let url = reqwest::Url::parse(raw.trim()).ok()?;
+    matches!(url.scheme(), "http" | "https").then(|| url.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calendar_links_only_open_web_urls() {
+        assert_eq!(
+            safe_web_link(" https://example.com/meet?id=1 ").as_deref(),
+            Some("https://example.com/meet?id=1")
+        );
+        assert!(safe_web_link("http://example.com/").is_some());
+        for refused in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "mailto:someone@example.com",
+            "smb://example.com/share",
+            "not a url",
+        ] {
+            assert_eq!(safe_web_link(refused), None, "{refused}");
+        }
+    }
 
     fn event(start: DateTime<Utc>, end: DateTime<Utc>, all_day: bool) -> CalendarEvent {
         CalendarEvent {

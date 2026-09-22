@@ -1,6 +1,6 @@
 use super::Tokens;
 use crate::model::Provider;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use base64::Engine;
 use chrono::{Duration, Utc};
 use serde::Deserialize;
@@ -148,6 +148,13 @@ pub async fn await_redirect(
 /// `/favicon.ico`, and probe the port, any of which would otherwise consume the
 /// one accept and hang the sign-in. Anything that isn't the redirect gets a 404
 /// and the loop keeps waiting.
+///
+/// Nor is "carries `code=` or `error=`" enough: the port is reachable by any
+/// local process and by any web page the user has open, which can fire
+/// `http://127.0.0.1:<port>/?error=x` at it. Only a request bearing the
+/// `state` this flow generated may end it, with a code *or* an error; a forged
+/// one gets a neutral 400 and the loop keeps waiting, bounded by the caller's
+/// `REDIRECT_TIMEOUT`.
 async fn accept_callback(listener: &TcpListener, expected_state: &str) -> Result<String> {
     loop {
         let (mut stream, _peer) = listener.accept().await?;
@@ -158,7 +165,11 @@ async fn accept_callback(listener: &TcpListener, expected_state: &str) -> Result
             let _ = respond(&mut stream, "404 Not Found", NOT_FOUND_PAGE).await;
             continue;
         }
-        let result = parse_callback(&path, expected_state);
+        let CallbackOutcome::Completed(result) = parse_callback(&path, expected_state) else {
+            log::warn!("ignoring an OAuth redirect whose state does not match this sign-in");
+            let _ = respond(&mut stream, "400 Bad Request", NOT_FOUND_PAGE).await;
+            continue;
+        };
         let page = if result.is_ok() {
             SUCCESS_PAGE
         } else {
@@ -241,7 +252,21 @@ const NOT_FOUND_PAGE: &str =
     "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Aviary</title></head>\
      <body></body></html>";
 
-fn parse_callback(path: &str, expected_state: &str) -> Result<String> {
+/// What a redirect-shaped request means for the sign-in in progress.
+#[derive(Debug)]
+enum CallbackOutcome {
+    /// The `state` is missing or belongs to someone else: not ours to act on,
+    /// whatever else it carries.
+    Ignored,
+    /// Our own redirect: the code, or the reason Google gave for not issuing
+    /// one. Either way the flow ends here.
+    Completed(Result<String>),
+}
+
+/// Decides on a redirect target. The `state` is checked **before** anything
+/// else is believed — an `error=` from a forged request must not abort a
+/// sign-in the user is still completing in the browser.
+fn parse_callback(path: &str, expected_state: &str) -> CallbackOutcome {
     let query = path.split_once('?').map(|x| x.1).unwrap_or("");
     let mut code: Option<String> = None;
     let mut state: Option<String> = None;
@@ -256,14 +281,14 @@ fn parse_callback(path: &str, expected_state: &str) -> Result<String> {
             _ => {}
         }
     }
-    if let Some(e) = err {
-        bail!(tr!("auth-error-google-denied", { error: e }));
+    if state.as_deref() != Some(expected_state) || expected_state.is_empty() {
+        return CallbackOutcome::Ignored;
     }
-    let state = state.context(tr!("auth-error-google-state-missing"))?;
-    if state != expected_state {
-        bail!("invalid OAuth state (possible CSRF)");
-    }
-    code.ok_or_else(|| anyhow!(tr!("auth-error-google-code-missing")))
+    CallbackOutcome::Completed(match (err, code) {
+        (Some(e), _) => Err(anyhow!(tr!("auth-error-google-denied", { error: e }))),
+        (None, Some(code)) => Ok(code),
+        (None, None) => Err(anyhow!(tr!("auth-error-google-code-missing"))),
+    })
 }
 
 async fn exchange_code(
@@ -400,25 +425,98 @@ mod tests {
         assert_eq!(code, "granted");
     }
 
+    fn completed(outcome: CallbackOutcome) -> Result<String> {
+        match outcome {
+            CallbackOutcome::Completed(result) => result,
+            CallbackOutcome::Ignored => panic!("expected the redirect to end the flow"),
+        }
+    }
+
+    #[test]
+    fn only_the_expected_state_ends_the_flow() {
+        assert_eq!(
+            completed(parse_callback("/?code=granted&state=state-1", "state-1")).unwrap(),
+            "granted"
+        );
+        assert!(completed(parse_callback(
+            "/?error=access_denied&state=state-1",
+            "state-1"
+        ))
+        .is_err());
+        assert!(completed(parse_callback("/?state=state-1", "state-1")).is_err());
+        // An encoded state is compared once decoded.
+        assert_eq!(
+            completed(parse_callback("/?state=a%2Db&code=c", "a-b")).unwrap(),
+            "c"
+        );
+    }
+
+    /// The error is only believed once the state matches: a forged
+    /// `?error=` must not abort a sign-in still in progress.
+    #[test]
+    fn a_forged_or_stateless_redirect_is_ignored() {
+        for path in [
+            "/?code=granted&state=attacker",
+            "/?code=granted",
+            "/?error=access_denied",
+            "/?error=access_denied&state=attacker",
+            "/?error=access_denied&state=",
+            "/?code=granted&state=state-1x",
+        ] {
+            assert!(
+                matches!(parse_callback(path, "state-1"), CallbackOutcome::Ignored),
+                "{path}"
+            );
+        }
+        assert!(matches!(
+            parse_callback("/?code=granted&state=", ""),
+            CallbackOutcome::Ignored
+        ));
+    }
+
+    /// A forged redirect is answered and dropped; the genuine one that follows
+    /// still completes the sign-in.
     #[tokio::test]
-    async fn a_mismatched_state_is_rejected() {
+    async fn a_mismatched_state_does_not_end_the_flow() {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("binding the loopback listener");
         let port = listener.local_addr().expect("local address").port();
         let waiting = tokio::spawn(async move { accept_callback(&listener, "state-1").await });
 
-        let _forged = send_request(
+        let mut forged = send_request(
             port,
-            "GET /callback?code=granted&state=attacker HTTP/1.1\r\nHost: local\r\n\r\n",
+            "GET /callback?code=forged&state=attacker HTTP/1.1\r\nHost: local\r\n\r\n",
         )
         .await;
+        let mut forged_error = send_request(
+            port,
+            "GET /callback?error=access_denied HTTP/1.1\r\nHost: local\r\n\r\n",
+        )
+        .await;
+        for stream in [&mut forged, &mut forged_error] {
+            let mut response = String::new();
+            stream
+                .read_to_string(&mut response)
+                .await
+                .expect("reading the response");
+            assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        }
+        assert!(
+            !waiting.is_finished(),
+            "a forged redirect must not end the flow"
+        );
 
-        let error = waiting
+        let _redirect = send_request(
+            port,
+            "GET /callback?code=granted&state=state-1 HTTP/1.1\r\nHost: local\r\n\r\n",
+        )
+        .await;
+        let code = waiting
             .await
             .expect("listener task")
-            .expect_err("a forged state must not yield a code");
-        assert!(error.to_string().contains("CSRF"), "{error}");
+            .expect("genuine redirect accepted");
+        assert_eq!(code, "granted");
     }
 
     /// A request split across packets must still be understood.

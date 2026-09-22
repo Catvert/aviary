@@ -17,7 +17,9 @@
 //! object per line, so `read_request` and `write_request` are shared.
 //!
 //! - **Unix** — a socket in `XDG_RUNTIME_DIR`, which is per-user and cleared at
-//!   logout, exactly the lifetime this wants.
+//!   logout, exactly the lifetime this wants. Without it (macOS), a `0700`
+//!   directory of ours under the temp dir — never a bare, predictable path in
+//!   `/tmp` that another user could claim first.
 //! - **Windows** — a named pipe, through `interprocess`. `std` has no portable
 //!   local socket, and the pipe is what the platform offers; it also disappears
 //!   with the process, so there is no stale file to reason about.
@@ -170,20 +172,129 @@ fn ungoverned(request: ExternalRequest, error: impl std::fmt::Display) -> Acquis
 mod platform {
     use super::*;
     use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::Path;
 
-    fn socket_path() -> PathBuf {
-        // XDG_RUNTIME_DIR is already per-user and cleared at logout, which is
-        // exactly the lifetime this socket wants. macOS does not set it, so the
-        // fallback is the one that runs there.
+    /// Where the session socket lives, in a directory only this user can
+    /// enter.
+    ///
+    /// XDG_RUNTIME_DIR is already per-user and cleared at logout, which is
+    /// exactly the lifetime this socket wants — but it is still checked, since
+    /// it comes from the environment. macOS does not set it, so the fallback is
+    /// the one that runs there: a directory under the shared temp dir, created
+    /// `0700` and refused unless it is ours. A socket placed directly in `/tmp`
+    /// under a predictable name could be claimed first by another local user,
+    /// who would then receive every `mailto:` a click hands over — or keep
+    /// Aviary from ever becoming the primary.
+    ///
+    /// The directory is the whole access control: connecting to a Unix socket
+    /// needs search permission on every directory above it, so nobody but this
+    /// user (and root) can reach the socket, from either side. That is why the
+    /// peer is not checked as well: `UnixStream::peer_cred` is still unstable,
+    /// and `getpeereid` would mean a `libc` dependency on macOS for a check the
+    /// directory already makes.
+    fn socket_path() -> std::io::Result<PathBuf> {
         if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-            return PathBuf::from(dir).join("aviary.sock");
+            let dir = PathBuf::from(dir);
+            match verify_private_dir(&dir) {
+                Ok(()) => return Ok(dir.join("aviary.sock")),
+                Err(error) => log::warn!(
+                    "XDG_RUNTIME_DIR is not a private directory ({error}); using the fallback"
+                ),
+            }
         }
-        let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
-        std::env::temp_dir().join(format!("aviary-{user}.sock"))
+        let dir = std::env::temp_dir().join(fallback_dir_name());
+        ensure_private_dir(&dir)?;
+        Ok(dir.join("aviary.sock"))
+    }
+
+    /// Stable across launches — the second process must find the first — so
+    /// predictable by design; `ensure_private_dir` is what makes that safe.
+    fn fallback_dir_name() -> String {
+        let user = std::env::var("USER").unwrap_or_default();
+        let user: String = user
+            .chars()
+            .filter(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+            })
+            .collect();
+        let user = user.trim_start_matches('.');
+        if user.is_empty() {
+            "aviary-unknown".to_string()
+        } else {
+            format!("aviary-{user}")
+        }
+    }
+
+    /// Creates `dir` as `0700`, or accepts it when it already exists and
+    /// passes [`verify_private_dir`]. A directory someone else created first is
+    /// refused rather than repaired: they may already have planted a socket in
+    /// it, and startup then continues without the single-instance guarantee.
+    pub(super) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+        use std::os::unix::fs::DirBuilderExt as _;
+        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        verify_private_dir(dir)
+    }
+
+    /// A real directory (not a symlink to one), owned by the current user, and
+    /// closed to group and others. `/tmp` is sticky, so once this holds nobody
+    /// else can rename or replace the directory under us.
+    pub(super) fn verify_private_dir(dir: &Path) -> std::io::Result<()> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let metadata = std::fs::symlink_metadata(dir)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(std::io::Error::other(format!(
+                "{} is not a directory",
+                dir.display()
+            )));
+        }
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(std::io::Error::other(format!(
+                "{} is accessible to other users (mode {mode:o})",
+                dir.display()
+            )));
+        }
+        let owner = current_uid(dir)?;
+        if metadata.uid() != owner {
+            return Err(std::io::Error::other(format!(
+                "{} belongs to another user",
+                dir.display()
+            )));
+        }
+        Ok(())
+    }
+
+    /// The effective uid, read off a file this process just created: `std`
+    /// has no `geteuid`, and `libc` is only a dependency on Linux. Creating it
+    /// inside `dir` doubles as a check that `dir` is writable at all.
+    fn current_uid(dir: &Path) -> std::io::Result<u32> {
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+        let mut suffix = [0_u8; 8];
+        let suffix = match getrandom::fill(&mut suffix) {
+            Ok(()) => hex::encode(suffix),
+            Err(_) => std::process::id().to_string(),
+        };
+        let probe = dir.join(format!(".uid-probe-{suffix}"));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&probe)?;
+        let uid = file.metadata().map(|metadata| metadata.uid());
+        drop(file);
+        let _ = std::fs::remove_file(&probe);
+        uid
     }
 
     pub(super) fn acquire(request: ExternalRequest) -> Acquisition {
-        acquire_at(socket_path(), request)
+        match socket_path() {
+            Ok(path) => acquire_at(path, request),
+            Err(error) => ungoverned(request, format_args!("{error}")),
+        }
     }
 
     /// The socket path is a parameter so the handover can be exercised end to
@@ -213,6 +324,12 @@ mod platform {
                 return ungoverned(request, format_args!("{error:#}"));
             }
         };
+
+        // Belt and braces: the directory already keeps others out.
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
 
         let guard = SessionGuard { socket: Some(path) };
         let (tx, acquisition) = primary(request, guard);
@@ -426,5 +543,93 @@ mod tests {
             matches!(acquisition, Acquisition::Primary { .. }),
             "a leftover file must not stop the session from being claimed"
         );
+    }
+
+    #[cfg(unix)]
+    fn scratch_dir(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("aviary-test-dir-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    /// The fallback directory is created closed to everyone else, and a
+    /// second launch accepts the one the first created.
+    #[cfg(unix)]
+    #[test]
+    fn the_fallback_directory_is_private_and_reusable() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = scratch_dir("private");
+        platform::ensure_private_dir(&dir).expect("a fresh directory is accepted");
+        let mode = std::fs::metadata(&dir)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "unexpected mode {mode:o}");
+        platform::ensure_private_dir(&dir).expect("our own directory is accepted again");
+        assert_eq!(
+            std::fs::read_dir(&dir).expect("readable").count(),
+            0,
+            "the ownership probe must not be left behind"
+        );
+
+        // The handover still works through a socket inside it.
+        let path = dir.join("aviary.sock");
+        let Acquisition::Primary { _listener, .. } =
+            platform::acquire_at(path.clone(), ExternalRequest::Activate)
+        else {
+            panic!("the first acquisition owns the session");
+        };
+        assert!(matches!(
+            platform::acquire_at(path, ExternalRequest::Activate),
+            Acquisition::HandedOver
+        ));
+        drop(_listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory others can enter may already hold their socket: refused,
+    /// not repaired.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_open_to_others_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = scratch_dir("open");
+        std::fs::create_dir(&dir).expect("creatable");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+        assert!(platform::ensure_private_dir(&dir).is_err());
+        let mode = std::fs::metadata(&dir)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o777, "a refused directory is left as found");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A symlink planted under the expected name would point the socket
+    /// wherever its author likes.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_is_refused() {
+        let target = scratch_dir("symlink-target");
+        let link = scratch_dir("symlink");
+        platform::ensure_private_dir(&target).expect("a real private directory");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        assert!(platform::ensure_private_dir(&link).is_err());
+        assert!(platform::verify_private_dir(&link).is_err());
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_regular_file_in_place_of_the_directory_is_refused() {
+        let path = scratch_dir("file");
+        std::fs::write(&path, b"").expect("writable temp dir");
+        assert!(platform::ensure_private_dir(&path).is_err());
+        let _ = std::fs::remove_file(&path);
     }
 }
