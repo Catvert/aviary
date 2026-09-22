@@ -544,6 +544,7 @@ impl AviaryApp {
         let target_folder =
             (folder.well_known_name.as_deref() != Some("inbox")).then(|| folder.id.clone());
         self.folder_row(
+            "favorite",
             account_id,
             &folder,
             label,
@@ -576,6 +577,7 @@ impl AviaryApp {
         let target_folder =
             (folder.well_known_name.as_deref() != Some("inbox")).then(|| folder.id.clone());
         self.folder_row(
+            "tree",
             account_id,
             &folder,
             folder_display_label(&folder),
@@ -738,9 +740,14 @@ impl AviaryApp {
             .into_any_element()
     }
 
+    /// `scope` keeps the element ids of a folder's two rows apart: a favorite
+    /// is drawn both in the favorites and in its account's tree, and gpui
+    /// keys a pending click by element id, so twin ids let the favorite row
+    /// swallow the clicks meant for the tree row.
     #[allow(clippy::too_many_arguments)]
     fn folder_row(
         &self,
+        scope: &'static str,
         account_id: &AccountId,
         folder: &MailFolder,
         label: gpui_kit::SharedString,
@@ -774,7 +781,7 @@ impl AviaryApp {
             let branch_aid = aid.clone();
             let branch_id = folder_id.clone();
             Button::new(gpui_kit::ElementId::Name(
-                format!("folder-branch-{}-{}", aid.0, folder.id).into(),
+                format!("folder-branch-{scope}-{}-{}", aid.0, folder.id).into(),
             ))
             .ghost()
             .xsmall()
@@ -798,7 +805,7 @@ impl AviaryApp {
 
         let row = div()
             .id(gpui_kit::ElementId::Name(
-                format!("folder-{}-{}", account_id.0, folder.id).into(),
+                format!("folder-{scope}-{}-{}", account_id.0, folder.id).into(),
             ))
             .flex()
             .flex_row()
