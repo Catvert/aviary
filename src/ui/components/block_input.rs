@@ -1024,6 +1024,25 @@ impl BlockInputState {
     }
 }
 
+/// Converts a UTF-16 range relative to `text` into byte offsets within it,
+/// clamped to its end and landing on character boundaries.
+fn utf16_range_within(text: &str, range: Range<usize>) -> Range<usize> {
+    let to_utf8 = |offset: usize| {
+        let mut utf8 = 0;
+        let mut utf16 = 0;
+        for ch in text.chars() {
+            if utf16 >= offset {
+                break;
+            }
+            utf16 += ch.len_utf16();
+            utf8 += ch.len_utf8();
+        }
+        utf8
+    };
+    let start = to_utf8(range.start);
+    start..to_utf8(range.end).max(start)
+}
+
 impl EntityInputHandler for BlockInputState {
     fn text_for_range(
         &mut self,
@@ -1092,8 +1111,11 @@ impl EntityInputHandler for BlockInputState {
         self.value.replace_range(range.clone(), new_text);
         self.marked_range =
             (!new_text.is_empty()).then_some(range.start..range.start + new_text.len());
+        // The IME's selection is relative to `new_text`, not to the value:
+        // convert it within `new_text` before shifting it to where that text
+        // now sits.
         self.selected_range = new_selected_range_utf16
-            .map(|selection| self.range_from_utf16(selection))
+            .map(|selection| utf16_range_within(new_text, selection))
             .map(|selection| range.start + selection.start..range.start + selection.end)
             .unwrap_or_else(|| {
                 let cursor = range.start + new_text.len();
@@ -1515,5 +1537,22 @@ impl RenderOnce for BlockInput {
             );
         }
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::utf16_range_within;
+
+    /// The IME's selection is counted inside the composed text: in "éa" typed
+    /// after "ééé", UTF-16 offset 1 is byte 2 of "éa", whatever precedes it.
+    #[test]
+    fn an_ime_selection_is_converted_within_the_composed_text() {
+        assert_eq!(utf16_range_within("éa", 1..1), 2..2);
+        assert_eq!(utf16_range_within("éa", 0..2), 0..3);
+        // A surrogate pair counts two UTF-16 units for four bytes.
+        assert_eq!(utf16_range_within("😀x", 2..3), 4..5);
+        // Past the end: clamped instead of spilling into the following text.
+        assert_eq!(utf16_range_within("ab", 5..9), 2..2);
     }
 }

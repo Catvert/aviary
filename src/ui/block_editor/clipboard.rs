@@ -218,14 +218,12 @@ impl BlockEditor {
         // Adopt external sources before the blocks are built, so no block ever
         // points at a remote host.
         self.adopt_pasted_images(&mut kinds, cx);
-        let (value, cursor) = {
+        // The selection is replaced by the paste, as the input's own handler
+        // would do: only what lies outside it survives on either side.
+        let (before, after) = {
             let state = input.read(cx);
-            let value = state.text().to_string();
-            let cursor = state.cursor().min(value.len());
-            (value, cursor)
+            split_around_selection(state.text(), state.selection_range())
         };
-        let before = value[..cursor].to_string();
-        let after = value[cursor..].to_string();
         input.update(cx, |state, cx| state.set_value(before, window, cx));
 
         let imported: Vec<_> = kinds
@@ -244,6 +242,22 @@ impl BlockEditor {
         self.blocks.insert(at, tail);
         cx.notify();
     }
+}
+
+/// Text kept before and after a structured paste that replaces `selection`.
+/// Offsets are clamped and snapped to character boundaries, so a stale range
+/// can never panic.
+fn split_around_selection(value: &str, selection: std::ops::Range<usize>) -> (String, String) {
+    let snap = |mut offset: usize| {
+        offset = offset.min(value.len());
+        while !value.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        offset
+    };
+    let start = snap(selection.start.min(selection.end));
+    let end = snap(selection.end.max(selection.start));
+    (value[..start].to_string(), value[end..].to_string())
 }
 
 /// Blocs à coller pour un presse-papiers HTML, ou `None` quand le fragment
@@ -326,7 +340,9 @@ fn looks_like_html(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{editable_html_paste_kinds, html_paste_kinds, looks_like_html};
+    use super::{
+        editable_html_paste_kinds, html_paste_kinds, looks_like_html, split_around_selection,
+    };
     use crate::blocks::BlockKind;
 
     #[test]
@@ -403,6 +419,25 @@ mod tests {
         // Et un fragment qui a produit au moins un bloc éditable est gardé.
         assert!(
             editable_html_paste_kinds("<p>une bête phrase</p>", "une bête phrase", &[]).is_some()
+        );
+    }
+
+    /// A multi-block paste replaces the selection instead of inserting at its
+    /// end and leaving the selected text in place.
+    #[test]
+    fn a_structured_paste_replaces_the_selection() {
+        assert_eq!(
+            split_around_selection("avant CHOISI après", 6..12),
+            ("avant ".to_string(), " après".to_string())
+        );
+        assert_eq!(
+            split_around_selection("curseur", 3..3),
+            ("cur".to_string(), "seur".to_string())
+        );
+        // Out of range or inside a multi-byte character: clamped, no panic.
+        assert_eq!(
+            split_around_selection("é", 1..40),
+            (String::new(), String::new())
         );
     }
 }

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::model::InlineImage;
@@ -373,6 +374,17 @@ fn parse_list_block(raw: &str) -> Option<BlockKind> {
 /// MUAs resolve images against the multipart/related body; the live preview
 /// uses `bytes://blocks-{id}-` so the preview can resolve the registered bytes.
 pub(crate) fn blocks_to_markdown_with_image_prefix(blocks: &[Block], prefix: &str) -> String {
+    serialize_blocks(blocks, prefix, verbatim)
+}
+
+fn verbatim(text: &str) -> Cow<'_, str> {
+    Cow::Borrowed(text)
+}
+
+/// Shared serializer. `text` maps the user's own text before it is written
+/// out: the identity for the Markdown the editor hands to the clipboard, and
+/// [`escape_raw_html`] on the send path.
+fn serialize_blocks(blocks: &[Block], prefix: &str, text: impl Fn(&str) -> Cow<'_, str>) -> String {
     let mut out = String::new();
     for (i, b) in blocks.iter().enumerate() {
         if i > 0 {
@@ -380,12 +392,15 @@ pub(crate) fn blocks_to_markdown_with_image_prefix(blocks: &[Block], prefix: &st
         }
         match &b.kind {
             BlockKind::Paragraph(t) if t.trim().is_empty() => out.push_str(EMPTY_PARAGRAPH_HTML),
-            BlockKind::Paragraph(t) => out.push_str(&with_hard_breaks(t)),
-            BlockKind::Heading { level, text } => {
+            BlockKind::Paragraph(t) => out.push_str(&with_hard_breaks(&text(t))),
+            BlockKind::Heading {
+                level,
+                text: heading,
+            } => {
                 let level = (*level).clamp(1, 6) as usize;
                 out.push_str(&"#".repeat(level));
                 out.push(' ');
-                out.push_str(text);
+                out.push_str(&text(heading));
             }
             BlockKind::Quote(t) => {
                 for (j, line) in t.lines().enumerate() {
@@ -393,18 +408,21 @@ pub(crate) fn blocks_to_markdown_with_image_prefix(blocks: &[Block], prefix: &st
                         out.push_str("  \n");
                     }
                     out.push_str("> ");
-                    out.push_str(line);
+                    out.push_str(&text(line));
                 }
                 if t.is_empty() {
                     out.push_str("> ");
                 }
             }
-            BlockKind::Code { language, text } => {
+            BlockKind::Code {
+                language,
+                text: code,
+            } => {
                 out.push_str("```");
                 out.push_str(language);
                 out.push('\n');
-                out.push_str(text);
-                if !text.ends_with('\n') {
+                out.push_str(code);
+                if !code.ends_with('\n') {
                     out.push('\n');
                 }
                 out.push_str("```");
@@ -439,7 +457,7 @@ pub(crate) fn blocks_to_markdown_with_image_prefix(blocks: &[Block], prefix: &st
                     // doesn't even let you type them), but flatten any \n
                     // to a space anyway so we don't accidentally close the
                     // list when round-tripping pasted content.
-                    out.push_str(&it.text.replace('\n', " "));
+                    out.push_str(&text(&it.text).replace('\n', " "));
                 }
             }
             BlockKind::Table { rows } => {
@@ -449,9 +467,9 @@ pub(crate) fn blocks_to_markdown_with_image_prefix(blocks: &[Block], prefix: &st
                     out.push('|');
                     for col in 0..columns {
                         out.push(' ');
-                        out.push_str(&table_cell_markdown(
+                        out.push_str(&table_cell_markdown(&text(
                             header.get(col).map(String::as_str).unwrap_or(""),
-                        ));
+                        )));
                         out.push_str(" |");
                     }
                     out.push('\n');
@@ -464,9 +482,9 @@ pub(crate) fn blocks_to_markdown_with_image_prefix(blocks: &[Block], prefix: &st
                         out.push('|');
                         for col in 0..columns {
                             out.push(' ');
-                            out.push_str(&table_cell_markdown(
+                            out.push_str(&table_cell_markdown(&text(
                                 row.get(col).map(String::as_str).unwrap_or(""),
-                            ));
+                            )));
                             out.push_str(" |");
                         }
                     }
@@ -545,6 +563,106 @@ fn inject_image_widths(html: &str, widths: &std::collections::HashMap<&str, u32>
     .into_owned()
 }
 
+/// Backslash-escapes what would make pulldown-cmark read the user's text as
+/// raw HTML: every `<` that does not open an autolink (`<https://…>`,
+/// `<nom@example.test>`), an angle-bracket link destination (`](<…>)`) or the
+/// editor's own underline mark (`<u>…</u>`), and
+/// every `&` that would otherwise decode as an entity — so a draft reopened
+/// from its HTML, whose text node `&lt;b&gt;` imported as `<b>`, goes back out
+/// as `&lt;b&gt;` again.
+///
+/// Code spans are copied verbatim: CommonMark renders their content literally
+/// already, and a backslash there would show. Existing backslash escapes are
+/// kept as they are, so a typed `\<` is not turned into `\\<`.
+fn escape_raw_html(text: &str) -> Cow<'_, str> {
+    if !text.contains(['<', '&']) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        let consumed = match c {
+            '`' => {
+                let run = rest.bytes().take_while(|b| *b == b'`').count();
+                let span =
+                    closing_backtick_run(&rest[run..], run).map_or(run, |end| run + end + run);
+                out.push_str(&rest[..span]);
+                span
+            }
+            '\\' => {
+                let escaped = rest[1..].chars().next().map_or(0, char::len_utf8);
+                out.push_str(&rest[..1 + escaped]);
+                1 + escaped
+            }
+            '<' if !out.ends_with("](") && !starts_autolink(rest) && !starts_underline(rest) => {
+                out.push_str("\\<");
+                1
+            }
+            '&' if starts_entity(rest) => {
+                out.push_str("\\&");
+                1
+            }
+            _ => {
+                out.push(c);
+                c.len_utf8()
+            }
+        };
+        rest = &rest[consumed..];
+    }
+    Cow::Owned(out)
+}
+
+/// Offset of the backtick run of exactly `len` that closes a code span, if any.
+fn closing_backtick_run(text: &str, len: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'`' {
+            let run = bytes[at..].iter().take_while(|b| **b == b'`').count();
+            if run == len {
+                return Some(at);
+            }
+            at += run;
+        } else {
+            at += 1;
+        }
+    }
+    None
+}
+
+/// Whether `text` opens a CommonMark autolink, which must stay a link.
+fn starts_autolink(text: &str) -> bool {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(
+            r"^<(?:[A-Za-z][A-Za-z0-9+.\-]{1,31}:[^\s<>]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~\-]+@[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)*)>",
+        )
+        .expect("valid autolink regex")
+    });
+    re.is_match(text)
+}
+
+/// Whether `text` opens the editor's underline mark, the one inline tag its
+/// own syntax uses (`InlineFormat::Underline`).
+fn starts_underline(text: &str) -> bool {
+    ["<u>", "</u>"].iter().any(|tag| {
+        text.get(..tag.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(tag))
+    })
+}
+
+/// Whether `text` opens an HTML entity (`&amp;`, `&#233;`, `&#x41;`).
+fn starts_entity(text: &str) -> bool {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"^&(?:[A-Za-z][A-Za-z0-9]{1,31}|#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6});")
+            .expect("valid entity regex")
+    });
+    re.is_match(text)
+}
+
 /// Append two trailing spaces before each `\n` so pulldown_cmark emits `<br>`
 /// for every soft break. Doesn't touch trailing newlines (no break needed at
 /// end of block) or already-doubled blank lines (those are paragraph breaks
@@ -579,7 +697,13 @@ fn with_hard_breaks(s: &str) -> String {
 pub(crate) fn build_html_body(blocks: &[Block]) -> String {
     // The cursor marker belongs only to the template editor and must never
     // appear in a sent message.
-    let md = blocks_to_markdown(blocks).replace(super::TEMPLATE_CURSOR_PLACEHOLDER, "");
+    // The user's text is escaped so pulldown-cmark renders it as text: typed
+    // markup ("Remplacez <votre nom>") would otherwise vanish as an unknown
+    // tag, and a paragraph opening with `<!--` would swallow every block after
+    // it — signature and quoted message included. The only raw HTML left in
+    // the source is the placeholders emitted for the opaque blocks.
+    let md = serialize_blocks(blocks, "cid:", escape_raw_html)
+        .replace(super::TEMPLATE_CURSOR_PLACEHOLDER, "");
     let html = render_markdown(&md);
     // Apply user-set widths from `BlockKind::Image { width: Some(_) }` by
     // injecting `width="N"` on the matching `<img src="cid:...">` tag in the
@@ -1144,5 +1268,34 @@ mod tests {
         assert!(html.contains("<u>Ready</u>"));
         assert!(html.contains("<thead>"));
         assert!(html.contains("<tbody>"));
+    }
+
+    #[test]
+    fn raw_html_escaping_spares_code_spans_escapes_and_link_forms() {
+        assert_eq!(escape_raw_html("a <b> c"), r"a \<b> c");
+        assert_eq!(escape_raw_html("`<b>` et <b>"), r"`<b>` et \<b>");
+        assert_eq!(escape_raw_html(r"déjà \<b>"), r"déjà \<b>");
+        assert_eq!(
+            escape_raw_html("<https://example.test/a>"),
+            "<https://example.test/a>"
+        );
+        assert_eq!(escape_raw_html("<nom@example.test>"), "<nom@example.test>");
+        assert_eq!(
+            escape_raw_html("[x](<https://example.test/a b>)"),
+            "[x](<https://example.test/a b>)"
+        );
+        assert_eq!(escape_raw_html("<U>x</u>"), "<U>x</u>");
+        assert_eq!(escape_raw_html("&amp; & &#233;"), r"\&amp; & \&#233;");
+        assert!(matches!(escape_raw_html("rien"), Cow::Borrowed(_)));
+    }
+
+    /// The clipboard keeps the text as typed; only the send path escapes.
+    #[test]
+    fn clipboard_markdown_is_not_escaped() {
+        let blocks = vec![Block {
+            id: 1,
+            kind: BlockKind::Paragraph("<votre nom>".to_string()),
+        }];
+        assert_eq!(blocks_to_markdown(&blocks), "<votre nom>");
     }
 }

@@ -460,8 +460,22 @@ pub struct ComposeView {
     is_forward: bool,
     forward_of: Option<String>,
     draft_save_in_flight: bool,
+    /// A manual save (Ctrl+S) awaiting its `DraftSaved`/`DraftSaveError`.
+    manual_draft_save_in_flight: bool,
+    /// Send requested while a draft save was in flight, run once it settles.
+    ///
+    /// The `SendMail` carries the draft id to delete after delivery, and it is
+    /// frozen the moment the command is built. A save still in flight may
+    /// create a new draft — or, on IMAP, replace the old one under a new id —
+    /// that the frozen command would never delete: it would linger in Drafts
+    /// next to the message actually sent. Waiting for the reply is the one
+    /// order in which the send always names the draft that exists.
+    send_after_draft_save: bool,
     autosave_pending_fingerprint: Option<u64>,
     last_autosave_fingerprint: u64,
+    /// Fingerprint of the content the composer opened with, so replacing a
+    /// reply panel can tell an untouched one from work in progress.
+    initial_fingerprint: u64,
     ai_settings: AiSettings,
     surface: ComposeSurface,
     /// Fixed subject of a `Panel` composer: a reply keeps the conversation's,
@@ -816,8 +830,11 @@ impl ComposeView {
             is_forward: init.is_forward,
             forward_of: init.forward_of,
             draft_save_in_flight: false,
+            manual_draft_save_in_flight: false,
+            send_after_draft_save: false,
             autosave_pending_fingerprint: None,
             last_autosave_fingerprint: 0,
+            initial_fingerprint: 0,
             ai_settings,
             surface,
             fixed_subject: init.subject,
@@ -825,7 +842,22 @@ impl ComposeView {
         view.sending = pending_send;
         view.refresh_signature_choices(cx);
         view.last_autosave_fingerprint = view.draft_fingerprint(cx);
+        view.initial_fingerprint = view.last_autosave_fingerprint;
         view
+    }
+
+    /// Whether dropping this composer would lose something: content edited
+    /// since it opened, or a draft already saved on the provider (which would
+    /// otherwise be left orphaned in the Drafts folder).
+    /// Locked by a send or a manual save awaiting the runtime's reply.
+    pub(crate) fn is_busy(&self) -> bool {
+        self.sending
+    }
+
+    pub(crate) fn has_work_in_progress(&self, cx: &gpui_kit::App) -> bool {
+        self.draft_id.is_some()
+            || self.draft_save_in_flight
+            || self.draft_fingerprint(cx) != self.initial_fingerprint
     }
 
     /// Hands the block editor the sending account's signatures, so the
@@ -1006,7 +1038,7 @@ impl ComposeView {
         self.ai_settings = settings;
     }
 
-    fn trigger_send(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn trigger_send(&mut self, cx: &mut Context<Self>) {
         let Some(from) = self.from_account_id.clone() else {
             self.error = Some(tr!("compose-error-no-active-account").to_string());
             cx.notify();
@@ -1026,6 +1058,13 @@ impl ComposeView {
         self.sending = true;
         self.outbox_queued = false;
         self.error = None;
+        if self.draft_save_in_flight || self.manual_draft_save_in_flight {
+            // Resumed by `resume_send_after_draft_save`; `sending` already
+            // locks the editor and keeps a new autosave from starting.
+            self.send_after_draft_save = true;
+            cx.notify();
+            return;
+        }
         let editor = self.editor.read(cx);
         let (body, attachments) = editor.build_outgoing(cx);
         let uses_origin = self.origin_account_id.as_ref() == Some(&from);
@@ -1057,7 +1096,21 @@ impl ComposeView {
         self.pending_send.take()
     }
 
+    /// Runs a send deferred by `trigger_send` once no draft save is in flight
+    /// any more, now that `draft_id` names the draft the provider holds.
+    fn resume_send_after_draft_save(&mut self, cx: &mut Context<Self>) {
+        if !self.send_after_draft_save
+            || self.draft_save_in_flight
+            || self.manual_draft_save_in_flight
+        {
+            return;
+        }
+        self.send_after_draft_save = false;
+        self.trigger_send(cx);
+    }
+
     pub(crate) fn cancel_pending_send(&mut self, cx: &mut Context<Self>) {
+        self.send_after_draft_save = false;
         self.pending_send = None;
         self.sending = false;
         self.outbox_queued = false;
@@ -1070,10 +1123,14 @@ impl ComposeView {
             cx.notify();
             return;
         };
+        if self.sending || self.send_after_draft_save {
+            return;
+        }
         let (to, cc, bcc, subject) = self.payload(cx);
         self.sending = true;
         self.outbox_queued = false;
         self.error = None;
+        self.manual_draft_save_in_flight = true;
         let editor = self.editor.read(cx);
         let (body, attachments) = editor.build_outgoing(cx);
         let _ = self.cmd_tx.send(Cmd::SaveDraft {
@@ -1185,6 +1242,7 @@ impl ComposeView {
     }
 
     pub fn on_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.send_after_draft_save = false;
         self.sending = false;
         self.pending_send = None;
         self.outbox_queued = false;
@@ -1207,11 +1265,17 @@ impl ComposeView {
         if self.from_account_id.as_ref() != Some(account_id) {
             self.draft_save_in_flight = false;
             self.autosave_pending_fingerprint = None;
+            if !autosave {
+                self.manual_draft_save_in_flight = false;
+                self.sending = false;
+            }
+            self.resume_send_after_draft_save(cx);
             return;
         }
         if autosave {
             self.draft_save_in_flight = false;
         } else {
+            self.manual_draft_save_in_flight = false;
             self.sending = false;
             self.outbox_queued = false;
         }
@@ -1222,6 +1286,7 @@ impl ComposeView {
             .autosave_pending_fingerprint
             .take()
             .unwrap_or_else(|| self.draft_fingerprint(cx));
+        self.resume_send_after_draft_save(cx);
         cx.notify();
     }
 
@@ -1235,13 +1300,27 @@ impl ComposeView {
         if self.from_account_id.as_ref() != Some(account_id) {
             self.draft_save_in_flight = false;
             self.autosave_pending_fingerprint = None;
+            if !autosave {
+                self.manual_draft_save_in_flight = false;
+                self.sending = false;
+            }
+            self.resume_send_after_draft_save(cx);
             return;
         }
         if autosave {
             self.draft_save_in_flight = false;
             self.autosave_pending_fingerprint = None;
-            self.error = Some(error);
+            if self.send_after_draft_save {
+                // The send the user asked for goes ahead; a failed autosave
+                // left no new draft behind for it to forget.
+                self.resume_send_after_draft_save(cx);
+            } else {
+                self.error = Some(error);
+            }
         } else {
+            // A manual save that failed was the user's explicit request:
+            // report it and let them decide, rather than sending regardless.
+            self.manual_draft_save_in_flight = false;
             self.on_error(error, cx);
             return;
         }
@@ -1659,8 +1738,12 @@ impl ComposeView {
                         menu.item(
                             PopupMenuItem::new(tr!("viewer-attachment-open"))
                                 .icon(super::icons::app_icon("external-link"))
-                                .on_click(move |_, _, _| {
-                                    attachments::open(attachment_to_open.clone());
+                                .on_click(move |_, window, cx| {
+                                    attachments::open_or_confirm(
+                                        attachment_to_open.clone(),
+                                        window,
+                                        cx,
+                                    );
                                 }),
                         )
                         .item(PopupMenuItem::separator())
@@ -1841,9 +1924,7 @@ impl ComposeView {
                                     })
                                     .disabled(self.sending || self.ai_running)
                                     .loading(self.sending && !self.outbox_queued)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.trigger_send(window, cx)
-                                    })),
+                                    .on_click(cx.listener(|this, _, _, cx| this.trigger_send(cx))),
                             ),
                     ),
             )
@@ -1904,9 +1985,9 @@ impl Render for ComposeView {
                 this.focus_body_entry(window, cx);
             }))
             .on_action(
-                cx.listener(|this, _: &super::shortcuts::SendCompose, window, cx| {
+                cx.listener(|this, _: &super::shortcuts::SendCompose, _, cx| {
                     if !this.sending && !this.ai_running {
-                        this.trigger_send(window, cx);
+                        this.trigger_send(cx);
                     }
                 }),
             )

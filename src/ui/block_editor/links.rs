@@ -339,7 +339,12 @@ pub(super) fn sole_url(text: &str) -> Option<&str> {
         return None;
     }
     let known = ["http://", "https://", "mailto:"].iter().any(|scheme| {
-        text.len() > scheme.len() && text[..scheme.len()].eq_ignore_ascii_case(scheme)
+        // `get` rather than slicing: a pasted word may put a multi-byte
+        // character across the scheme's length (« Désolé »).
+        text.len() > scheme.len()
+            && text
+                .get(..scheme.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
     });
     known.then_some(text)
 }
@@ -491,5 +496,17 @@ mod tests {
         assert!(sole_url("<https://example.test/a>").is_none());
         assert!(sole_url("example.test").is_none(), "no scheme, no autolink");
         assert!(sole_url("").is_none());
+    }
+
+    /// "Désolé" puts `é` across the length of `mailto:`; slicing there used
+    /// to panic on paste.
+    #[test]
+    fn a_multibyte_word_is_not_mistaken_for_a_url() {
+        assert_eq!(sole_url("Désolé"), None);
+        assert_eq!(sole_url("ééééééééé"), None);
+        assert_eq!(
+            sole_url("https://example.test/é"),
+            Some("https://example.test/é")
+        );
     }
 }

@@ -106,6 +106,17 @@ impl AviaryApp {
         {
             return;
         }
+        if self
+            .inline_reply
+            .as_ref()
+            .is_some_and(|reply| reply.view.read(cx).is_busy())
+        {
+            // A panel locked on a send or save cannot be handed over mid-way;
+            // like one hidden for its undo window, it keeps the panel.
+            self.open_inline_compose(init, window, cx);
+            return;
+        }
+        self.release_reply_panel_for_new_reply(window, cx);
         let (compose_id, view, event_subscription) =
             self.build_reply_panel_compose(init, window, cx);
         self.inline_reply = Some(InlineReply {
@@ -116,6 +127,38 @@ impl AviaryApp {
             _event_subscription: event_subscription,
         });
         cx.notify();
+    }
+
+    /// Frees the panel for a reply to another message. There is only one
+    /// panel, and replacing it silently threw away whatever the user had been
+    /// writing — and orphaned its autosaved draft. Work in progress therefore
+    /// moves to a reader-pane tab, through the same `to_init` hand-over as
+    /// detaching into a window, without taking the reader away from the
+    /// message being replied to; an untouched panel is simply closed.
+    fn release_reply_panel_for_new_reply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((compose_id, view)) = self
+            .inline_reply
+            .as_ref()
+            .map(|reply| (reply.compose_id, reply.view.clone()))
+        else {
+            return;
+        };
+        let keep = view.read(cx).has_work_in_progress(cx);
+        let init = keep.then(|| view.read(cx).to_init(cx));
+        self.close_compose(compose_id, cx);
+        let Some(init) = init else {
+            return;
+        };
+        let active_tab = self.mailbox.active_tab;
+        self.open_inline_compose(init, window, cx);
+        // The new tab is appended, so the previous index still points at
+        // what the reader was showing.
+        self.mailbox.active_tab = active_tab;
+        self.toast(
+            window,
+            cx,
+            gpui_kit::component::notification::Notification::info(tr!("reply-panel-moved-to-tab")),
+        );
     }
 
     pub(crate) fn inline_reply_session(&self, cx: &gpui_kit::App) -> Option<InlineReplySession> {

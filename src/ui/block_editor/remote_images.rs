@@ -15,7 +15,7 @@
 //! [`BlockEditor::build_outgoing`] puts it back for a mail sent while the
 //! download is still running.
 
-use super::{initial_image_width, BlockEditor, EbKind};
+use super::{initial_image_width, BlockEditor, EbKind, Snapshot};
 use crate::blocks::BlockKind;
 use crate::model::InlineImage;
 use crate::runtime::Cmd;
@@ -35,26 +35,22 @@ impl BlockEditor {
     pub(super) fn adopt_pasted_images(&mut self, kinds: &mut [BlockKind], cx: &mut Context<Self>) {
         let mut queued: Vec<(String, String)> = Vec::new();
         let mut adopted = 0usize;
+        // No runtime channel (a signature or template editor): the `data:`
+        // sources can still be materialized, the remote ones cannot, so they
+        // are never claimed and stay the external link they were pasted as.
+        // Claiming them first and dropping the placeholder afterwards would
+        // leave a `cid:` with no bytes behind in `kinds`.
+        let tx = self.runtime_tx.clone();
+        let can_fetch = tx.is_some();
         adopt_in_kinds(kinds, &mut |url| {
-            if adopted >= MAX_SOURCES_PER_PASTE {
+            if adopted >= MAX_SOURCES_PER_PASTE || !is_adoptable(url, can_fetch) {
                 return None;
             }
             let cid = self.adopt_source(url, &mut queued)?;
             adopted += 1;
             Some(cid)
         });
-        if queued.is_empty() {
-            return;
-        }
-        let Some(tx) = self.runtime_tx.clone() else {
-            // No runtime channel (a signature or template editor): the `data:`
-            // sources are already materialized, the remote ones cannot be, so
-            // give them their URL back instead of leaving empty placeholders.
-            for (cid, url) in queued {
-                self.pending_remote_images.remove(&cid);
-                self.images.retain(|image| image.cid != cid);
-                log::debug!("no runtime channel to fetch {url} (cid {cid})");
-            }
+        let Some(tx) = tx.filter(|_| !queued.is_empty()) else {
             return;
         };
         for (cid, url) in queued {
@@ -111,11 +107,22 @@ impl BlockEditor {
             return false;
         }
         if self.pending_remote_images.remove(cid).is_none() {
-            // Undone or deleted while in flight: the cid no longer belongs to
-            // the document, so its bytes have nowhere to go.
+            // Already resolved or failed: nothing left to fill in.
             return true;
         }
+        // The history holds the placeholder too. Without filling it in, undoing
+        // past this point — or redoing a paste undone while the download ran —
+        // would bring back a cid with no bytes and no URL to fall back on.
+        for snap in self
+            .undo
+            .iter_mut()
+            .chain(self.redo.iter_mut())
+            .chain(std::iter::once(&mut self.mirror))
+        {
+            fill_snapshot_image(snap, cid, &mime, &bytes);
+        }
         let Some(image) = self.images.iter_mut().find(|image| image.cid == cid) else {
+            // Undone while in flight: only the history keeps the image now.
             return true;
         };
         image.mime = mime;
@@ -155,6 +162,16 @@ impl BlockEditor {
         let Some(url) = self.pending_remote_images.remove(cid) else {
             return true;
         };
+        // Same for the history: once the URL leaves `pending_remote_images`,
+        // a snapshot still holding the placeholder could never recover it.
+        for snap in self
+            .undo
+            .iter_mut()
+            .chain(self.redo.iter_mut())
+            .chain(std::iter::once(&mut self.mirror))
+        {
+            restore_url_in_snapshot(snap, cid, &url);
+        }
         self.images.retain(|image| image.cid != cid);
         self.restore_url_in_document(cid, &url, window, cx);
         cx.notify();
@@ -219,6 +236,83 @@ impl BlockEditor {
                 cx,
             );
             self.blocks[index] = block;
+        }
+    }
+}
+
+/// Fills in the bytes of a downloaded placeholder in one history snapshot.
+fn fill_snapshot_image(snap: &mut Snapshot, cid: &str, mime: &str, bytes: &[u8]) {
+    for image in &mut snap.images {
+        if image.cid == cid && image.bytes.is_empty() {
+            image.mime = mime.to_string();
+            image.bytes = bytes.to_vec();
+        }
+    }
+}
+
+/// Hands a restored snapshot the bytes the live document already has for a
+/// cid the snapshot only knows as a placeholder.
+///
+/// Backstop for [`fill_snapshot_image`]: a snapshot taken between the download
+/// and its delivery (none today, but cheap to guarantee) must not reintroduce
+/// an empty image over a resolved one.
+pub(super) fn hydrate_snapshot_images(snap: &mut Snapshot, current: &[InlineImage]) {
+    for image in snap
+        .images
+        .iter_mut()
+        .filter(|image| image.bytes.is_empty())
+    {
+        if let Some(resolved) = current
+            .iter()
+            .find(|resolved| resolved.cid == image.cid && !resolved.bytes.is_empty())
+        {
+            image.mime.clone_from(&resolved.mime);
+            image.bytes.clone_from(&resolved.bytes);
+        }
+    }
+}
+
+/// Mirror of [`BlockEditor::restore_url_in_document`] on a history snapshot:
+/// every reference to the placeholder goes back to `url`, and the placeholder
+/// image is dropped.
+fn restore_url_in_snapshot(snap: &mut Snapshot, cid: &str, url: &str) {
+    if !snap.images.iter().any(|image| image.cid == cid) {
+        return;
+    }
+    snap.images.retain(|image| image.cid != cid);
+    restore_url_in_kinds(&mut snap.kinds, cid, url);
+}
+
+/// Rewrites every `cid:` reference to `cid` in `kinds` back to `url`. An Image
+/// block degrades to the markdown paragraph the source came from.
+fn restore_url_in_kinds(kinds: &mut [BlockKind], cid: &str, url: &str) {
+    let needle = format!("cid:{cid}");
+    for kind in kinds {
+        match kind {
+            BlockKind::Paragraph(text)
+            | BlockKind::Quote(text)
+            | BlockKind::Heading { text, .. } => {
+                *text = text.replace(&needle, url);
+            }
+            BlockKind::List { items, .. } => {
+                for item in items {
+                    item.text = item.text.replace(&needle, url);
+                }
+            }
+            BlockKind::Table { rows } => {
+                for cell in rows.iter_mut().flatten() {
+                    *cell = cell.replace(&needle, url);
+                }
+            }
+            BlockKind::RawHtml { html } => *html = html.replace(&needle, &escape_attr(url)),
+            BlockKind::Image { cid: block_cid, .. } if block_cid.as_str() == cid => {
+                *kind = BlockKind::Paragraph(format!("![]({url})"));
+            }
+            BlockKind::Code { .. }
+            | BlockKind::Image { .. }
+            | BlockKind::Divider
+            | BlockKind::Signature { .. }
+            | BlockKind::OriginalMessage { .. } => {}
         }
     }
 }
@@ -325,12 +419,23 @@ pub(super) fn markdown_has_adoptable_source(text: &str) -> bool {
         .any(|source| is_fetchable(source) || decode_data_uri(source).is_some())
 }
 
+/// Whether a paste may claim this source: a `data:` payload is decoded on the
+/// spot, a remote one only when there is a runtime to download it.
+fn is_adoptable(url: &str, can_fetch: bool) -> bool {
+    decode_data_uri(url).is_some() || (can_fetch && is_fetchable(url))
+}
+
 /// Whether the runtime can download this source.
 fn is_fetchable(url: &str) -> bool {
     let url = url.trim();
-    ["http://", "https://"]
-        .iter()
-        .any(|scheme| url.len() > scheme.len() && url[..scheme.len()].eq_ignore_ascii_case(scheme))
+    // `get` rather than slicing, which would panic on a multi-byte character
+    // straddling the scheme's length.
+    ["http://", "https://"].iter().any(|scheme| {
+        url.len() > scheme.len()
+            && url
+                .get(..scheme.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+    })
 }
 
 /// Byte ranges of the image sources of a markdown fragment.
@@ -637,5 +742,99 @@ mod tests {
             "&quot;",
             "`&amp;` resolves last, so an escaped entity stays escaped"
         );
+    }
+
+    #[test]
+    fn a_multibyte_character_across_the_scheme_length_is_not_a_source() {
+        // "Désolé" puts `é` across byte 7; slicing there used to panic.
+        assert!(!is_fetchable("Désolé, voici"));
+        assert!(!is_fetchable("ééééééééé"));
+        assert!(!markdown_has_adoptable_source("![](Désolé)"));
+    }
+
+    /// Without a runtime (signature and template editors), a remote source is
+    /// left alone rather than claimed and then abandoned as an empty cid.
+    #[test]
+    fn remote_sources_stay_links_without_a_runtime() {
+        let mut kinds = vec![BlockKind::Paragraph(
+            "![](https://example.test/a.png) ![](data:image/png;base64,AQL/)".to_string(),
+        )];
+        let mut next = 0;
+        adopt_in_kinds(&mut kinds, &mut |url| {
+            is_adoptable(url, false).then(|| {
+                next += 1;
+                format!("c{next}")
+            })
+        });
+        assert_eq!(
+            kinds,
+            [BlockKind::Paragraph(
+                "![](https://example.test/a.png) ![](cid:c1)".to_string()
+            )]
+        );
+        assert!(is_adoptable("https://example.test/a.png", true));
+    }
+
+    fn placeholder(cid: &str) -> InlineImage {
+        InlineImage {
+            cid: cid.to_string(),
+            mime: "image/png".to_string(),
+            bytes: Vec::new(),
+        }
+    }
+
+    /// Undo after a download must not bring back the empty placeholder.
+    #[test]
+    fn a_download_fills_the_placeholder_in_history_snapshots() {
+        let mut snap = Snapshot {
+            kinds: vec![BlockKind::Image {
+                cid: "c1".to_string(),
+                width: None,
+            }],
+            images: vec![placeholder("c1")],
+        };
+        fill_snapshot_image(&mut snap, "c1", "image/jpeg", &[1, 2, 3]);
+        assert_eq!(snap.images[0].bytes, [1, 2, 3]);
+        assert_eq!(snap.images[0].mime, "image/jpeg");
+
+        let mut stale = Snapshot {
+            kinds: Vec::new(),
+            images: vec![placeholder("c1")],
+        };
+        hydrate_snapshot_images(&mut stale, &snap.images);
+        assert_eq!(stale.images[0].bytes, [1, 2, 3]);
+    }
+
+    /// A failed download rewrites the history too, so redo brings back the
+    /// hotlink rather than a cid whose URL has been forgotten.
+    #[test]
+    fn a_failed_download_restores_the_url_in_history_snapshots() {
+        let mut snap = Snapshot {
+            kinds: vec![
+                BlockKind::Image {
+                    cid: "c1".to_string(),
+                    width: Some(120),
+                },
+                BlockKind::Paragraph("avant ![](cid:c1) après".to_string()),
+                BlockKind::RawHtml {
+                    html: r#"<img src="cid:c1">"#.to_string(),
+                },
+            ],
+            images: vec![placeholder("c1"), placeholder("c2")],
+        };
+        restore_url_in_snapshot(&mut snap, "c1", "https://example.test/a.png?x=1&y=2");
+        assert_eq!(
+            snap.kinds,
+            [
+                BlockKind::Paragraph("![](https://example.test/a.png?x=1&y=2)".to_string()),
+                BlockKind::Paragraph(
+                    "avant ![](https://example.test/a.png?x=1&y=2) après".to_string()
+                ),
+                BlockKind::RawHtml {
+                    html: r#"<img src="https://example.test/a.png?x=1&amp;y=2">"#.to_string(),
+                },
+            ]
+        );
+        assert_eq!(snap.images, [placeholder("c2")]);
     }
 }

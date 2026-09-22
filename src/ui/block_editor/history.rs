@@ -100,15 +100,21 @@ impl BlockEditor {
     }
 
     pub(super) fn undo_doc(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(snap) = self.undo.pop() else { return };
+        let Some(mut snap) = self.undo.pop() else {
+            return;
+        };
         let cur = self.exact_snapshot(cx);
+        remote_images::hydrate_snapshot_images(&mut snap, &cur.images);
         self.redo.push(cur);
         self.apply_snapshot(snap, window, cx);
     }
 
     pub(super) fn redo_doc(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(snap) = self.redo.pop() else { return };
+        let Some(mut snap) = self.redo.pop() else {
+            return;
+        };
         let cur = self.exact_snapshot(cx);
+        remote_images::hydrate_snapshot_images(&mut snap, &cur.images);
         self.undo.push(cur);
         self.apply_snapshot(snap, window, cx);
     }

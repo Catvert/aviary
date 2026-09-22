@@ -154,7 +154,10 @@ impl<'a> Walker<'a> {
                         let mut html = child.html();
                         for rest in children.by_ref() {
                             match rest.value() {
-                                Node::Text(text) => html.push_str(text),
+                                // `scraper` hands text decoded: written back
+                                // raw, a quoted `&lt;b&gt;` would turn into
+                                // markup.
+                                Node::Text(text) => html.push_str(&escape_text(text)),
                                 Node::Element(_) => {
                                     if let Some(rest) = ElementRef::wrap(rest) {
                                         html.push_str(&rest.html());
@@ -787,6 +790,13 @@ fn link_markdown(element: ElementRef<'_>) -> String {
 
 /// An unbalanced bracket in a label would close the link early, so both are
 /// escaped — losing a character the user typed is worse than a visible `\`.
+/// Escapes a decoded text node for reinsertion into HTML.
+fn escape_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 fn escape_brackets(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for character in text.chars() {
@@ -1188,5 +1198,61 @@ mod tests {
             html_text("<div><p>Contact A</p><p>Organisation\n de test</p></div>"),
             "Contact A Organisation de test"
         );
+    }
+
+    /// Typed markup is text: "<votre nom>" must reach the recipient as written
+    /// rather than vanish as an unknown tag, and come back unchanged.
+    #[test]
+    fn typed_angle_brackets_stay_text_through_the_round_trip() {
+        let document = vec![
+            BlockKind::Paragraph("Remplacez <votre nom> et <b>ceci</b> &amp; cela".to_string()),
+            BlockKind::Paragraph("du <u>souligné</u> et <https://example.test/a>".to_string()),
+        ];
+        let html = build_html_body(&blocks(document.clone()));
+        assert!(html.contains("&lt;votre nom&gt;"), "{html}");
+        assert!(
+            html.contains("&lt;b&gt;ceci&lt;/b&gt; &amp;amp; cela"),
+            "{html}"
+        );
+        assert!(html.contains("<u>souligné</u>"), "{html}");
+        assert!(
+            html.contains(r#"<a href="https://example.test/a">"#),
+            "{html}"
+        );
+
+        let reopened = html_to_blocks(&html, &HtmlImport::bare());
+        assert_eq!(reopened[0], document[0]);
+        assert_eq!(build_html_body(&blocks(reopened)), html);
+    }
+
+    /// A paragraph opening a comment used to start a raw HTML block running to
+    /// the end of the document, signature and quoted message included.
+    #[test]
+    fn an_html_comment_in_a_paragraph_does_not_swallow_the_blocks_after_it() {
+        let document = vec![
+            BlockKind::Paragraph("<!-- note".to_string()),
+            BlockKind::Paragraph("suite".to_string()),
+            BlockKind::Signature {
+                signature_id: Some(3),
+                name: "Pro".to_string(),
+                html: "<p>Contact A</p>".to_string(),
+            },
+        ];
+        let html = build_html_body(&blocks(document));
+        assert!(html.contains("&lt;!-- note"), "{html}");
+        assert!(html.contains(">suite</p>"), "{html}");
+        assert!(html.contains(r#"<div class="aviary-signature" data-aviary-signature-id="3"><p>Contact A</p></div>"#), "{html}");
+    }
+
+    /// Text siblings of an Outlook quote are decoded by the parser; written
+    /// back raw, `&lt;b&gt;` would have become markup.
+    #[test]
+    fn text_after_an_outlook_quote_stays_escaped() {
+        let html = r#"<div><div id="divRplyFwdMsg">De : Contact A</div>texte &lt;b&gt; cité</div>"#;
+        let blocks = html_to_blocks(html, &HtmlImport::bare());
+        let Some(BlockKind::OriginalMessage { html, .. }) = blocks.last() else {
+            panic!("faithful quote expected: {blocks:?}");
+        };
+        assert!(html.contains("texte &lt;b&gt; cité"), "{html}");
     }
 }
