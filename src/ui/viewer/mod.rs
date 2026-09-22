@@ -47,6 +47,30 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// Where the reader's scroll area takes its offset from.
+#[derive(Clone, Copy)]
+enum ReaderScroll {
+    /// The reader's own handle, wheel smoothing included: the message on
+    /// screen.
+    Shared,
+    /// An offset of its own, left at the top: a selection being prepared out
+    /// of sight, which must neither move nor be moved by the message on
+    /// screen.
+    Staged,
+}
+
+/// Everything the reader draws for one message, built but not yet placed.
+struct ViewerParts {
+    header: gpui_kit::AnyElement,
+    invitation_panel: Option<gpui_kit::AnyElement>,
+    translation_panel: Option<gpui_kit::AnyElement>,
+    action_banner: Option<gpui_kit::AnyElement>,
+    reply_panel: Option<gpui_kit::AnyElement>,
+    sent_messages: Vec<gpui_kit::AnyElement>,
+    body: gpui_kit::AnyElement,
+    thread: Vec<gpui_kit::AnyElement>,
+}
+
 /// Removes remote images from a Markdown body when the user does not
 /// veut pas charger de contenu distant.
 fn strip_remote_images(md: &str) -> String {
@@ -531,7 +555,6 @@ impl AviaryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let theme = cx.theme().clone();
         let tabs_bar = if self.view == super::state::MainView::Mail {
             self.render_message_tabs(cx)
         } else {
@@ -555,32 +578,19 @@ impl AviaryApp {
                     .into_any_element();
             }
         }
-        let Some(m) = self.displayed_message() else {
+        // A message the user just left stays painted until the selection
+        // can replace it whole (`MailboxState::lingering_selected`). It is
+        // looked up here and nowhere else: `displayed_message` does not
+        // return it, so shortcuts, menus and reply paths all see the
+        // selection, and a layer laid over it keeps the mouse off its buttons
+        // and links.
+        let lingering = self.mailbox.lingering_for_render();
+        let Some(m) = self.displayed_message().or_else(|| lingering.clone()) else {
             self.scrolls.viewer.motion.cancel();
-            let active_tab_loading = self
-                .mailbox
-                .active_tab
-                .and_then(|index| self.mailbox.open_tabs.get(index))
-                .is_some_and(|tab| tab.is_loading());
-            let label = if active_tab_loading
-                || (self.mailbox.active_tab.is_none() && self.mailbox.selected_id.is_some())
-            {
-                tr!("viewer-message-loading")
-            } else {
-                tr!("viewer-select-message")
-            };
             return v_flex()
                 .size_full()
                 .child(tabs_bar)
-                .child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(theme.muted_foreground)
-                        .child(label),
-                )
+                .child(self.reader_placeholder(cx))
                 .into_any_element();
         };
         let viewer_scroll_handle = self.scrolls.viewer.handle.clone();
@@ -589,119 +599,21 @@ impl AviaryApp {
             .motion
             .advance(&viewer_scroll_handle, window);
 
-        let chrome = self.viewer_chrome(&m, cx);
-        let mode = chrome.mode;
-        let body_options = chrome.options;
-        let translation_active = self.viewer_translation.open
-            || self
-                .viewer_translation
-                .result
-                .as_ref()
-                .is_some_and(|translation| {
-                    translation.message_id == m.header.id && translation.visible
-                });
-
-        let header = self.render_viewer_header(&m, &chrome, cx);
-
-        let translation_panel = self.render_viewer_translation_panel(&m, window, cx);
-        let invitation_panel = m
-            .invitation
-            .as_ref()
-            .map(|invitation| self.render_invitation_panel(&m, invitation, cx));
-        let action_banner = self.render_viewer_action_banner(&m, mode, cx);
-
-        let reply_panel = self.render_inline_reply(&m, cx);
-
-        let max_w = self.settings.global.preview_max_width;
-        // The painted measurement is the reader's final width. `ResizableState`
-        // remains a good first-frame fallback but may retain an
-        // old split (especially after a layout change) and artificially narrow
-        // quoted cards to about 600 px.
-        let viewer_panel_width = self.viewer_panel_width(cx).or(self.viewer_layout_width);
-        let body_fallback_width = viewer_panel_width
-            .map(|width| {
-                let content_width = width - 32.0; // `.px_4()`
-                if max_w > 1.0 {
-                    content_width.min(max_w - 32.0)
-                } else {
-                    content_width
-                }
-            })
-            .filter(|width| *width >= 40.0);
-        let body = div()
-            // Without an explicit width, this flex item is sized from
-            // content. Blitz needs the width to produce that
-            // content: on first display, the cycle resolves to 0 px and only
-            // recovers after resizing the panel.
-            .w_full()
-            .min_w_0()
-            .px_4()
-            .py_3()
-            .when(max_w > 1.0, |el| el.max_w(px(max_w)).mx_auto())
-            .child(self.render_message_body(
-                &m,
-                mode,
-                body_options,
-                body_fallback_width,
-                window,
-                cx,
-            ));
-
-        let sent_messages = self.render_sent_messages(&m, mode, viewer_panel_width, window, cx);
-
-        let thread = if translation_active {
-            Vec::new()
-        } else {
-            self.render_thread(&m, mode, viewer_panel_width, window, cx)
+        let content = match lingering {
+            // Nothing lingers: the displayed message, as always.
+            None => {
+                self.reset_reader_scroll_if_pending();
+                let parts = self.viewer_parts(&m, false, window, cx);
+                self.assemble_viewer_content(parts, ReaderScroll::Shared, cx)
+            }
+            // Something lingers, so the reader shows the list selection:
+            // `displayed_message` is the selection, if it has arrived.
+            Some(previous) => {
+                let incoming = self.mailbox.selected.clone();
+                self.render_lingering_switch(previous, incoming, window, cx)
+            }
         };
-
-        let viewer = v_flex()
-            .size_full()
-            .child(tabs_bar)
-            .child(header)
-            .children(invitation_panel)
-            .children(translation_panel)
-            .children(action_banner)
-            // The reply panel lives outside the scroll area, so it remains
-            // visible even after scrolling far into the body.
-            .children(reply_panel)
-            .child(
-                div()
-                    .id("viewer-scroll")
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_x_hidden()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scrolls.viewer.handle)
-                    // On the same div, GPUI's internal scroll handler runs
-                    // before this listener; wheel motion then undoes and
-                    // animates its line-sized jump.
-                    .on_scroll_wheel(cx.listener({
-                        let handle = viewer_scroll_handle;
-                        move |this, event: &gpui_kit::ScrollWheelEvent, window, cx| {
-                            if this.scrolls.viewer.motion.on_wheel(&handle, event, window) {
-                                cx.notify();
-                            }
-                        }
-                    }))
-                    .child(
-                        // Without `w_full`, the scroll container sizes this
-                        // column to min-content and every percent-width card
-                        // inside collapses with it (the body only *looks*
-                        // right because Blitz draws at a measured pixel
-                        // width).
-                        v_flex()
-                            .w_full()
-                            .min_w_0()
-                            .children(sent_messages)
-                            .child(body)
-                            .children(thread),
-                    ),
-            );
+        let viewer = v_flex().size_full().child(tabs_bar).child(content);
 
         // Measuring an absolute canvas in the reader created a cycle during
         // initial layout: its provisional width became the minimum width
@@ -734,6 +646,322 @@ impl AviaryApp {
                 });
             })
             .child(viewer)
+            .into_any_element()
+    }
+
+    /// What the reader shows with no message to draw: a message loading, or
+    /// none chosen.
+    fn reader_placeholder(&self, cx: &App) -> gpui_kit::AnyElement {
+        let active_tab_loading = self
+            .mailbox
+            .active_tab
+            .and_then(|index| self.mailbox.open_tabs.get(index))
+            .is_some_and(|tab| tab.is_loading());
+        let label = if active_tab_loading
+            || (self.mailbox.active_tab.is_none() && self.mailbox.selected_id.is_some())
+        {
+            tr!("viewer-message-loading")
+        } else {
+            tr!("viewer-select-message")
+        };
+        div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(cx.theme().muted_foreground)
+            .child(label)
+            .into_any_element()
+    }
+
+    /// Returns the reader to the top the first time it draws a selection
+    /// that just arrived (`reader_scroll_reset_pending`). Not earlier: until
+    /// then the scroll handle may still carry the message on screen.
+    fn reset_reader_scroll_if_pending(&mut self) {
+        if self.mailbox.active_tab.is_some()
+            || !std::mem::take(&mut self.reader_scroll_reset_pending)
+        {
+            return;
+        }
+        self.scrolls.viewer.motion.cancel();
+        self.scrolls
+            .viewer
+            .handle
+            .set_offset(gpui_kit::point(px(0.), px(0.)));
+    }
+
+    /// The reader while a message it is leaving lingers.
+    ///
+    /// The selection, once arrived, is built first and in full, with its
+    /// body under a watch ([`super::blitz_body::begin_body_watch`]): building
+    /// it is what starts its Blitz render, and the watch says whether it has
+    /// anything to paint yet. [`super::state::linger_step`] then decides:
+    ///
+    /// - *reveal* — the selection takes the reader, exactly as without
+    ///   lingering, and the lingering message is dropped;
+    /// - *hold* — the lingering message keeps the reader's place (and its
+    ///   scroll offset, the handle being its own until the swap), its bodies
+    ///   frozen on the tiles already on screen, with the selection laid out
+    ///   underneath in an invisible layer of the same size. Laid out, since
+    ///   its width probe must measure the width it will be shown at to start
+    ///   the right render; invisible, since painting it is precisely what
+    ///   must wait. Its render notifies the view on completion, which brings
+    ///   this back with a body ready to reveal.
+    ///
+    /// Both are covered by one inert layer: the lingering message must not
+    /// be clicked, and the selection under it is not on screen.
+    fn render_lingering_switch(
+        &mut self,
+        previous: Rc<Message>,
+        incoming: Option<Rc<Message>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let elapsed = self
+            .mailbox
+            .lingering_selected
+            .as_ref()
+            .map_or(super::app::LINGERING_SELECTION_GRACE, |lingering| {
+                lingering.since.elapsed()
+            });
+        let staged = incoming.map(|message| {
+            super::blitz_body::begin_body_watch(cx);
+            let parts = self.viewer_parts(&message, true, window, cx);
+            let body_pending = super::blitz_body::end_body_watch(cx);
+            let state = super::state::IncomingSelection {
+                body_pending,
+                thread_pending: self.mailbox.selection_thread_pending(),
+            };
+            (message, parts, state)
+        });
+        let step = super::state::linger_step(
+            elapsed,
+            super::app::LINGERING_SELECTION_GRACE,
+            staged.as_ref().map(|(_, _, state)| *state),
+        );
+        if step == super::state::LingerStep::Reveal {
+            self.mailbox.lingering_selected = None;
+            let Some((message, mut parts, _)) = staged else {
+                // Past the cap with nothing arrived: the loading state.
+                return self.reader_placeholder(cx);
+            };
+            // Built as staged, so without the translation panel: nothing
+            // else draws it now.
+            parts.translation_panel = self.render_viewer_translation_panel(&message, window, cx);
+            self.reset_reader_scroll_if_pending();
+            return self.assemble_viewer_content(parts, ReaderScroll::Shared, cx);
+        }
+
+        // Its thread and expanded cards may already have been handed over
+        // by `settle_thread_for`: they go back in place for the time of
+        // building it, so that it draws exactly as it was left.
+        let mut lingering = self.mailbox.lingering_selected.take();
+        let own_thread = lingering
+            .as_mut()
+            .and_then(|lingering| lingering.thread.as_mut());
+        if let Some(own) = own_thread {
+            std::mem::swap(&mut self.mailbox.thread, &mut own.thread);
+            std::mem::swap(&mut self.mailbox.thread_bodies, &mut own.bodies);
+        }
+        super::blitz_body::set_frozen(cx, true);
+        let parts = self.viewer_parts(&previous, false, window, cx);
+        super::blitz_body::set_frozen(cx, false);
+        if let Some(own) = lingering
+            .as_mut()
+            .and_then(|lingering| lingering.thread.as_mut())
+        {
+            std::mem::swap(&mut self.mailbox.thread, &mut own.thread);
+            std::mem::swap(&mut self.mailbox.thread_bodies, &mut own.bodies);
+        }
+        self.mailbox.lingering_selected = lingering;
+        let shown = self.assemble_viewer_content(parts, ReaderScroll::Shared, cx);
+
+        // Neither wrapper of the message on screen carries an id, so element
+        // state — the scroll handle's, the reply composer's — keeps its path
+        // whether it lingers or not. The inert layer is deliberately
+        // invisible: dimming the old message would be one more flash on the
+        // way to the next.
+        let staged = staged.map(|(_, parts, _)| {
+            let content = self.assemble_viewer_content(parts, ReaderScroll::Staged, cx);
+            div()
+                .id("viewer-staged-selection")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .flex_col()
+                .invisible()
+                .child(content)
+        });
+        v_flex()
+            .relative()
+            .w_full()
+            .min_w_0()
+            .flex_1()
+            .min_h_0()
+            .child(shown)
+            .children(staged)
+            .child(div().absolute().top_0().left_0().size_full().occlude())
+            .into_any_element()
+    }
+
+    /// Builds everything the reader draws for one message, in the order it
+    /// draws it; [`Self::assemble_viewer_content`] lays it out.
+    ///
+    /// `staged` builds a selection laid out out of sight: it leaves out the
+    /// translation panel, whose input entity the message on screen already
+    /// draws — one entity laid out twice in a frame would take the geometry
+    /// of the invisible copy. The panel sits above the scroll area, so
+    /// leaving it out changes neither the body's width nor, beyond the
+    /// margin the first paint covers, which of its bands are painted first.
+    fn viewer_parts(
+        &mut self,
+        m: &Rc<Message>,
+        staged: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ViewerParts {
+        let chrome = self.viewer_chrome(m, cx);
+        let mode = chrome.mode;
+        let body_options = chrome.options;
+        let translation_active = self.viewer_translation.open
+            || self
+                .viewer_translation
+                .result
+                .as_ref()
+                .is_some_and(|translation| {
+                    translation.message_id == m.header.id && translation.visible
+                });
+
+        let header = self.render_viewer_header(m, &chrome, cx).into_any_element();
+        let translation_panel = if staged {
+            None
+        } else {
+            self.render_viewer_translation_panel(m, window, cx)
+        };
+        let invitation_panel = m
+            .invitation
+            .as_ref()
+            .map(|invitation| self.render_invitation_panel(m, invitation, cx));
+        let action_banner = self
+            .render_viewer_action_banner(m, mode, cx)
+            .map(IntoElement::into_any_element);
+        let reply_panel = self.render_inline_reply(m, cx);
+
+        let max_w = self.settings.global.preview_max_width;
+        // The painted measurement is the reader's final width. `ResizableState`
+        // remains a good first-frame fallback but may retain an
+        // old split (especially after a layout change) and artificially narrow
+        // quoted cards to about 600 px.
+        let viewer_panel_width = self.viewer_panel_width(cx).or(self.viewer_layout_width);
+        let body_fallback_width = viewer_panel_width
+            .map(|width| {
+                let content_width = width - 32.0; // `.px_4()`
+                if max_w > 1.0 {
+                    content_width.min(max_w - 32.0)
+                } else {
+                    content_width
+                }
+            })
+            .filter(|width| *width >= 40.0);
+        let body = div()
+            // Without an explicit width, this flex item is sized from
+            // content. Blitz needs the width to produce that
+            // content: on first display, the cycle resolves to 0 px and only
+            // recovers after resizing the panel.
+            .w_full()
+            .min_w_0()
+            .px_4()
+            .py_3()
+            .when(max_w > 1.0, |el| el.max_w(px(max_w)).mx_auto())
+            .child(self.render_message_body(m, mode, body_options, body_fallback_width, window, cx))
+            .into_any_element();
+
+        let sent_messages = self.render_sent_messages(m, mode, viewer_panel_width, window, cx);
+
+        let thread = if translation_active {
+            Vec::new()
+        } else {
+            self.render_thread(m, mode, viewer_panel_width, window, cx)
+        };
+        ViewerParts {
+            header,
+            invitation_panel,
+            translation_panel,
+            action_banner,
+            reply_panel,
+            sent_messages,
+            body,
+            thread,
+        }
+    }
+
+    /// Lays out [`ViewerParts`]: header and panels on top, then the scroll
+    /// area with the cards around the body.
+    fn assemble_viewer_content(
+        &mut self,
+        parts: ViewerParts,
+        scroll: ReaderScroll,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let column = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_x_hidden();
+        let scroll_area = match scroll {
+            ReaderScroll::Shared => {
+                let handle = self.scrolls.viewer.handle.clone();
+                column
+                    .id("viewer-scroll")
+                    .overflow_y_scroll()
+                    .track_scroll(&handle)
+                    // On the same div, GPUI's internal scroll handler runs
+                    // before this listener; wheel motion then undoes and
+                    // animates its line-sized jump.
+                    .on_scroll_wheel(cx.listener(
+                        move |this, event: &gpui_kit::ScrollWheelEvent, window, cx| {
+                            if this.scrolls.viewer.motion.on_wheel(&handle, event, window) {
+                                cx.notify();
+                            }
+                        },
+                    ))
+            }
+            // Same id under another parent: a scroll state of its own,
+            // starting at the top, laid out like the real one.
+            ReaderScroll::Staged => column.id("viewer-scroll").overflow_y_scroll(),
+        };
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .flex_1()
+            .min_h_0()
+            .child(parts.header)
+            .children(parts.invitation_panel)
+            .children(parts.translation_panel)
+            .children(parts.action_banner)
+            // The reply panel lives outside the scroll area, so it remains
+            // visible even after scrolling far into the body.
+            .children(parts.reply_panel)
+            .child(
+                scroll_area.child(
+                    // Without `w_full`, the scroll container sizes this
+                    // column to min-content and every percent-width card
+                    // inside collapses with it (the body only *looks*
+                    // right because Blitz draws at a measured pixel
+                    // width).
+                    v_flex()
+                        .w_full()
+                        .min_w_0()
+                        .children(parts.sent_messages)
+                        .child(parts.body)
+                        .children(parts.thread),
+                ),
+            )
             .into_any_element()
     }
 

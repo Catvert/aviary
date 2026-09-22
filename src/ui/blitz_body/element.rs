@@ -198,6 +198,36 @@ pub(super) fn zoom_badge_anchor(window: &Window) -> Point<Pixels> {
     point(viewport.width - px(16.), viewport.height - px(16.))
 }
 
+/// How long a first render may run before the body says it is rendering.
+const RENDERING_LABEL_DELAY: Duration = Duration::from_millis(400);
+
+/// Re-renders the owner when the label's deadline passes, if the render is
+/// still running then. Nothing else would: the cache is a `Global`, and a
+/// render in flight notifies its view only when it completes.
+fn arm_rendering_label(key: &str, generation: u64, delay: Duration, cx: &mut App) {
+    {
+        let entry = cx.default_global::<BlitzCache>().entry_mut(key);
+        if entry.rendering_label_armed == Some(generation) {
+            return;
+        }
+        entry.rendering_label_armed = Some(generation);
+    }
+    let key = key.to_string();
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(delay).await;
+        let owner = cx.update(|cx| {
+            let entry = cx.default_global::<BlitzCache>().entries.get(&key)?;
+            (entry.in_flight && entry.target_generation == generation)
+                .then_some(entry.owner)
+                .flatten()
+        });
+        if let Some(owner) = owner {
+            cx.update(|cx| cx.notify(owner));
+        }
+    })
+    .detach();
+}
+
 pub(super) fn render_element(
     key: String,
     job: Arc<Job>,
@@ -207,6 +237,9 @@ pub(super) fn render_element(
     zoom_badge_anchor: Option<Point<Pixels>>,
     cx: &mut App,
 ) -> gpui_kit::AnyElement {
+    if cx.default_global::<BlitzCache>().frozen {
+        return frozen_element(&key, fallback_width, cx);
+    }
     let theme = cx.theme().clone();
     let focus = {
         let cache = cx.default_global::<BlitzCache>();
@@ -232,6 +265,8 @@ pub(super) fn render_element(
         rendered,
         error,
         in_flight,
+        render_started,
+        generation,
         cursor,
         has_live,
         zoom,
@@ -244,6 +279,8 @@ pub(super) fn render_element(
             e.rendered.clone(),
             e.error.clone(),
             e.in_flight,
+            e.render_started,
+            e.target_generation,
             e.cursor.unwrap_or(CursorStyle::Arrow),
             e.live.is_some(),
             e.zoom,
@@ -252,44 +289,33 @@ pub(super) fn render_element(
             e.context_link.clone(),
         )
     };
-    cx.default_global::<BlitzCache>().sweep_idle_documents();
+    {
+        let cache = cx.default_global::<BlitzCache>();
+        cache.record_watched(&key);
+        cache.sweep_idle_documents();
+    }
     drop_orphaned_images(cx);
     let mut content = v_flex().w_full().min_w_0().items_start();
     if let Some(r) = &rendered {
-        for tile in &r.tiles {
-            content = content.child(match &tile.image {
-                Some(image) => img(image.clone())
-                    .object_fit(ObjectFit::Fill)
-                    .flex_shrink_0()
-                    .w(px(r.width))
-                    .h(px(tile.height))
-                    .into_any_element(),
-                // Band not rasterized yet (or evicted after scrolling away):
-                // reserve its exact height so scroll geometry stays stable.
-                None => div()
-                    .flex_shrink_0()
-                    .w(px(r.width))
-                    .h(px(tile.height))
-                    .into_any_element(),
-            });
-        }
-        if r.truncated {
-            content = content.child(
-                div()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(tr!("viewer-message-truncated")),
-            );
-        }
+        content = tiles_content(content, r, theme.muted_foreground);
     } else if let Some(e) = &error {
         content = content.child(div().text_sm().text_color(theme.danger).child(e.clone()));
     } else if in_flight {
-        content = content.child(
-            div()
+        // Blank at first, labelled only once the render proves slow: most
+        // finish well within the delay, and a label shown for a few frames
+        // is a flash, not information. Same height either way, so the label
+        // appearing moves nothing.
+        let elapsed = render_started.map_or(RENDERING_LABEL_DELAY, |started| started.elapsed());
+        let labelled = elapsed >= RENDERING_LABEL_DELAY;
+        if !labelled {
+            arm_rendering_label(&key, generation, RENDERING_LABEL_DELAY - elapsed, cx);
+        }
+        content = content.child(div().h(px(24.)).when(labelled, |label| {
+            label
                 .text_sm()
                 .text_color(theme.muted_foreground)
-                .child(tr!("viewer-rendering-message")),
-        );
+                .child(tr!("viewer-rendering-message"))
+        }));
     } else {
         // First pass: the width measurement below will start rendering.
         content = content.child(div().h(px(24.)));
@@ -511,6 +537,67 @@ pub(super) fn render_element(
         }
         (None, None) => wrapper.into_any_element(),
     }
+}
+
+/// The rendered tiles, in order, followed by the truncation notice if any.
+fn tiles_content(mut content: gpui_kit::Div, r: &Rendered, muted: gpui_kit::Hsla) -> gpui_kit::Div {
+    for tile in &r.tiles {
+        content = content.child(match &tile.image {
+            Some(image) => img(image.clone())
+                .object_fit(ObjectFit::Fill)
+                .flex_shrink_0()
+                .w(px(r.width))
+                .h(px(tile.height))
+                .into_any_element(),
+            // Band not rasterized yet (or evicted after scrolling away):
+            // reserve its exact height so scroll geometry stays stable.
+            None => div()
+                .flex_shrink_0()
+                .w(px(r.width))
+                .h(px(tile.height))
+                .into_any_element(),
+        });
+    }
+    if r.truncated {
+        content = content.child(
+            div()
+                .text_sm()
+                .text_color(muted)
+                .child(tr!("viewer-message-truncated")),
+        );
+    }
+    content
+}
+
+/// A body built under [`set_frozen`]: the tiles its entry already holds, as
+/// they were on screen, and nothing that could move the cache
+/// ([`BlitzCache::frozen_view`]).
+fn frozen_element(key: &str, fallback_width: Option<f32>, cx: &mut App) -> gpui_kit::AnyElement {
+    let theme = cx.theme().clone();
+    let FrozenView {
+        rendered,
+        error,
+        focus,
+    } = cx.default_global::<BlitzCache>().frozen_view(key);
+    let mut content = v_flex().w_full().min_w_0().items_start();
+    if let Some(r) = &rendered {
+        content = tiles_content(content, r, theme.muted_foreground);
+    } else if let Some(e) = error {
+        content = content.child(div().text_sm().text_color(theme.danger).child(e));
+    } else {
+        content = content.child(div().h(px(24.)));
+    }
+    let mut wrapper = div().w_full().min_w_0().relative();
+    if let Some(width) = fallback_width.filter(|width| *width >= 40.0) {
+        wrapper = wrapper.min_w(px(width.floor()));
+    }
+    // A body clicked before leaving it still holds the keyboard focus: its
+    // node stays in the tree, so that j/k keep reaching the reader's key
+    // context while the next message renders. No key listener: it is inert.
+    if let Some(focus) = &focus {
+        wrapper = wrapper.track_focus(focus);
+    }
+    wrapper.child(content).into_any_element()
 }
 
 pub(super) fn link_context_menu(menu: PopupMenu, url: String) -> PopupMenu {

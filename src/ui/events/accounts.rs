@@ -164,6 +164,9 @@ impl AviaryApp {
             self.viewer_translation.result = None;
             self.sender_history = super::super::state::SenderHistoryState::Idle;
         }
+        // Whichever account it belongs to: a lingering message is at most a
+        // fraction of a second of comfort, not worth reasoning about here.
+        self.mailbox.lingering_selected = None;
         if selected_belongs_to_account {
             self.mailbox.selected = None;
             self.mailbox.selected_id = None;

@@ -435,6 +435,72 @@ fn navigation_cancels_only_reader_renders() {
     assert!(quote.in_flight, "editor quotes use an independent slot");
 }
 
+fn rendered_stub() -> Arc<Rendered> {
+    Arc::new(Rendered {
+        width: 600.0,
+        display: 1.0,
+        tiles: Vec::new(),
+        truncated: false,
+        resources_pending: false,
+    })
+}
+
+/// The reader reveals a selection only once every body it built can paint
+/// something: tiles, or an error saying why not.
+#[test]
+fn a_watched_body_is_pending_until_it_has_tiles_or_an_error() {
+    let mut cache = BlitzCache::default();
+    cache.record_watched("unwatched");
+    assert!(cache.body_watch.is_none());
+
+    cache.body_watch = Some(BodyWatch::default());
+    cache.entry_mut("rendered").rendered = Some(rendered_stub());
+    cache.entry_mut("failed").error = Some("failed".into());
+    cache.record_watched("rendered");
+    cache.record_watched("failed");
+    assert_eq!(cache.body_watch.as_ref().map(|w| w.pending), Some(0));
+
+    // Never measured yet, or rendering: nothing to paint.
+    cache.record_watched("new");
+    cache
+        .entry_mut("rendering")
+        .request_target(600.0, 1.0, 1.0)
+        .expect("target");
+    cache.record_watched("rendering");
+    assert_eq!(cache.body_watch.as_ref().map(|w| w.pending), Some(2));
+}
+
+/// Painting the message being left must not disturb the one rendering in
+/// its place, nor bring back an entry that is gone.
+#[test]
+fn a_frozen_view_leaves_the_cache_alone() {
+    let mut cache = BlitzCache::default();
+    cache.entry_mut("leaving").rendered = Some(rendered_stub());
+    let incoming = cache.entry_mut("incoming");
+    incoming.reader = true;
+    incoming
+        .request_target(600.0, 1.0, 1.0)
+        .expect("incoming target");
+    let cancellation = incoming
+        .render_cancellation
+        .clone()
+        .expect("incoming cancellation");
+
+    let view = cache.frozen_view("leaving");
+    assert!(view.rendered.is_some() && view.error.is_none());
+    assert_eq!(
+        cache.order.back().map(String::as_str),
+        Some("leaving"),
+        "kept most recent so the incoming render cannot evict it"
+    );
+    assert!(!cancellation.is_cancelled());
+    assert!(cache.entries.get("incoming").is_some_and(|e| e.in_flight));
+
+    let view = cache.frozen_view("evicted");
+    assert!(view.rendered.is_none() && view.error.is_none() && view.focus.is_none());
+    assert!(!cache.entries.contains_key("evicted"));
+}
+
 fn drag_batch(y_from: f32, y_to: f32) -> Vec<DocOp> {
     let mods = gpui_kit::Modifiers::default();
     vec![

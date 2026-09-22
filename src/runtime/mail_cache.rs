@@ -123,6 +123,15 @@ enum Request {
         folder_id: Option<String>,
         reply: oneshot::Sender<Result<HashMap<String, usize>>>,
     },
+    LoadThread {
+        account_id: AccountId,
+        conversation_id: String,
+        reply: oneshot::Sender<Result<Vec<MessageHeader>>>,
+    },
+    StoreThreadHeaders {
+        account_id: AccountId,
+        headers: Vec<MessageHeader>,
+    },
     LoadMessage {
         account_id: AccountId,
         message_id: String,
@@ -275,6 +284,19 @@ impl MailCache {
                         reply,
                     } => answer(&mut db, reply, |db| {
                         db.conversation_totals(&account_id, folder_id.as_deref())
+                    }),
+                    Request::LoadThread {
+                        account_id,
+                        conversation_id,
+                        reply,
+                    } => answer(&mut db, reply, |db| {
+                        db.load_thread(&account_id, &conversation_id)
+                    }),
+                    Request::StoreThreadHeaders {
+                        account_id,
+                        headers,
+                    } => apply(&mut db, "thread header cache write failed", |db| {
+                        db.store_thread_headers(&account_id, &headers)
                     }),
                     Request::LoadMessage {
                         account_id,
@@ -463,6 +485,41 @@ impl MailCache {
             })
             .context("cache actor stopped")?;
         rx.await.context("cache actor stopped")?
+    }
+
+    /// Every cached header of one conversation, oldest first — what the
+    /// reader shows around the opened message before the provider answers.
+    ///
+    /// Folder membership is not required, exactly as for `load_message`: a
+    /// thread spans folders, and the reply the user sent typically sits in a
+    /// Sent folder that was never listed, known to the cache only through
+    /// `store_thread_headers` or an earlier open.
+    pub async fn load_thread(
+        &self,
+        account_id: AccountId,
+        conversation_id: String,
+    ) -> Result<Vec<MessageHeader>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Request::LoadThread {
+                account_id,
+                conversation_id,
+                reply,
+            })
+            .context("cache actor stopped")?;
+        rx.await.context("cache actor stopped")?
+    }
+
+    /// Records the headers a provider thread query returned, so that the next
+    /// open of that conversation finds them locally. Unlike `store_headers`,
+    /// this attaches nothing to a folder: a thread query does not say where
+    /// each message lives, and filing it under the inbox would make it appear
+    /// there.
+    pub fn store_thread_headers(&self, account_id: AccountId, headers: Vec<MessageHeader>) {
+        let _ = self.tx.send(Request::StoreThreadHeaders {
+            account_id,
+            headers,
+        });
     }
 
     pub async fn load_message(
@@ -790,6 +847,8 @@ impl CacheDb {
                ON folder_messages(account_id, folder_id, received DESC);
              CREATE INDEX IF NOT EXISTS messages_body_lru
                ON messages(last_access) WHERE body_json IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS messages_conversation
+               ON messages(account_id, conversation_id) WHERE conversation_id IS NOT NULL;
              CREATE TABLE IF NOT EXISTS sync_state (
                  account_id TEXT NOT NULL,
                  folder_id TEXT NOT NULL,
@@ -1082,6 +1141,94 @@ impl CacheDb {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
             })?;
         Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    }
+
+    fn load_thread(
+        &mut self,
+        account_id: &AccountId,
+        conversation_id: &str,
+    ) -> Result<Vec<MessageHeader>> {
+        if conversation_id.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.conn.prepare(
+            "SELECT header_json FROM messages
+             WHERE account_id = ?1 AND conversation_id = ?2",
+        )?;
+        let rows = statement.query_map(params![account_id.0, conversation_id], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut headers = Vec::new();
+        for row in rows {
+            match serde_json::from_str::<MessageHeader>(&row?) {
+                Ok(mut header) => {
+                    normalize_cached_header(&mut header);
+                    header.account_id = account_id.clone();
+                    headers.push(header);
+                }
+                Err(e) => log::warn!("unreadable cached header in a thread: {e:#}"),
+            }
+        }
+        sort_thread(&mut headers);
+        Ok(headers)
+    }
+
+    /// Inserts thread headers the cache does not hold yet, and refreshes the
+    /// ones it only knows from an earlier thread query. A row that is listed
+    /// in a folder or carries a body is left alone: a thread query is the
+    /// poorest source there is — Gmail's asks for two headers and no
+    /// attachment flag — and overwriting a listed row with it would take the
+    /// paperclip off that row until the next sync.
+    fn store_thread_headers(
+        &mut self,
+        account_id: &AccountId,
+        headers: &[MessageHeader],
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for header in headers {
+            if header.conversation_id.as_deref().is_none_or(str::is_empty) {
+                continue;
+            }
+            let json = serde_json::to_string(header)?;
+            let json_len = json.len() as i64;
+            let written = tx.execute(
+                "INSERT INTO messages(
+                   account_id,message_id,header_json,last_access,cache_bytes,conversation_id
+                 ) VALUES(?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(account_id,message_id) DO UPDATE SET
+                   cache_bytes=excluded.cache_bytes,
+                   header_json=excluded.header_json,
+                   conversation_id=excluded.conversation_id
+                 WHERE messages.body_json IS NULL AND NOT EXISTS (
+                   SELECT 1 FROM folder_messages fm
+                   WHERE fm.account_id=messages.account_id
+                     AND fm.message_id=messages.message_id
+                 )",
+                params![
+                    account_id.0,
+                    header.id,
+                    json,
+                    Self::now(),
+                    json_len,
+                    header.conversation_id
+                ],
+            )?;
+            // Every row of `messages` has its entry in the full-text index:
+            // `store_headers` only reindexes when subject, sender or preview
+            // change, so a row inserted here unindexed would stay unfindable
+            // once its folder is listed.
+            if written == 0 {
+                continue;
+            }
+            let rowid: i64 = tx.query_row(
+                "SELECT rowid FROM messages WHERE account_id=?1 AND message_id=?2",
+                params![account_id.0, header.id],
+                |row| row.get(0),
+            )?;
+            index_message(&tx, rowid, header, None)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     fn load_message(
@@ -1899,6 +2046,15 @@ fn skip_link_target(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) 
 /// A contentless FTS5 table has no UPDATE, so replacing an entry means delete
 /// then insert. Messages whose body was never fetched — or was evicted — fall
 /// back to the provider's preview, the only body text available for them.
+/// The one order a thread travels in, oldest first, whichever source answered.
+/// Backends disagree (Graph and Gmail sort ascending, IMAP descending) and the
+/// reader lists the conversation in the order it receives it, so the cached
+/// thread and the provider's would otherwise swap rows when the second
+/// replaces the first. The id breaks ties so the order is total.
+pub(super) fn sort_thread(headers: &mut [MessageHeader]) {
+    headers.sort_by(|a, b| a.received.cmp(&b.received).then_with(|| a.id.cmp(&b.id)));
+}
+
 fn index_message(
     conn: &Connection,
     rowid: i64,
@@ -2755,6 +2911,121 @@ mod tests {
             .conversation_totals(&account_id, Some("folder-archive"))
             .expect("archive totals")
             .is_empty());
+    }
+
+    fn thread_ids(db: &mut CacheDb, account_id: &AccountId, conversation: &str) -> Vec<String> {
+        db.load_thread(account_id, conversation)
+            .expect("cached thread")
+            .into_iter()
+            .map(|header| header.id)
+            .collect()
+    }
+
+    /// A thread spans folders, and its members reach the cache by three
+    /// routes — a folder listing, an opened body, a provider thread query.
+    /// The cached thread gathers all of them, oldest first, and only for the
+    /// account asked: conversation ids mean nothing across accounts.
+    #[test]
+    fn cached_thread_gathers_the_conversation_across_folders() {
+        let mut db = test_db();
+        let account_id = AccountId("account-a".into());
+        let other_account = AccountId("account-b".into());
+        let threaded = |id: &str, conversation: &str, minutes: i64| {
+            let mut header = header(id, "Contrat", "Contact A <contact-a@example.test>", "");
+            header.conversation_id = Some(conversation.into());
+            header.received = chrono::DateTime::UNIX_EPOCH + chrono::Duration::minutes(minutes);
+            header
+        };
+
+        db.store_headers(
+            &account_id,
+            None,
+            &[
+                threaded("message-c", "conversation-1", 30),
+                threaded("message-x", "conversation-2", 5),
+            ],
+        )
+        .expect("store inbox headers");
+        db.store_headers(
+            &account_id,
+            Some("folder-archive"),
+            &[threaded("message-a", "conversation-1", 10)],
+        )
+        .expect("store archived header");
+        let mut opened = message();
+        opened.header = threaded("message-b", "conversation-1", 20);
+        db.store_message(&account_id, &opened).expect("store body");
+        db.store_thread_headers(&account_id, &[threaded("message-d", "conversation-1", 40)])
+            .expect("store thread headers");
+        db.store_headers(
+            &other_account,
+            None,
+            &[threaded("message-z", "conversation-1", 50)],
+        )
+        .expect("store the other account");
+
+        assert_eq!(
+            thread_ids(&mut db, &account_id, "conversation-1"),
+            ["message-a", "message-b", "message-c", "message-d"]
+        );
+        assert!(db
+            .load_thread(&account_id, "conversation-1")
+            .expect("cached thread")
+            .iter()
+            .all(|header| header.account_id == account_id));
+        assert!(thread_ids(&mut db, &account_id, "").is_empty());
+        assert!(thread_ids(&mut db, &account_id, "conversation-3").is_empty());
+    }
+
+    /// A thread query must neither file its headers under a folder — they
+    /// would show up in the inbox listing — nor degrade what a listing or an
+    /// open stored: Gmail's thread query carries no attachment flag.
+    #[test]
+    fn thread_headers_fill_gaps_without_touching_listed_rows() {
+        let mut db = test_db();
+        let account_id = AccountId("account-a".into());
+        let threaded = |id: &str, has_attachments: bool, is_read: bool| {
+            let mut header = header(id, "Contrat", "Contact A <contact-a@example.test>", "");
+            header.conversation_id = Some("conversation-1".into());
+            header.has_attachments = has_attachments;
+            header.is_read = is_read;
+            header
+        };
+        db.store_headers(&account_id, None, &[threaded("message-a", true, true)])
+            .expect("store listed header");
+
+        db.store_thread_headers(
+            &account_id,
+            &[
+                threaded("message-a", false, false),
+                threaded("message-b", false, false),
+            ],
+        )
+        .expect("store thread headers");
+        let inbox: Vec<String> = db
+            .load_headers(&account_id, None, 10, 0)
+            .expect("inbox")
+            .into_iter()
+            .map(|header| header.id)
+            .collect();
+        assert_eq!(inbox, ["message-a"], "thread headers join no folder");
+        let listed = db
+            .load_header(&account_id, "message-a")
+            .expect("load")
+            .expect("listed row");
+        assert!(listed.has_attachments && listed.is_read);
+
+        // A row known only from a thread query is refreshed by the next one…
+        db.store_thread_headers(&account_id, &[threaded("message-b", false, true)])
+            .expect("refresh thread header");
+        assert!(
+            db.load_header(&account_id, "message-b")
+                .expect("load")
+                .expect("thread row")
+                .is_read
+        );
+        // …and it is searchable like any other cached header.
+        assert!(search_ids(&mut db, "contrat").contains(&"message-b".to_string()));
     }
 
     /// Eviction frees bodies but keeps headers. Search has to follow: still

@@ -346,6 +346,13 @@ struct Entry {
     /// bonnes tuiles.
     target_generation: u64,
     in_flight: bool,
+    /// When the render of `target_generation` started. A first render that
+    /// finishes quickly shows nothing but blank space; only a slow one earns
+    /// the "rendering" label, which otherwise blinks between two messages.
+    render_started: Option<Instant>,
+    /// Generation whose label deadline already has a timer, so the element
+    /// arms one per render rather than one per frame.
+    rendering_label_armed: Option<u64>,
     /// Cancels the render or zoom rerender associated with `target_generation`.
     /// Completed documents remain live in the cache.
     render_cancellation: Option<Arc<RenderCancellation>>,
@@ -401,6 +408,8 @@ impl Default for Entry {
             zoom_badge_generation: 0,
             target_generation: 0,
             in_flight: false,
+            render_started: None,
+            rendering_label_armed: None,
             render_cancellation: None,
             reader: false,
             live: None,
@@ -465,6 +474,7 @@ impl Entry {
         // while an older thread finishes (avoids ABA).
         self.target_generation = next_render_generation();
         self.in_flight = true;
+        self.render_started = Some(Instant::now());
         self.error = None;
         self.render_cancellation = Some(Arc::new(RenderCancellation::default()));
         Some(self.target_generation)
@@ -502,9 +512,30 @@ pub(crate) struct BlitzCache {
     /// `cx.drop_image` (the GPU texture is not freed by the `Arc` drop alone).
     orphaned: Vec<Arc<RenderImage>>,
     last_sweep: Option<Instant>,
+    /// Set while the reader builds a body it puts on screen only once it
+    /// has something to show ([`begin_body_watch`]).
+    body_watch: Option<BodyWatch>,
+    /// Set while the reader builds the message it is leaving: its elements
+    /// only paint the tiles they already have ([`set_frozen`]).
+    frozen: bool,
 }
 
 impl gpui_kit::Global for BlitzCache {}
+
+/// See [`BlitzCache::frozen_view`].
+#[derive(Default)]
+struct FrozenView {
+    rendered: Option<Arc<Rendered>>,
+    error: Option<String>,
+    focus: Option<FocusHandle>,
+}
+
+/// What the elements built under [`begin_body_watch`] have to show.
+#[derive(Default)]
+struct BodyWatch {
+    /// Elements with neither tiles nor an error yet.
+    pending: usize,
+}
 
 impl BlitzCache {
     fn entry_mut(&mut self, key: &str) -> &mut Entry {
@@ -639,6 +670,35 @@ impl BlitzCache {
         )
     }
 
+    /// Under [`begin_body_watch`], counts `key` as pending while its entry
+    /// has neither tiles nor an error to show.
+    fn record_watched(&mut self, key: &str) {
+        let pending = self
+            .entries
+            .get(key)
+            .is_none_or(|entry| entry.rendered.is_none() && entry.error.is_none());
+        if let Some(watch) = self.body_watch.as_mut() {
+            watch.pending += usize::from(pending);
+        }
+    }
+
+    /// What a frozen element paints for `key`: its tiles, or its error, plus
+    /// the focus handle it already has. The entry is only marked recently
+    /// used — so that the render coming in cannot evict tiles still on
+    /// display — and never created: an entry that is gone paints as an empty
+    /// body.
+    fn frozen_view(&mut self, key: &str) -> FrozenView {
+        self.touch(key);
+        self.entries
+            .get(key)
+            .map(|entry| FrozenView {
+                rendered: entry.rendered.clone(),
+                error: entry.error.clone(),
+                focus: entry.focus.clone(),
+            })
+            .unwrap_or_default()
+    }
+
     fn cancel_pending_readers_except(&mut self, keep: Option<&str>) {
         for (key, entry) in &mut self.entries {
             if entry.reader && keep != Some(key.as_str()) {
@@ -672,6 +732,34 @@ fn drop_orphaned_images(cx: &mut App) {
     for image in cx.default_global::<BlitzCache>().take_orphaned() {
         cx.drop_image(image, None);
     }
+}
+
+/// Starts recording whether the body elements built from now on have
+/// something to show. The reader brackets the body of a selection it has not
+/// revealed yet with this and [`end_body_watch`], so that it swaps messages
+/// only once the new body can be painted — rather than over a blank
+/// placeholder while it renders.
+pub(crate) fn begin_body_watch(cx: &mut App) {
+    cx.default_global::<BlitzCache>().body_watch = Some(BodyWatch::default());
+}
+
+/// Ends [`begin_body_watch`]: whether an element built meanwhile has neither
+/// tiles nor an error yet. A body that went through no Blitz element at all
+/// (Source mode, a streaming translation) has nothing to wait for.
+pub(crate) fn end_body_watch(cx: &mut App) -> bool {
+    cx.default_global::<BlitzCache>()
+        .body_watch
+        .take()
+        .is_some_and(|watch| watch.pending > 0)
+}
+
+/// While set, every element built paints its cached tiles and nothing else:
+/// no width probe (it would start a render), no reader flag (it would cancel
+/// the body rendering underneath), no pumps, focus or listeners. This is how
+/// the reader keeps drawing a message it is leaving while the one replacing
+/// it renders out of sight, without either disturbing the other.
+pub(crate) fn set_frozen(cx: &mut App, frozen: bool) {
+    cx.default_global::<BlitzCache>().frozen = frozen;
 }
 
 /// Immediately stops rendering for a message leaving the reader. Its completed

@@ -1536,11 +1536,17 @@ impl AviaryApp {
             };
             self.optimistic_removal_origins.insert(reference, origin);
         }
+        // Removed from a list row while it still lingers in the reader: it
+        // must leave the screen now, not at the end of the grace period.
+        self.mailbox.forget_lingering(account_id, id);
         let selection_matches = self.mailbox.selected_id.as_ref().is_some_and(|selected| {
             selected.id == id
                 && account_id.is_none_or(|account_id| &selected.account_id == account_id)
         });
         let selection = selection_matches.then(|| {
+            // Whatever lingers was waiting for this selection: left in place,
+            // it would come back over whichever message is opened next.
+            self.mailbox.lingering_selected = None;
             let selected = self.mailbox.selected.take();
             let message_id = self.mailbox.selected_id.take();
             let thread = self.mailbox.thread.take();

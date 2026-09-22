@@ -556,7 +556,7 @@ impl AviaryApp {
                 account_id,
                 conversation_id,
                 messages,
-            } => self.on_thread(account_id, conversation_id, messages),
+            } => notify_root = self.on_thread(account_id, conversation_id, messages),
             Evt::SearchResults {
                 request_id,
                 account_id,

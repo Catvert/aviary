@@ -5,7 +5,6 @@ use super::super::compose::ComposeInit;
 use super::super::state::{SenderHistoryState, ThreadBodyState, ViewerTab};
 use super::super::util;
 use crate::model::{AccountId, Message, MessageHeader, MessageRef};
-use crate::runtime::Cmd;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{Context, Window};
 use std::collections::HashMap;
@@ -384,6 +383,11 @@ impl AviaryApp {
             return;
         }
         if message.draft_id.is_some() {
+            if self.mailbox.selected_id.as_ref() == Some(&reference) {
+                // A draft opens a composer, never the reader: nothing will
+                // replace the lingering message.
+                self.mailbox.lingering_selected = None;
+            }
             if self
                 .kanban
                 .preview
@@ -398,12 +402,9 @@ impl AviaryApp {
             return;
         }
         self.update_header_for(&reference, |header| header.is_read = true);
-        if let Some(conversation_id) = &message.header.conversation_id {
-            self.send(Cmd::LoadThread {
-                account_id: account_id.clone(),
-                conversation_id: conversation_id.clone(),
-            });
-        }
+        // Usually already asked by the cached open; only a message the cache
+        // did not hold, or one the provider moved to another thread, asks now.
+        self.request_selection_thread(&account_id, &message.header);
         if self
             .pending_kanban_open
             .as_ref()
@@ -426,7 +427,7 @@ impl AviaryApp {
         }
         message.header.is_read = true;
         self.mailbox.selected_id = Some(reference);
-        self.mailbox.selected = Some(Rc::new(message));
+        self.install_selection(message);
         if self.sender_history_expanded {
             self.refresh_sender_history_for_displayed();
         } else {
@@ -449,6 +450,10 @@ impl AviaryApp {
         if self.mailbox.selected_id.as_ref() != Some(&reference) {
             return;
         }
+        // Asked here rather than once the provider answers: the cache holds
+        // the thread too, and its replies stacked above the body appearing
+        // half a second after it pushed the whole message down.
+        self.request_selection_thread(&account_id, &message.header);
         if self.pending_reply_id.as_ref() == Some(&reference) {
             self.pending_reply_id = None;
             let init = self.reply_all_init(account_id.clone(), &message);
@@ -460,7 +465,7 @@ impl AviaryApp {
         }
         message.header.is_read = true;
         self.update_header_for(&reference, |header| header.is_read = true);
-        self.mailbox.selected = Some(Rc::new(message));
+        self.install_selection(message);
         self.sender_history = SenderHistoryState::Idle;
     }
 
@@ -534,7 +539,7 @@ impl AviaryApp {
         if self.mailbox.selected_id.as_ref() == Some(&reference) {
             let mut refreshed = (*message).clone();
             refreshed.header.is_read = true;
-            self.mailbox.selected = Some(Rc::new(refreshed));
+            self.install_selection(refreshed);
         }
         for tab in &mut self.mailbox.open_tabs {
             match tab {
@@ -579,20 +584,22 @@ impl AviaryApp {
 
     /// Conversation ids are only comparable inside one account: the thread
     /// is kept only when it belongs to the displayed message's account too.
+    /// Returns whether the reader needs a render: the cached thread and the
+    /// provider's usually agree, and the second then changes nothing.
     pub(super) fn on_thread(
         &mut self,
         account_id: AccountId,
         conversation_id: String,
         messages: Vec<MessageHeader>,
-    ) {
+    ) -> bool {
         let relevant = self.mailbox.selected.as_ref().is_some_and(|message| {
             message.header.account_id == account_id
                 && message.header.conversation_id.as_deref() == Some(conversation_id.as_str())
         });
-        if relevant {
-            self.mailbox.thread_bodies.clear();
-            self.mailbox.thread = Some((conversation_id, messages));
-        }
+        relevant
+            && self
+                .mailbox
+                .apply_thread(&account_id, conversation_id, messages)
     }
 
     pub(super) fn on_search_results(

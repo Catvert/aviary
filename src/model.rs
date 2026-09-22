@@ -50,7 +50,7 @@ pub enum LastAction {
     Forwarded,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MessageHeader {
     pub id: String,
     /// Provider helpers leave this as `AccountId::default()`; the runtime tags

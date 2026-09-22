@@ -38,13 +38,20 @@ use gpui_kit::{
 };
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 /// Repeating j/k produces several selections within milliseconds. A brief
 /// delay avoids sending intermediate messages to the runtime that the user
 /// will never see.
 const MESSAGE_NAVIGATION_DEBOUNCE: Duration = Duration::from_millis(80);
+/// How long the reader may keep painting the message the user just left
+/// while the next one loads *and renders*, counted from the first switch. A
+/// cache read plus a Blitz render fit well within it, so switching messages
+/// goes straight from one complete message to the next; past it, a slow
+/// provider open or render gets the usual loading states rather than a stale
+/// message that looks current.
+pub(super) const LINGERING_SELECTION_GRACE: Duration = Duration::from_millis(400);
 const MESSAGE_ROW_HOVER_DURATION: Duration = Duration::from_millis(120);
 /// Captures edits made inside child entities (block editor, recipient chips,
 /// detached windows) even when the root entity itself was not notified.
@@ -671,6 +678,14 @@ pub struct AviaryApp {
     pub(super) optimistic_removal_origins: HashMap<MessageRef, ListingOrigin>,
     /// Invalidates deferred opens when newer navigation occurs.
     pending_message_open_seq: u64,
+    /// Identifies the message `mailbox.lingering_selected` holds, so the
+    /// grace timer of an earlier one cannot clear it early.
+    lingering_selection_seq: u64,
+    /// The selection arrived while another message lingered on screen, or
+    /// has just arrived: the reader returns to the top when it first draws
+    /// it (`render_viewer_pane`), not before — until then the shared scroll
+    /// handle still belongs to the message on screen.
+    pub(super) reader_scroll_reset_pending: bool,
 
     /// Command-mode focus target. Without explicit focus, gpui dispatches keys
     /// from `Root` and skips the view's `Aviary` context.
@@ -1112,6 +1127,8 @@ impl AviaryApp {
             bulk_completions: BulkCompletions::default(),
             optimistic_removal_origins: HashMap::new(),
             pending_message_open_seq: 0,
+            lingering_selection_seq: 0,
+            reader_scroll_reset_pending: false,
             shortcut_focus,
             search_input,
             mail_search_scroll: super::components::overlay_popover::OverlayPopoverScroll::default(),
@@ -1685,23 +1702,98 @@ impl AviaryApp {
         cx: &mut Context<Self>,
     ) -> u64 {
         self.pending_message_open_seq = self.pending_message_open_seq.wrapping_add(1);
-        // The current body disappears as soon as this selection changes.
-        // Signaling its Blitz thread immediately prevents renders from piling
-        // up when j/k traverses the list faster than messages can rasterize.
+        // The message on screen stays there, inert, until the next one can
+        // replace it whole (`MailboxState::leave_selection`, `linger_step`).
+        if self.mailbox.leave_selection(Instant::now()) {
+            self.arm_lingering_cap(cx);
+        }
+        // Whatever the reader was rendering is not what it will show next:
+        // stopping it now keeps renders from piling up when j/k traverses the
+        // list faster than messages rasterize. A lingering body is painted
+        // from its tiles, which cancelling leaves alone.
         super::blitz_body::cancel_pending_reader(cx);
+        if self.mailbox.lingering_selected.is_none() {
+            self.mailbox.thread = None;
+        }
+        // While a message lingers, its thread stays too — its reply cards
+        // would otherwise vanish and move its body. `install_selection`
+        // hands it over to the lingering message unless the next one shares
+        // it.
         self.mailbox.selected_id = Some(MessageRef {
             account_id: account_id.clone(),
             id: id.to_string(),
         });
         self.mailbox.selected = None;
-        self.mailbox.thread = None;
+        self.mailbox.thread_requested = None;
         // Clicking the list returns the reader to the selection.
         self.mailbox.active_tab = None;
         self.pending_message_open_seq
     }
 
+    /// Bounds how long the message just left may stay on screen:
+    /// `LINGERING_SELECTION_GRACE` after the switch, the selection is shown
+    /// in whatever state it is in.
+    fn arm_lingering_cap(&mut self, cx: &mut Context<Self>) {
+        self.lingering_selection_seq = self.lingering_selection_seq.wrapping_add(1);
+        let generation = self.lingering_selection_seq;
+        let timer = cx.background_executor().timer(LINGERING_SELECTION_GRACE);
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.lingering_selection_seq != generation
+                    || this.mailbox.lingering_selected.take().is_none()
+                {
+                    return;
+                }
+                // Only the lingering message goes: the selection's render,
+                // if one is running, is what the reader shows next.
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Takes in a message that just arrived for the selection. On its first
+    /// arrival, the thread left over from the previous message goes unless
+    /// the new one shares its conversation, and the reader will return to
+    /// the top once it draws it. A message still lingering on screen stays
+    /// there: `render_viewer_pane` swaps it out once the selection is ready.
+    pub(super) fn install_selection(&mut self, message: Message) {
+        if self.mailbox.selected.is_none() {
+            self.reader_scroll_reset_pending = true;
+            self.mailbox.settle_thread_for(&message.header);
+        }
+        self.mailbox.selected = Some(Rc::new(message));
+    }
+
+    /// Asks for the selection's thread once per selection: the cached open
+    /// and the provider open both come through here.
+    pub(super) fn request_selection_thread(
+        &mut self,
+        account_id: &AccountId,
+        header: &MessageHeader,
+    ) {
+        let Some(conversation_id) = header.conversation_id.clone() else {
+            return;
+        };
+        if !self.mailbox.is_selected(account_id, &header.id) {
+            return;
+        }
+        let key = (account_id.clone(), conversation_id);
+        if self.mailbox.thread_requested.as_ref() == Some(&key) {
+            return;
+        }
+        self.mailbox.thread_requested = Some(key.clone());
+        let (account_id, conversation_id) = key;
+        self.send(Cmd::LoadThread {
+            account_id,
+            conversation_id,
+        });
+    }
+
     fn cancel_pending_message_open(&mut self, cx: &mut Context<Self>) {
         self.pending_message_open_seq = self.pending_message_open_seq.wrapping_add(1);
+        self.mailbox.lingering_selected = None;
         super::blitz_body::cancel_pending_reader(cx);
         self.send(Cmd::CancelOpenMessage);
     }
@@ -1998,10 +2090,14 @@ impl AviaryApp {
         if let SenderHistoryState::Loaded { messages, .. } = &mut self.sender_history {
             messages.retain(|m| !same(m));
         }
+        self.mailbox.forget_lingering(Some(account_id), id);
         if self.mailbox.is_selected(account_id, id) {
             self.mailbox.selected = None;
             self.mailbox.selected_id = None;
             self.mailbox.thread = None;
+            // What lingers was waiting for this selection: left in place, it
+            // would come back over whichever message is opened next.
+            self.mailbox.lingering_selected = None;
         }
         if let Some(board) = self.kanban.accounts.get_mut(account_id) {
             for column in &mut board.columns {

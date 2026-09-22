@@ -1196,10 +1196,43 @@ pub(super) async fn search_messages(
     }
 }
 
+/// Cache first, like every other mailbox read: the headers the cache already
+/// holds for the conversation are emitted at once, then the provider's answer
+/// replaces them. Without the first step the replies the reader stacks above
+/// the body appeared half a second after it and pushed it down.
+///
+/// Offline, the cached thread simply stays: the provider failure is only
+/// logged, since the message open that triggered this load already reported
+/// the account unreachable — including when authentication itself fails.
 pub(super) async fn load_thread(account: Arc<BgAccount>, conversation_id: String) {
     let started = std::time::Instant::now();
-    let Some(auth) = account.auth_or_report().await else {
-        return;
+    match account
+        .global
+        .cache
+        .load_thread(account.id.clone(), conversation_id.clone())
+        .await
+    {
+        Ok(cached) if !cached.is_empty() => {
+            log::debug!(
+                "cached conversation headers loaded in {} ms (messages={})",
+                started.elapsed().as_millis(),
+                cached.len()
+            );
+            account.emit(Evt::Thread {
+                account_id: account.id.clone(),
+                conversation_id: conversation_id.clone(),
+                messages: cached,
+            });
+        }
+        Ok(_) => {}
+        Err(e) => log::warn!("reading cached thread: {e:#}"),
+    }
+    let auth = match account.ensure_auth().await {
+        Ok(auth) => auth,
+        Err(e) => {
+            log::warn!("thread load skipped: {e:#}");
+            return;
+        }
     };
     let _permit = account.mailbox_permit().await;
     match retry_read(|| async { account.session(&auth).list_thread(&conversation_id).await }).await
@@ -1209,6 +1242,11 @@ pub(super) async fn load_thread(account: Arc<BgAccount>, conversation_id: String
             for m in &mut messages {
                 m.account_id = account.id.clone();
             }
+            super::mail_cache::sort_thread(&mut messages);
+            account
+                .global
+                .cache
+                .store_thread_headers(account.id.clone(), messages.clone());
             account.emit(Evt::Thread {
                 account_id: account.id.clone(),
                 conversation_id,
