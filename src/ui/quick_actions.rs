@@ -54,12 +54,28 @@ pub(super) struct PendingQuickActionRequest {
     action: QuickAction,
     source_folder_id: Option<String>,
     header: MessageHeader,
+    thread: Vec<MessageHeader>,
 }
 
 pub(super) struct QuickActionMenu {
     target: MessageRef,
     scope: &'static str,
     menu: Entity<PopupMenu>,
+}
+
+/// The other loaded members of the collapsed conversation a row stands for,
+/// or nothing: a thread of one loaded message is an ordinary row.
+pub(super) fn thread_companions(
+    message_id: &str,
+    thread: Option<&[MessageRef]>,
+) -> Vec<MessageRef> {
+    thread
+        .filter(|members| members.len() > 1)
+        .into_iter()
+        .flatten()
+        .filter(|member| member.id != message_id)
+        .cloned()
+        .collect()
 }
 
 impl AviaryApp {
@@ -127,16 +143,20 @@ impl AviaryApp {
 
     fn schedule_quick_action(
         &mut self,
-        action: QuickAction,
-        header: MessageHeader,
-        source_folder_id: Option<String>,
+        request: PendingQuickActionRequest,
         message: Option<Message>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let PendingQuickActionRequest {
+            action,
+            source_folder_id,
+            header,
+            thread,
+        } = request;
         self.quick_actions.seq = self.quick_actions.seq.wrapping_add(1);
         let execution_id = QUICK_ACTION_EXECUTION_BIT | self.quick_actions.seq;
-        let steps = self.quick_action_steps(&action, &header, source_folder_id, message);
+        let steps = self.quick_action_steps(&action, &header, &thread, source_folder_id, message);
         if steps.is_empty() {
             return;
         }
@@ -156,10 +176,17 @@ impl AviaryApp {
         self.queue_quick_action(header.account_id, execution, delay, name, window, cx);
     }
 
+    /// `thread` carries the loaded members of the conversation a **collapsed**
+    /// list row stands for: the recipe's move and read-state steps then apply
+    /// to the whole thread — archiving the newest message would only bring an
+    /// older one up in its place. Sends, tags and the flag stay on the
+    /// message, as in the row's context menu.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_quick_action_controls(
         &self,
         account_id: &AccountId,
         message_id: &str,
+        thread: Option<&[MessageRef]>,
         scope: &'static str,
         show_favorites: bool,
         show_menu: bool,
@@ -177,6 +204,7 @@ impl AviaryApp {
             .cloned()
             .collect();
         let entity = cx.entity();
+        let companions = thread_companions(message_id, thread);
         let mut controls = h_flex()
             .id(gpui_kit::ElementId::Name(
                 format!(
@@ -195,6 +223,7 @@ impl AviaryApp {
             for action in favorites {
                 let aid = account_id.clone();
                 let mid = message_id.to_string();
+                let companions = companions.clone();
                 let action_id = action.id;
                 let valid = self.quick_action_is_valid(account_id, &action);
                 controls = controls.child(
@@ -220,6 +249,7 @@ impl AviaryApp {
                                 this.trigger_quick_action(
                                     aid.clone(),
                                     mid.clone(),
+                                    companions.clone(),
                                     action_id,
                                     window,
                                     cx,
@@ -271,6 +301,7 @@ impl AviaryApp {
                         if *open {
                             this.open_quick_action_menu(
                                 target_for_toggle.clone(),
+                                companions.clone(),
                                 scope,
                                 window,
                                 cx,
@@ -308,6 +339,7 @@ impl AviaryApp {
     pub(super) fn open_quick_action_menu(
         &mut self,
         target: MessageRef,
+        companions: Vec<MessageRef>,
         scope: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -335,6 +367,7 @@ impl AviaryApp {
                 &menu_entity,
                 &menu_account_id,
                 &menu_message_id,
+                &companions,
                 offline,
             )
         });
@@ -406,6 +439,7 @@ impl AviaryApp {
         &mut self,
         account_id: AccountId,
         message_id: String,
+        companions: Vec<MessageRef>,
         action_id: i64,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -436,35 +470,34 @@ impl AviaryApp {
             );
             return;
         };
-        let source_folder_id = self.mailbox.selected_folder_id.clone();
-        if action.forward.is_none() && action.reply.is_none() {
-            self.schedule_quick_action(action, header, source_folder_id, None, window, cx);
+        // Members no longer loaded are left alone: acting on messages that
+        // are not on screen would be unexplainable.
+        let thread: Vec<MessageHeader> = companions
+            .iter()
+            .filter(|member| member.account_id == account_id)
+            .filter_map(|member| self.find_quick_action_header(&account_id, &member.id))
+            .collect();
+        let sends = action.forward.is_some() || action.reply.is_some();
+        let request = PendingQuickActionRequest {
+            action,
+            source_folder_id: self.mailbox.selected_folder_id.clone(),
+            header,
+            thread,
+        };
+        if !sends {
+            self.schedule_quick_action(request, None, window, cx);
             return;
         }
         if let Some(message) = self.displayed_message().filter(|message| {
             message.header.account_id == account_id && message.header.id == message_id
         }) {
-            self.schedule_quick_action(
-                action,
-                header,
-                source_folder_id,
-                Some((*message).clone()),
-                window,
-                cx,
-            );
+            self.schedule_quick_action(request, Some((*message).clone()), window, cx);
             return;
         }
 
         self.quick_actions.seq = self.quick_actions.seq.wrapping_add(1);
         let request_id = self.quick_actions.seq;
-        self.quick_actions.pending.insert(
-            request_id,
-            PendingQuickActionRequest {
-                action,
-                source_folder_id,
-                header,
-            },
-        );
+        self.quick_actions.pending.insert(request_id, request);
         self.send(Cmd::LoadQuickActionMessage {
             request_id,
             account_id,
@@ -487,14 +520,7 @@ impl AviaryApp {
         let Some(pending) = self.quick_actions.pending.remove(&request_id) else {
             return;
         };
-        self.schedule_quick_action(
-            pending.action,
-            pending.header,
-            pending.source_folder_id,
-            Some(*message),
-            window,
-            cx,
-        );
+        self.schedule_quick_action(pending, Some(*message), window, cx);
     }
 
     pub(super) fn on_quick_action_message_error(
@@ -537,10 +563,13 @@ impl AviaryApp {
             })
     }
 
+    /// `thread` holds the other members of a collapsed conversation, which
+    /// get one read-state and one move step each (see `QuickActionStep::Move`).
     fn quick_action_steps(
         &self,
         action: &QuickAction,
         header: &MessageHeader,
+        thread: &[MessageHeader],
         source_folder_id: Option<String>,
         message: Option<Message>,
     ) -> Vec<QuickActionStep> {
@@ -571,10 +600,22 @@ impl AviaryApp {
                 });
             }
         }
-        if action.mark_read.is_some_and(|read| read != header.is_read) {
-            steps.push(QuickActionStep::MarkRead {
-                read: action.mark_read.expect("checked"),
-            });
+        if let Some(read) = action.mark_read {
+            if read != header.is_read {
+                steps.push(QuickActionStep::MarkRead {
+                    read,
+                    message_id: None,
+                });
+            }
+            steps.extend(
+                thread
+                    .iter()
+                    .filter(|member| member.is_read != read)
+                    .map(|member| QuickActionStep::MarkRead {
+                        read,
+                        message_id: Some(member.id.clone()),
+                    }),
+            );
         }
         if action
             .set_flagged
@@ -587,9 +628,15 @@ impl AviaryApp {
         if let Some(target_folder_id) = &action.move_to_folder_id {
             if source_folder_id.as_deref() != Some(target_folder_id) {
                 steps.push(QuickActionStep::Move {
-                    source_folder_id,
+                    source_folder_id: source_folder_id.clone(),
                     target_folder_id: target_folder_id.clone(),
+                    message_id: None,
                 });
+                steps.extend(thread.iter().map(|member| QuickActionStep::Move {
+                    source_folder_id: source_folder_id.clone(),
+                    target_folder_id: target_folder_id.clone(),
+                    message_id: Some(member.id.clone()),
+                }));
             }
         }
         steps
@@ -710,12 +757,14 @@ pub(super) fn append_quick_action_menu(
     entity: &Entity<AviaryApp>,
     account_id: &AccountId,
     message_id: &str,
+    companions: &[MessageRef],
     offline: bool,
 ) -> PopupMenu {
     for (action, valid) in actions.iter().cloned() {
         let entity = entity.clone();
         let account_id = account_id.clone();
         let message_id = message_id.to_string();
+        let companions = companions.to_vec();
         let action_id = action.id;
         menu = menu.item(
             PopupMenuItem::new(action.name)
@@ -729,6 +778,7 @@ pub(super) fn append_quick_action_menu(
                         this.trigger_quick_action(
                             account_id.clone(),
                             message_id.clone(),
+                            companions.clone(),
                             action_id,
                             window,
                             cx,
@@ -754,5 +804,32 @@ fn merge_images(target: &mut Vec<crate::model::InlineImage>, source: &[crate::mo
         if !target.iter().any(|item| item.cid == image.cid) {
             target.push(image.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn member(id: &str) -> MessageRef {
+        MessageRef {
+            account_id: AccountId("account@example.test".into()),
+            id: id.into(),
+        }
+    }
+
+    #[test]
+    fn a_collapsed_thread_hands_its_other_members_to_the_recipe() {
+        let thread = [member("newest"), member("older"), member("oldest")];
+        assert_eq!(
+            thread_companions("newest", Some(&thread)),
+            vec![member("older"), member("oldest")]
+        );
+    }
+
+    #[test]
+    fn an_ordinary_row_or_a_thread_of_one_keeps_the_recipe_on_the_message() {
+        assert!(thread_companions("newest", None).is_empty());
+        assert!(thread_companions("newest", Some(&[member("newest")])).is_empty());
     }
 }

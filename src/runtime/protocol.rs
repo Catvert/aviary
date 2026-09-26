@@ -144,14 +144,41 @@ pub enum QuickActionStep {
     },
     MarkRead {
         read: bool,
+        /// Another message of the thread, when the recipe was run on a
+        /// collapsed conversation; `None` is the execution's own message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
     },
     SetFlag {
         flagged: bool,
     },
+    /// Like `MarkRead`, a move may name another member of the thread: one step
+    /// per message, so that the outbox checkpoints each of them — a retry
+    /// after a partial failure must not move a message twice (Graph and IMAP
+    /// give a moved message a new id, the old one no longer resolves).
     Move {
         source_folder_id: Option<String>,
         target_folder_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
     },
+}
+
+impl QuickActionStep {
+    /// The message this step acts on, given the execution's own message.
+    pub fn target<'a>(&'a self, execution_message: &'a str) -> &'a str {
+        match self {
+            Self::MarkRead {
+                message_id: Some(id),
+                ..
+            }
+            | Self::Move {
+                message_id: Some(id),
+                ..
+            } => id,
+            _ => execution_message,
+        }
+    }
 }
 
 /// Calendar event draft carried by `Cmd::CreateEvent`.
@@ -1498,5 +1525,35 @@ mod tests {
             error: "synthetic".into(),
         };
         assert!(sent.is_lifecycle());
+    }
+
+    /// Rows queued by an earlier build carry no `message_id` on their steps:
+    /// they must still read back, and still act on the execution's message.
+    #[test]
+    fn quick_action_steps_without_a_target_act_on_the_execution_message() {
+        let legacy: QuickActionStep = serde_json::from_str(
+            r#"{"Move":{"source_folder_id":"inbox","target_folder_id":"archive"}}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.target("message-a"), "message-a");
+        let legacy: QuickActionStep =
+            serde_json::from_str(r#"{"MarkRead":{"read":true}}"#).unwrap();
+        assert_eq!(legacy.target("message-a"), "message-a");
+
+        let member = QuickActionStep::Move {
+            source_folder_id: None,
+            target_folder_id: "archive".into(),
+            message_id: Some("message-b".into()),
+        };
+        assert_eq!(member.target("message-a"), "message-b");
+        let round_trip: QuickActionStep =
+            serde_json::from_str(&serde_json::to_string(&member).unwrap()).unwrap();
+        assert_eq!(round_trip.target("message-a"), "message-b");
+
+        // Sends and tags always act on the execution's message.
+        let tag = QuickActionStep::AddTag {
+            tag_id: "tag-a".into(),
+        };
+        assert_eq!(tag.target("message-a"), "message-a");
     }
 }

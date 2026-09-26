@@ -399,7 +399,13 @@ pub(crate) fn open_quick_actions(
     let Some(message) = this.displayed_message() else {
         return;
     };
-    this.open_quick_action_menu(MessageRef::from(message.as_ref()), "viewer", window, cx);
+    this.open_quick_action_menu(
+        MessageRef::from(message.as_ref()),
+        Vec::new(),
+        "viewer",
+        window,
+        cx,
+    );
 }
 
 pub(crate) fn print_message(

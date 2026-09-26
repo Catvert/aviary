@@ -35,42 +35,52 @@ impl AviaryApp {
             account_id: account_id.clone(),
             id: execution.message_id.clone(),
         };
-        let Some(header) = self.quick_action_header_for_reference(&reference) else {
+        let mut snapshots = Vec::new();
+        for target in step_targets(&reference, &execution.steps) {
+            let Some(header) = self.quick_action_header_for_reference(&target) else {
+                continue;
+            };
+            let steps = || {
+                execution
+                    .steps
+                    .iter()
+                    .filter(|step| step.target(&reference.id) == target.id)
+            };
+            let changes_tags = steps().any(|step| {
+                matches!(
+                    step,
+                    QuickActionStep::RemoveTag { .. } | QuickActionStep::AddTag { .. }
+                )
+            });
+            let changes_read = steps().any(|step| matches!(step, QuickActionStep::MarkRead { .. }));
+            let changes_flagged =
+                steps().any(|step| matches!(step, QuickActionStep::SetFlag { .. }));
+            let body_tags = changes_tags.then(|| {
+                self.quick_action_body_tags(&target)
+                    .unwrap_or_else(|| header.tags.clone())
+            });
+            let snapshot = QuickActionMessageSnapshot {
+                tags: changes_tags.then(|| header.tags.clone()),
+                body_tags,
+                read: changes_read.then_some(header.is_read),
+                flagged: changes_flagged.then_some(header.is_flagged),
+            };
+            snapshots.push((target, snapshot));
+        }
+        // Nothing on screen to act on: a retry of the steps left over after
+        // every message they name was already moved away.
+        if snapshots.is_empty() {
             return;
-        };
-        let changes_tags = execution.steps.iter().any(|step| {
-            matches!(
-                step,
-                QuickActionStep::RemoveTag { .. } | QuickActionStep::AddTag { .. }
-            )
-        });
-        let changes_read = execution
-            .steps
-            .iter()
-            .any(|step| matches!(step, QuickActionStep::MarkRead { .. }));
-        let changes_flagged = execution
-            .steps
-            .iter()
-            .any(|step| matches!(step, QuickActionStep::SetFlag { .. }));
-        let body_tags = changes_tags.then(|| {
-            self.quick_action_body_tags(&reference)
-                .unwrap_or_else(|| header.tags.clone())
-        });
-        let snapshot = QuickActionMessageSnapshot {
-            tags: changes_tags.then(|| header.tags.clone()),
-            body_tags,
-            read: changes_read.then_some(header.is_read),
-            flagged: changes_flagged.then_some(header.is_flagged),
-        };
-        let removal =
+        }
+        let removals =
             self.apply_quick_action_steps_optimistically(&reference, &execution.steps, cx);
         self.quick_actions.effects.insert(
             execution.execution_id,
             QuickActionOptimisticEffect {
                 reference,
                 steps: execution.steps.clone(),
-                snapshot,
-                removal,
+                snapshots,
+                removals,
             },
         );
     }
@@ -190,13 +200,21 @@ impl AviaryApp {
         }
     }
 
+    /// `reference` is the execution's message; a step naming another member
+    /// of the thread applies to that one instead.
     fn apply_quick_action_steps_optimistically(
         &mut self,
-        reference: &MessageRef,
+        execution_reference: &MessageRef,
         steps: &[QuickActionStep],
         cx: &mut Context<Self>,
-    ) -> Option<OptimisticMessageRemoval> {
+    ) -> Vec<OptimisticMessageRemoval> {
+        let mut moved = Vec::new();
         for step in steps {
+            let target = MessageRef {
+                account_id: execution_reference.account_id.clone(),
+                id: step.target(&execution_reference.id).to_string(),
+            };
+            let reference = &target;
             match step {
                 QuickActionStep::RemoveTag { tag_id } | QuickActionStep::AddTag { tag_id } => {
                     let added = matches!(step, QuickActionStep::AddTag { .. });
@@ -216,7 +234,7 @@ impl AviaryApp {
                         }
                     });
                 }
-                QuickActionStep::MarkRead { read } => {
+                QuickActionStep::MarkRead { read, .. } => {
                     self.update_header_for(reference, |header| header.is_read = *read);
                     self.update_quick_action_bodies(reference, |message| {
                         message.header.is_read = *read;
@@ -228,43 +246,52 @@ impl AviaryApp {
                         message.header.is_flagged = *flagged;
                     });
                 }
-                QuickActionStep::Forward { .. }
-                | QuickActionStep::Reply { .. }
-                | QuickActionStep::Move { .. } => {}
+                QuickActionStep::Move { .. } => {
+                    if !moved.contains(&target) {
+                        moved.push(target);
+                    }
+                }
+                QuickActionStep::Forward { .. } | QuickActionStep::Reply { .. } => {}
             }
         }
-        if steps
-            .iter()
-            .any(|step| matches!(step, QuickActionStep::Move { .. }))
-        {
-            Some(self.remove_quick_action_message_optimistically(reference, cx))
+        if moved.is_empty() {
+            Vec::new()
         } else {
-            None
+            self.remove_quick_action_messages_optimistically(&moved, cx)
         }
     }
 
-    fn remove_quick_action_message_optimistically(
+    /// Removes every moved message at once, so that the reader moves on to a
+    /// neighbor outside the thread rather than to another of its members.
+    fn remove_quick_action_messages_optimistically(
         &mut self,
-        reference: &MessageRef,
+        references: &[MessageRef],
         cx: &mut Context<Self>,
-    ) -> OptimisticMessageRemoval {
-        let was_displayed = self.displayed_message().is_some_and(|message| {
-            message.header.account_id == reference.account_id && message.header.id == reference.id
+    ) -> Vec<OptimisticMessageRemoval> {
+        let displayed = self.displayed_message().and_then(|message| {
+            references
+                .iter()
+                .find(|reference| {
+                    message.header.account_id == reference.account_id
+                        && message.header.id == reference.id
+                })
+                .cloned()
         });
-        let neighbor = was_displayed
-            .then(|| {
-                self.message_neighbor_after_bulk_removal(reference, std::slice::from_ref(reference))
-            })
-            .flatten();
-        let removal = self.remove_message_optimistically_ref(reference);
-        if was_displayed {
+        let neighbor = displayed
+            .as_ref()
+            .and_then(|current| self.message_neighbor_after_bulk_removal(current, references));
+        let removals = references
+            .iter()
+            .map(|reference| self.remove_message_optimistically_ref(reference))
+            .collect();
+        if displayed.is_some() {
             if let Some(message) = neighbor {
                 self.open_message(message.account_id, message.id, cx);
             } else {
                 self.cancel_pending_message_open(cx);
             }
         }
-        removal
+        removals
     }
 
     fn restore_quick_action_effect(
@@ -272,15 +299,28 @@ impl AviaryApp {
         effect: QuickActionOptimisticEffect,
         cx: &mut Context<Self>,
     ) {
-        if let Some(removal) = effect.removal {
+        for removal in effect.removals.into_iter().rev() {
             self.restore_optimistic_message(removal);
         }
-        let reference = effect.reference;
-        let tags = effect.snapshot.tags;
-        let body_tags = effect.snapshot.body_tags;
-        let read = effect.snapshot.read;
-        let flagged = effect.snapshot.flagged;
-        self.update_header_for(&reference, |header| {
+        for (reference, snapshot) in effect.snapshots {
+            self.restore_quick_action_snapshot(&reference, snapshot);
+        }
+        self.update_tray_unread();
+        cx.notify();
+    }
+
+    fn restore_quick_action_snapshot(
+        &mut self,
+        reference: &MessageRef,
+        snapshot: QuickActionMessageSnapshot,
+    ) {
+        let QuickActionMessageSnapshot {
+            tags,
+            body_tags,
+            read,
+            flagged,
+        } = snapshot;
+        self.update_header_for(reference, |header| {
             if let Some(tags) = &tags {
                 header.tags.clone_from(tags);
             }
@@ -291,7 +331,7 @@ impl AviaryApp {
                 header.is_flagged = flagged;
             }
         });
-        self.update_quick_action_bodies(&reference, |message| {
+        self.update_quick_action_bodies(reference, |message| {
             if let Some(tags) = &tags {
                 message.header.tags.clone_from(tags);
             }
@@ -305,7 +345,20 @@ impl AviaryApp {
                 message.header.is_flagged = flagged;
             }
         });
-        self.update_tray_unread();
-        cx.notify();
     }
+}
+
+/// The messages `steps` act on, the execution's own first, each once.
+fn step_targets(reference: &MessageRef, steps: &[QuickActionStep]) -> Vec<MessageRef> {
+    let mut targets = vec![reference.clone()];
+    for step in steps {
+        let id = step.target(&reference.id);
+        if !targets.iter().any(|target| target.id == id) {
+            targets.push(MessageRef {
+                account_id: reference.account_id.clone(),
+                id: id.to_string(),
+            });
+        }
+    }
+    targets
 }

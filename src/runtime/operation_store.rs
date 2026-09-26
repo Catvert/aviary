@@ -1062,10 +1062,14 @@ mod tests {
             action_name: "Route A".into(),
             message_id: "message-a".into(),
             steps: vec![
-                QuickActionStep::MarkRead { read: true },
+                QuickActionStep::MarkRead {
+                    read: true,
+                    message_id: None,
+                },
                 QuickActionStep::Move {
                     source_folder_id: Some("inbox".into()),
                     target_folder_id: "archive".into(),
+                    message_id: None,
                 },
             ],
         };
@@ -1107,7 +1111,10 @@ mod tests {
             execution_id: 9,
             action_name: "Route B".into(),
             message_id: "message-b".into(),
-            steps: vec![QuickActionStep::MarkRead { read: true }],
+            steps: vec![QuickActionStep::MarkRead {
+                read: true,
+                message_id: None,
+            }],
         };
         db.enqueue_at(
             account_id.clone(),
@@ -1147,7 +1154,10 @@ mod tests {
                     },
                     reply_all: false,
                 },
-                QuickActionStep::MarkRead { read: true },
+                QuickActionStep::MarkRead {
+                    read: true,
+                    message_id: None,
+                },
             ],
         };
         let send = OperationKind::QuickAction {
@@ -1260,7 +1270,10 @@ mod tests {
                     execution_id: 5,
                     action_name: "Route C".into(),
                     message_id: "message-d".into(),
-                    steps: vec![QuickActionStep::MarkRead { read: true }],
+                    steps: vec![QuickActionStep::MarkRead {
+                        read: true,
+                        message_id: None,
+                    }],
                 },
                 next_step: 0,
             },

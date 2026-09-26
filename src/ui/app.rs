@@ -280,10 +280,13 @@ struct QuickActionMessageSnapshot {
 }
 
 pub(crate) struct QuickActionOptimisticEffect {
+    /// The execution's own message; steps may name other thread members.
     reference: MessageRef,
     steps: Vec<QuickActionStep>,
-    snapshot: QuickActionMessageSnapshot,
-    removal: Option<OptimisticMessageRemoval>,
+    /// One per message the steps touch, taken before any of them applied.
+    snapshots: Vec<(MessageRef, QuickActionMessageSnapshot)>,
+    /// In removal order; restored in reverse so indices line up again.
+    removals: Vec<OptimisticMessageRemoval>,
 }
 
 struct PendingSentRestore {

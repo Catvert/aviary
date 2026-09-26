@@ -745,6 +745,8 @@ async fn perform_quick_action_step(
     message_id: &str,
     step: QuickActionStep,
 ) -> anyhow::Result<()> {
+    // A step run on a collapsed conversation may name another member.
+    let target = step.target(message_id).to_string();
     match step {
         QuickActionStep::Forward { mail } => {
             send::perform_send(
@@ -776,11 +778,11 @@ async fn perform_quick_action_step(
         QuickActionStep::AddTag { tag_id } => {
             perform_quick_tag(account, message_id, tag_id, true).await
         }
-        QuickActionStep::MarkRead { read } => {
-            mailbox::perform_mark_read(account.clone(), message_id.to_string(), read).await?;
+        QuickActionStep::MarkRead { read, .. } => {
+            mailbox::perform_mark_read(account.clone(), target.clone(), read).await?;
             account.emit(Evt::QuickActionMessageState {
                 account_id: account.id.clone(),
-                message_id: message_id.to_string(),
+                message_id: target,
                 read: Some(read),
                 flagged: None,
             });
@@ -799,15 +801,8 @@ async fn perform_quick_action_step(
         QuickActionStep::Move {
             source_folder_id,
             target_folder_id,
-        } => {
-            mailbox::perform_move(
-                account,
-                message_id.to_string(),
-                source_folder_id,
-                target_folder_id,
-            )
-            .await
-        }
+            ..
+        } => mailbox::perform_move(account, target, source_folder_id, target_folder_id).await,
     }
 }
 

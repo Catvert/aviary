@@ -396,7 +396,7 @@ impl AviaryApp {
         let snoozed = self.settings.snoozed_until(&aid, &mid).is_some();
         let entity = cx.entity();
         let quick_action_controls =
-            self.render_quick_action_controls(&aid, &mid, "viewer", true, true, cx);
+            self.render_quick_action_controls(&aid, &mid, None, "viewer", true, true, cx);
         let reply_actions = ButtonGroup::new("reply-actions")
             .outline()
             .compact()

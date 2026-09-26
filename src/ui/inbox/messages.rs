@@ -1551,6 +1551,11 @@ impl AviaryApp {
                 self.render_quick_action_controls(
                     &aid,
                     &mid,
+                    // Collapsed, the row stands for its thread (see
+                    // `message_row_menu`); expanded, its members have rows.
+                    group
+                        .filter(|group| !group.expanded)
+                        .map(|group| group.members.as_slice()),
                     context_scope,
                     hover > 0.15,
                     false,

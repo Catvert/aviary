@@ -196,9 +196,11 @@ impl AviaryApp {
     /// row stands for. Everything that would otherwise hit the single message
     /// the row displays — delete, archive, junk, move, read state, pinning — then
     /// applies to the thread, because that is what the row *is*. Opening,
-    /// replying, forwarding and quick actions stay on the message: they have
-    /// no thread-wide meaning. Tags stay on the message too — a tag is what
-    /// feeds the kanban, and tagging a thread would deal one card per message.
+    /// replying and forwarding stay on the message: they have no thread-wide
+    /// meaning. Tags stay on the message too — a tag is what feeds the kanban,
+    /// and tagging a thread would deal one card per message. Quick actions
+    /// split the same way: their move and read-state steps take the thread,
+    /// their sends, tags and flag the message.
     pub(super) fn message_row_menu(
         &self,
         m: &MessageHeader,
@@ -271,6 +273,8 @@ impl AviaryApp {
                 let aid = aid.clone();
                 let mid = mid.clone();
                 let quick_menu_actions = quick_menu_actions.clone();
+                let companions =
+                    crate::ui::quick_actions::thread_companions(&mid, thread.as_deref());
                 menu = menu
                     .submenu_with_icon(
                         Some(crate::ui::icons::app_icon("zap")),
@@ -284,6 +288,7 @@ impl AviaryApp {
                                 &entity,
                                 &aid,
                                 &mid,
+                                &companions,
                                 offline,
                             )
                         },
