@@ -8,6 +8,7 @@ use super::super::{icons, util};
 use crate::model::{Account, AccountId, Provider, Tag};
 use crate::providers::tag_color_palette;
 use crate::runtime::Cmd;
+use crate::ui::components::confirm_dialog::ConfirmationDialog as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
@@ -198,18 +199,14 @@ impl AviaryApp {
     ) {
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
         let entity = cx.entity();
-        WindowExt::open_dialog(window, cx, move |dialog, _window, _cx| {
+        WindowExt::open_alert_dialog(window, cx, move |dialog, _window, _cx| {
             let entity = entity.clone();
             let input = input.clone();
             let account_id = account_id.clone();
             let tag_id = tag_id.clone();
             dialog
                 .title(tr!("tags-rename-title"))
-                .button_props(
-                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
-                )
-                .overlay_closable(false)
-                .close_button(false)
+                .confirmation()
                 .child(Input::new(&input))
                 .on_ok(move |_, _window, cx| {
                     let new_name = input.read(cx).value().trim().to_string();
@@ -238,17 +235,13 @@ impl AviaryApp {
         cx: &mut Context<Self>,
     ) {
         let entity = cx.entity();
-        WindowExt::open_dialog(window, cx, move |dialog, _window, _cx| {
+        WindowExt::open_alert_dialog(window, cx, move |dialog, _window, _cx| {
             let entity = entity.clone();
             let account_id = account_id.clone();
             let tag_id = tag_id.clone();
             dialog
                 .title(tr!("tags-delete-title"))
-                .button_props(
-                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
-                )
-                .overlay_closable(false)
-                .close_button(false)
+                .confirmation()
                 .child(
                     div()
                         .text_sm()

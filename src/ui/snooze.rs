@@ -13,6 +13,7 @@
 
 use super::app::AviaryApp;
 use crate::model::{AccountId, MessageRef};
+use crate::ui::components::confirm_dialog::ConfirmationDialog as _;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Utc, Weekday};
 use gpui_kit::component::{notification::Notification, WindowExt};
 use gpui_kit::{prelude::*, Context, Window};
@@ -185,17 +186,13 @@ impl AviaryApp {
         });
         self.snooze_dialog_picker = Some(picker.clone());
         let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_alert_dialog(cx, move |dialog, _window, _cx| {
             let entity = entity.clone();
             let picker = picker.clone();
             let targets = targets.clone();
             dialog
                 .title(tr!("snooze-pick-date-title"))
-                .button_props(
-                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
-                )
-                .overlay_closable(false)
-                .close_button(false)
+                .confirmation()
                 .child(DatePicker::new(&picker))
                 .on_ok(move |_, window, cx| {
                     let Some(date) = picker.read(cx).date().start() else {

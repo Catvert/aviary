@@ -44,7 +44,6 @@ pub(crate) mod util;
 mod viewer;
 
 use crate::single_instance::ExternalRequest;
-use gpui_kit::component::Root;
 use gpui_kit::{px, size, App, AppContext, Bounds, WindowBounds, WindowOptions};
 use rust_embed::RustEmbed;
 
@@ -188,22 +187,16 @@ pub fn run(
             WindowBounds::Windowed(bounds)
         };
         cx.activate(true);
-        cx.open_window(
+        gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(window_bounds),
                 titlebar: Some(gpui_kit::component::TitleBar::title_bar_options()),
                 app_id: Some("aviary".into()),
                 ..Default::default()
             },
+            cx,
             |window, cx| {
-                let main = cx
-                    .new(|cx| app::AviaryApp::new(settings.clone(), external_requests, window, cx));
-                let root = cx.new(|cx| Root::new(main.clone(), window, cx));
-                let notification_source = root.read(cx).notification.clone();
-                main.update(cx, |app, cx| {
-                    app.install_notification_layer(notification_source, cx);
-                });
-                root
+                cx.new(|cx| app::AviaryApp::new(settings.clone(), external_requests, window, cx))
             },
         )
         .expect("failed to open the main window");

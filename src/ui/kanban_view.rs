@@ -6,6 +6,7 @@ use super::motion::{HoverMotionExt as _, HoverMotionMap, Lerp as _, WheelScrollM
 use super::util;
 use crate::model::{AccountId, MessageHeader, Tag};
 use crate::runtime::Cmd;
+use crate::ui::components::confirm_dialog::ConfirmationDialog as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
@@ -1182,40 +1183,40 @@ impl AviaryApp {
                 .placeholder(tr!("tags-new-name-placeholder"))
         });
         let entity = cx.entity();
-        gpui_kit::component::WindowExt::open_dialog(window, cx, move |dialog, _window, _cx| {
-            let entity = entity.clone();
-            let input = input.clone();
-            dialog
-                .title(tr!("tags-create-title"))
-                .button_props(
-                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .child(
-                    v_flex()
-                        .gap_2()
-                        .child(div().text_sm().child(tr!("kanban-create-all-accounts")))
-                        .child(Input::new(&input)),
-                )
-                .on_ok(move |_, _window, cx| {
-                    let name = input.read(cx).value().trim().to_string();
-                    if name.is_empty() {
-                        return false;
-                    }
-                    entity.update(cx, |this, cx| {
-                        for account in this.ordered_accounts() {
-                            this.send(Cmd::CreateTag {
-                                account_id: account.id,
-                                name: name.clone(),
-                                color: None,
-                            });
+        gpui_kit::component::WindowExt::open_alert_dialog(
+            window,
+            cx,
+            move |dialog, _window, _cx| {
+                let entity = entity.clone();
+                let input = input.clone();
+                dialog
+                    .title(tr!("tags-create-title"))
+                    .confirmation()
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(div().text_sm().child(tr!("kanban-create-all-accounts")))
+                            .child(Input::new(&input)),
+                    )
+                    .on_ok(move |_, _window, cx| {
+                        let name = input.read(cx).value().trim().to_string();
+                        if name.is_empty() {
+                            return false;
                         }
-                        cx.notify();
-                    });
-                    true
-                })
-        });
+                        entity.update(cx, |this, cx| {
+                            for account in this.ordered_accounts() {
+                                this.send(Cmd::CreateTag {
+                                    account_id: account.id,
+                                    name: name.clone(),
+                                    color: None,
+                                });
+                            }
+                            cx.notify();
+                        });
+                        true
+                    })
+            },
+        );
     }
 
     fn open_rename_merged_tag_dialog(
@@ -1229,36 +1230,36 @@ impl AviaryApp {
             gpui_kit::component::input::InputState::new(window, cx).default_value(current)
         });
         let entity = cx.entity();
-        gpui_kit::component::WindowExt::open_dialog(window, cx, move |dialog, _window, _cx| {
-            let entity = entity.clone();
-            let input = input.clone();
-            let targets = targets.clone();
-            dialog
-                .title(tr!("tags-rename-title"))
-                .button_props(
-                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .child(Input::new(&input))
-                .on_ok(move |_, _window, cx| {
-                    let new_name = input.read(cx).value().trim().to_string();
-                    if new_name.is_empty() {
-                        return false;
-                    }
-                    entity.update(cx, |this, cx| {
-                        for target in &targets {
-                            this.send(Cmd::RenameTag {
-                                account_id: target.account_id.clone(),
-                                id: target.tag_id.clone(),
-                                new_name: new_name.clone(),
-                            });
+        gpui_kit::component::WindowExt::open_alert_dialog(
+            window,
+            cx,
+            move |dialog, _window, _cx| {
+                let entity = entity.clone();
+                let input = input.clone();
+                let targets = targets.clone();
+                dialog
+                    .title(tr!("tags-rename-title"))
+                    .confirmation()
+                    .child(Input::new(&input))
+                    .on_ok(move |_, _window, cx| {
+                        let new_name = input.read(cx).value().trim().to_string();
+                        if new_name.is_empty() {
+                            return false;
                         }
-                        cx.notify();
-                    });
-                    true
-                })
-        });
+                        entity.update(cx, |this, cx| {
+                            for target in &targets {
+                                this.send(Cmd::RenameTag {
+                                    account_id: target.account_id.clone(),
+                                    id: target.tag_id.clone(),
+                                    new_name: new_name.clone(),
+                                });
+                            }
+                            cx.notify();
+                        });
+                        true
+                    })
+            },
+        );
     }
 
     fn render_kanban_entry(

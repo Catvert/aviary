@@ -1,7 +1,7 @@
 # Aviary
 
 Desktop email, calendar and kanban client for **Microsoft 365**, **Gmail** and
-**IMAP/SMTP**, written in Rust with [GPUI Kit](https://gpui-kit.com/) 0.6
+**IMAP/SMTP**, written in Rust with [GPUI Kit](https://gpui-kit.com/) 0.7
 (GPUI and its styled component library). Linux is the primary target; macOS and Windows build and run, with the
 gaps listed under [Platforms](#platforms).
 

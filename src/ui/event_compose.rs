@@ -19,14 +19,14 @@ use gpui_kit::component::{
     date_picker::{DatePicker, DatePickerState},
     h_flex,
     input::{IndentInline, Input, InputState, OutdentInline},
-    v_flex, ActiveTheme, Disableable, Root, Sizable, StyledExt,
+    v_flex, ActiveTheme, Disableable, Sizable, StyledExt,
 };
-use gpui_kit::{div, prelude::*, px, Context, Entity, WeakEntity, Window, WindowHandle};
+use gpui_kit::{div, prelude::*, px, AnyWindowHandle, Context, Entity, WeakEntity, Window};
 use tokio::sync::mpsc;
 
 pub struct EventComposeHandle {
     pub id: u64,
-    pub window: Option<WindowHandle<Root>>,
+    pub window: Option<AnyWindowHandle>,
     pub view: WeakEntity<EventComposeView>,
 }
 
@@ -364,7 +364,7 @@ impl AviaryApp {
             cx.notify();
         });
         let bounds = gpui_kit::Bounds::centered(None, gpui_kit::size(px(620.), px(650.)), cx);
-        let window = cx.open_window(
+        let window = gpui_kit::open_window(
             gpui_kit::WindowOptions {
                 window_bounds: Some(gpui_kit::WindowBounds::Windowed(bounds)),
                 titlebar: Some(gpui_kit::TitlebarOptions {
@@ -373,9 +373,10 @@ impl AviaryApp {
                 }),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| Root::new(view, window, cx)),
+            cx,
+            |_, _| view,
         );
-        if let Ok(window) = window {
+        if let Ok((window, _)) = window {
             if let Some(handle) = self
                 .calendar
                 .composes

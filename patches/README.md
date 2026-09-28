@@ -49,6 +49,28 @@ AnyRender 0.13, its Vello CPU backend 0.17, Vello CPU 0.1 and Fontique 0.11 are
 aligned in the root manifest. Incremental layout is now enabled by default at
 runtime (`DocumentConfig::incremental`), replacing the removed Cargo feature.
 
+## Upstream audit (2026-09-28)
+
+No patched crate has a newer crates.io release Aviary could move to: Blitz is
+still at `0.3.0-beta.2` (pinning Stylo 0.20, Parley 0.11 and Taffy 0.14) and
+cosmic-text at `0.19.0`, so every patch stays on its base above. Upstream
+default branches were checked to know what the next releases will let us drop:
+
+| Patch | Upstream `main` | At the next release |
+| --- | --- | --- |
+| `construct.rs` NBSP runs | Blitz still calls plain `push_text`, but the root cause is fixed in Parley ([linebender/parley#734](https://github.com/linebender/parley/pull/734)), which Blitz `main` already uses (git rev after #914). | Probably droppable: run the indentation regression test without it first. |
+| `table.rs` column count across rows | Present ([DioxusLabs/blitz#852](https://github.com/DioxusLabs/blitz/pull/852), `ColumnCursor.num_columns`). | Drop. |
+| `table.rs` collapsed-border widths | Present (#791). | Drop. |
+| `table.rs` single-cell `colspan` collapse | Absent; `main` rewrote the column code around `ColumnCursor`. | Keep, re-apply by hand onto the new cursor. |
+| `border.rs` `none`/`hidden` collapsed borders | Present (#791, identical check). | Drop. |
+| `text.rs` faux-italic skew direction | Absent; still `Affine::skew(+tan, 0)`. No upstream issue yet. | Keep; worth reporting upstream. |
+| cosmic-text emoji fallback order | Absent; `main` identical to 0.19.0. Open [pop-os/cosmic-text#524](https://github.com/pop-os/cosmic-text/pull/524) covers it. | Keep until #524 ships. |
+| `stylo_derive` explicit `match` | Absent and never will be: the ambiguity only exists in Aviary's graph (gpui's `log/kv_serde`). | Keep, rebased onto Stylo **0.21**, which Blitz `main` now uses. |
+
+The next Blitz release will therefore also move Stylo to 0.21 and Parley and
+Taffy past their current releases; the Fontique pin in the root manifest has to
+follow Parley's.
+
 ## Updating a patched crate
 
 1. Extract the new crates.io package into a temporary directory.

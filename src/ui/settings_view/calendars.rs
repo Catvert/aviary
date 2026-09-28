@@ -3,6 +3,7 @@
 use super::super::app::AviaryApp;
 use crate::model::{AccountId, IcalRefreshInterval, IcalSubscription};
 use crate::runtime::Cmd;
+use crate::ui::components::confirm_dialog::ConfirmationDialog as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     color_picker::ColorPicker,
@@ -257,16 +258,12 @@ impl AviaryApp {
         cx: &mut Context<Self>,
     ) {
         let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_alert_dialog(cx, move |dialog, _, _| {
             let entity = entity.clone();
             let subscription_id = subscription_id.clone();
             dialog
                 .title(tr!("settings-ical-delete-title"))
-                .button_props(
-                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
-                )
-                .overlay_closable(false)
-                .close_button(false)
+                .confirmation()
                 .child(div().child(tr!("settings-ical-delete-confirm")))
                 .on_ok(move |_, window, cx| {
                     entity.update(cx, |this, cx| {

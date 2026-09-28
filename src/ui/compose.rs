@@ -21,11 +21,11 @@ use gpui_kit::component::{
     h_flex,
     input::{IndentInline, Input, InputState},
     menu::{DropdownMenu, PopupMenuItem},
-    v_flex, ActiveTheme, Disableable, Root, Selectable, Sizable, StyledExt,
+    v_flex, ActiveTheme, Disableable, Selectable, Sizable, StyledExt,
 };
 use gpui_kit::{
-    div, prelude::*, px, Context, Entity, Focusable as _, Subscription, WeakEntity, Window,
-    WindowHandle,
+    div, prelude::*, px, AnyWindowHandle, Context, Entity, Focusable as _, Subscription,
+    WeakEntity, Window,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -34,7 +34,7 @@ use tokio::sync::mpsc;
 pub struct ComposeHandle {
     pub id: u64,
     /// `None` for the inline composer embedded in the reader pane.
-    pub window: Option<WindowHandle<Root>>,
+    pub window: Option<AnyWindowHandle>,
     pub view: WeakEntity<ComposeView>,
     /// Keeps a detached composer alive after its window is optimistically
     /// closed and until undo, success, or failure decides its fate.
@@ -2476,8 +2476,7 @@ impl AviaryApp {
             init.is_forward,
         );
         let bounds = gpui_kit::Bounds::centered(None, gpui_kit::size(px(720.), px(640.)), cx);
-        let mut view_slot: Option<Entity<ComposeView>> = None;
-        let handle = cx.open_window(
+        let opened = gpui_kit::open_window(
             gpui_kit::WindowOptions {
                 window_bounds: Some(gpui_kit::WindowBounds::Windowed(bounds)),
                 titlebar: Some(gpui_kit::TitlebarOptions {
@@ -2486,6 +2485,7 @@ impl AviaryApp {
                 }),
                 ..Default::default()
             },
+            cx,
             |window, cx| {
                 let editor_width_hint = Some(f32::from(window.viewport_size().width) - 16.0)
                     .filter(|width| *width >= 40.0);
@@ -2514,11 +2514,10 @@ impl AviaryApp {
                         view.apply_initial_focus(initial_focus, window, cx);
                     });
                 });
-                view_slot = Some(view.clone());
-                cx.new(|cx| Root::new(view, window, cx))
+                view
             },
         );
-        if let (Ok(window), Some(view)) = (handle, view_slot) {
+        if let Ok((window, view)) = opened {
             cx.observe(&view, |this, _, _| this.session_dirty = true)
                 .detach();
             let event_subscription = cx.subscribe_in(&view, main_window, Self::on_compose_event);
@@ -2584,7 +2583,7 @@ impl AviaryApp {
         };
         let title = view.read(cx).window_title();
         let bounds = gpui_kit::Bounds::centered(None, gpui_kit::size(px(720.), px(640.)), cx);
-        let restored = cx.open_window(
+        let restored = gpui_kit::open_window(
             gpui_kit::WindowOptions {
                 window_bounds: Some(gpui_kit::WindowBounds::Windowed(bounds)),
                 titlebar: Some(gpui_kit::TitlebarOptions {
@@ -2593,12 +2592,10 @@ impl AviaryApp {
                 }),
                 ..Default::default()
             },
-            {
-                let view = view.clone();
-                move |window, cx| cx.new(|cx| Root::new(view, window, cx))
-            },
+            cx,
+            |_, _| view,
         );
-        if let Ok(window) = restored {
+        if let Ok((window, _)) = restored {
             self.composes[index].window = Some(window);
             self.composes[index].pending_view = None;
         }

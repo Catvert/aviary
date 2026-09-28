@@ -19,7 +19,7 @@ publish = false
 
 [dependencies]
 # UI facade keeps GPUI and the styled component layer on matching versions.
-gpui-kit = "0.6"
+gpui-kit = "0.7"
 # Embedded assets (Lucide SVG icons and fonts) served to gpui via AssetSource.
 rust-embed = "8"
 # BoxFuture for implementing gpui's HttpClient trait (intercepts inline
@@ -28,14 +28,17 @@ futures = "0.3"
 # Share Blitz font discovery with the GPUI Kit linked fontconfig backend.
 fontique = { version = "0.11", default-features = false }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
-html-to-markdown-rs = "3.3"
+# Held on the 3.13 series: 3.14 moved to html5ever 0.40 while Blitz and
+# scraper are still on 0.39, which compiles the whole html5ever/markup5ever
+# stack twice. Release the pin once Blitz follows.
+html-to-markdown-rs = "~3.13"
 # Used by `app::html_render` for the rich HTML viewer (alternative to the
 # markdown converter). `scraper` is built on `html5ever`; we lean on its
 # `Html`/`ElementRef` walker rather than implementing a TreeSink ourselves.
 # `default-features = false` strips the `getopts`/`main` features intended
 # for the binary entry point — we only need the parsing API.
 scraper = { version = "0.27", default-features = false, features = ["errors"] }
-base64 = "0.22"
+base64 = "0.23"
 regex = "1"
 # Pure-Rust Hunspell-compatible engine used by the offline FR/EN spelling
 # checker. Dictionaries are embedded under assets/spellcheck/.

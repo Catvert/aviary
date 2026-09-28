@@ -5,7 +5,7 @@
 
 use super::settings::{CustomThemePalette, GlobalSettings, ThemeMode};
 use gpui_kit::component::{Colorize, Theme, ThemeColor};
-use gpui_kit::{px, App, Hsla, Rgba, Window};
+use gpui_kit::{px, Anchor, App, Hsla, Rgba, Window};
 
 fn c(hex: u32) -> Hsla {
     Rgba {
@@ -144,7 +144,6 @@ fn apply_custom_palette(t: &mut ThemeColor, p: CustomThemePalette, dark: bool) {
         ..c(p.primary)
     };
     t.progress_bar = c(p.primary);
-    t.tiles = c(p.surface);
 
     t.red = c(p.danger);
     t.red_light = interactive(p.danger, dark, 0.12);
@@ -186,20 +185,26 @@ pub fn apply(global: &GlobalSettings, window: Option<&mut Window>, cx: &mut App)
         ThemeMode::Dark => gpui_kit::component::ThemeMode::Dark,
         ThemeMode::Light => gpui_kit::component::ThemeMode::Light,
     };
+    // `change` reloads the registered theme even when the mode is unchanged,
+    // which is what drops a custom palette the user just switched off.
     Theme::change(mode, window, cx);
 
-    let theme = Theme::global_mut(cx);
-    theme.font_family = "Inter".into();
-    theme.mono_font_family = "JetBrains Mono".into();
-    theme.font_size = px(14.);
-
-    if global.uses_custom_theme() {
-        apply_custom_palette(
-            &mut theme.colors,
-            global.custom_theme_palette,
-            global.theme_mode == ThemeMode::Dark,
-        );
-    }
-
-    cx.refresh_windows();
+    // Colors are held twice since gpui-component 0.7 (`colors` and the
+    // `tokens` components paint with) and projected once more onto the Base
+    // layer; only `Theme::update` keeps the three in step, then refreshes
+    // every window.
+    let palette = global
+        .uses_custom_theme()
+        .then_some(global.custom_theme_palette);
+    let dark = global.theme_mode == ThemeMode::Dark;
+    Theme::update(cx, |theme| {
+        theme.font_family = "Inter".into();
+        theme.mono_font_family = "JetBrains Mono".into();
+        theme.font_size = px(14.);
+        // Toasts rise from the bottom edge, clear of the top bar's actions.
+        theme.notification.placement = Anchor::BottomRight;
+        if let Some(palette) = palette {
+            apply_custom_palette(&mut theme.colors, palette, dark);
+        }
+    });
 }

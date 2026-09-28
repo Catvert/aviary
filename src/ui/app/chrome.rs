@@ -1,6 +1,7 @@
 //! Window chrome: the top bar (tab bar, account switcher, global actions), the
 //! sidebar navigation, and the root `Render` impl that assembles the current
-//! view and re-emits the `Root` notification, dialog and sheet layers.
+//! view. The notification, dialog and sheet layers are not ours to draw: the
+//! gpui-component plugin of `Root` mounts them above this view in every window.
 
 use crate::ui::app::AviaryApp;
 use crate::ui::compose::ComposeInit;
@@ -10,7 +11,7 @@ use gpui_kit::component::{
     button::{Button, ButtonGroup, ButtonVariants},
     h_flex,
     menu::{DropdownMenu, PopupMenuItem},
-    ActiveTheme, IconName, Root, Selectable, Sizable,
+    ActiveTheme, IconName, Selectable, Sizable,
 };
 use gpui_kit::{div, prelude::*, Context, Render, Window};
 
@@ -358,9 +359,6 @@ impl Render for AviaryApp {
             .text_color(cx.theme().foreground)
             .child(self.render_topbar(window, cx))
             .child(div().flex_1().min_h_0().child(content))
-            .children(self.notification_layer.clone())
-            .children(Root::render_dialog_layer(window, cx))
-            .children(Root::render_sheet_layer(window, cx))
             .children(crate::ui::image_lightbox::render(window, cx))
     }
 }

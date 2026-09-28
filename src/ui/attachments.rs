@@ -1,8 +1,9 @@
 //! Attachment utilities shared by the reader and composers.
 
 use crate::model::Attachment;
+use crate::ui::components::confirm_dialog::ConfirmationDialog as _;
 use anyhow::{Context as _, Result};
-use gpui_kit::component::{dialog::DialogButtonProps, notification::Notification, WindowExt as _};
+use gpui_kit::component::{notification::Notification, WindowExt as _};
 use gpui_kit::{div, prelude::*, App, Window};
 use std::{
     collections::HashSet,
@@ -456,17 +457,12 @@ pub(super) fn open_or_confirm(attachment: Attachment, window: &mut Window, cx: &
         return;
     }
     let filename = attachment.filename.clone();
-    window.open_dialog(cx, move |dialog, _window, _cx| {
+    window.open_alert_dialog(cx, move |dialog, _window, _cx| {
         let attachment = attachment.clone();
         dialog
             .title(tr!("attachment-dangerous-title"))
-            .button_props(
-                DialogButtonProps::default()
-                    .show_cancel(true)
-                    .ok_text(tr!("viewer-attachment-save-as")),
-            )
-            .overlay_closable(false)
-            .close_button(false)
+            .confirmation()
+            .ok_text(tr!("viewer-attachment-save-as"))
             .child(div().child(tr!("attachment-dangerous-body", {
                 filename: filename.clone()
             })))

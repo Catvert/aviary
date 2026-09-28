@@ -79,84 +79,6 @@ fn strip_remote_images(md: &str) -> String {
         .to_string()
 }
 
-/// `gpui-component` 0.5 loses `Break` nodes placed in a paragraph
-/// Markdown. Therefore, for rendering only, replaces explicit breaks
-/// CommonMark (`deux espaces + LF` ou `\ + LF`) par un `<br>` que son parseur
-/// inline HTML can display. Stored and copied Markdown remains unchanged.
-fn markdown_for_text_view(md: &str) -> String {
-    let mut out = String::with_capacity(md.len());
-    let mut fence: Option<(char, usize)> = None;
-
-    for segment in md.split_inclusive('\n') {
-        let Some(line_with_cr) = segment.strip_suffix('\n') else {
-            out.push_str(segment);
-            continue;
-        };
-        let line = line_with_cr.strip_suffix('\r').unwrap_or(line_with_cr);
-        let eol = if line_with_cr.ends_with('\r') {
-            "\r\n"
-        } else {
-            "\n"
-        };
-        let trimmed = line.trim_start_matches(' ');
-        let indent = line.len() - trimmed.len();
-        let marker = trimmed.chars().next();
-        let marker_run = marker
-            .filter(|c| matches!(c, '`' | '~'))
-            .map(|c| {
-                trimmed
-                    .chars()
-                    .take_while(|candidate| candidate == &c)
-                    .count()
-            })
-            .unwrap_or(0);
-
-        if let Some((open_marker, open_len)) = fence {
-            out.push_str(line);
-            out.push_str(eol);
-            if indent <= 3
-                && marker == Some(open_marker)
-                && marker_run >= open_len
-                && trimmed[marker_run..].trim().is_empty()
-            {
-                fence = None;
-            }
-            continue;
-        }
-
-        if indent <= 3 && marker_run >= 3 {
-            fence = marker.map(|c| (c, marker_run));
-            out.push_str(line);
-            out.push_str(eol);
-            continue;
-        }
-
-        // Spaces are significant in an indented code block.
-        if line.starts_with("    ") || line.starts_with('\t') {
-            out.push_str(line);
-            out.push_str(eol);
-            continue;
-        }
-
-        let trailing_spaces = line.len() - line.trim_end_matches(' ').len();
-        if trailing_spaces >= 2 {
-            out.push_str(line.trim_end_matches(' '));
-            out.push_str("<br>");
-        } else {
-            let trailing_backslashes = line.chars().rev().take_while(|c| *c == '\\').count();
-            if trailing_backslashes % 2 == 1 {
-                out.push_str(&line[..line.len() - 1]);
-                out.push_str("<br>");
-            } else {
-                out.push_str(line);
-                out.push_str(eol);
-            }
-        }
-    }
-
-    out
-}
-
 fn markdown_to_preview_html(md: &str) -> String {
     let parser = pulldown_cmark::Parser::new_ext(md, pulldown_cmark::Options::all());
     let mut html = String::new();
@@ -271,7 +193,6 @@ fn body_element_with_height(
             } else {
                 strip_remote_images(&m.body)
             };
-            let md = markdown_for_text_view(&md);
             let html = markdown_to_preview_html(&md);
             let copy_md = m.body.clone();
             let preview = if fragment {
@@ -1496,7 +1417,7 @@ impl AviaryApp {
 
 #[cfg(test)]
 mod markdown_display_tests {
-    use super::{compact_address_label, markdown_for_text_view};
+    use super::{compact_address_label, markdown_to_preview_html};
     use crate::providers::html::convert_email_html;
 
     #[test]
@@ -1507,25 +1428,27 @@ mod markdown_display_tests {
                     <b>Onderwerp:</b> RE: Projet de test</p>";
         let md = convert_email_html(html);
 
-        let rendered = markdown_for_text_view(&md);
+        let rendered = markdown_to_preview_html(&md);
 
-        assert!(rendered.contains("example.test><br>**Verzonden:**"));
-        assert!(rendered.contains("13:21<br>**Aan:**"));
-        assert!(rendered.contains("example.test><br>**Onderwerp:**"));
+        assert_eq!(rendered.matches("<br").count(), 3, "{rendered}");
+        assert!(rendered.contains("13:21<br />\n<strong>Aan:</strong>"));
     }
 
     #[test]
-    fn leaves_soft_breaks_and_code_blocks_unchanged() {
-        let md = "soft break\nstill the paragraph\n\n```text\ncode  \n```\n\n    indented  \n";
+    fn soft_breaks_and_code_blocks_keep_their_lines() {
+        let md = "soft break\nstill the paragraph\n\n```text\ncode  \n```\n";
 
-        assert_eq!(markdown_for_text_view(md), md);
+        let rendered = markdown_to_preview_html(md);
+
+        assert!(!rendered.contains("<br"), "{rendered}");
+        assert!(rendered.contains("code  \n</code>"), "{rendered}");
     }
 
     #[test]
     fn supports_backslash_and_crlf_hard_breaks() {
-        let md = "first\\\r\nsecond  \r\nthird";
+        let rendered = markdown_to_preview_html("first\\\r\nsecond  \r\nthird");
 
-        assert_eq!(markdown_for_text_view(md), "first<br>second<br>third");
+        assert_eq!(rendered.matches("<br").count(), 2, "{rendered}");
     }
 
     #[test]

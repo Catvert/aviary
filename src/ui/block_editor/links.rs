@@ -19,6 +19,7 @@
 //! instead, which keeps one syntax as the single source of truth.
 
 use super::{BlockEditor, InsertLink};
+use crate::ui::components::confirm_dialog::ConfirmationDialog as _;
 use crate::ui::components::display_map::FoldableRange;
 use gpui_kit::component::{
     input::{Input, InputState as TextField},
@@ -79,7 +80,7 @@ impl BlockEditor {
         url_field.update(cx, |state, cx| state.focus(window, cx));
 
         let editor = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_alert_dialog(cx, move |dialog, _window, _cx| {
             let editor = editor.clone();
             let input = input.clone();
             let label_field = label_field.clone();
@@ -90,11 +91,7 @@ impl BlockEditor {
                     true => tr!("compose-link-edit-title"),
                     false => tr!("compose-link-title"),
                 })
-                .button_props(
-                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
-                )
-                .overlay_closable(false)
-                .close_button(false)
+                .confirmation()
                 .child(
                     v_flex()
                         .gap_2()

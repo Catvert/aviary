@@ -25,16 +25,17 @@ use super::state::{
 use crate::auth;
 use crate::model::{Account, AccountId, Message, MessageHeader, MessageRef, Provider, Tag};
 use crate::runtime::{self, Cmd, MessageMutationKind, QuickActionStep, UnifiedAccountPage};
+use crate::ui::components::confirm_dialog::ConfirmationDialog as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     input::{InputEvent, InputState},
-    notification::{Notification, NotificationList},
+    notification::Notification,
     resizable::{h_resizable, resizable_panel, ResizablePanel, ResizableState},
     Sizable, VirtualListScrollHandle, WindowExt,
 };
 use gpui_kit::{
-    div, prelude::*, px, AnyElement, App, Context, DismissEvent, Entity, FocusHandle,
-    Focusable as _, Render, ScrollHandle, SharedString, Subscription, Window,
+    prelude::*, px, AnyElement, App, Context, Entity, FocusHandle, Focusable as _, ScrollHandle,
+    SharedString, Window,
 };
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -75,63 +76,6 @@ const MEMORY_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 /// ordinary burst is handled in a single pass, small enough that a sustained
 /// stream still yields to rendering and input.
 const EVENT_BATCH_LIMIT: usize = 64;
-
-/// Presents gpui-component notifications from the bottom edge of the window.
-///
-/// `Root` still owns their lifecycle; this view only replaces its default
-/// top-right layout while observing the same list and dismissal events.
-struct BottomRightNotifications {
-    source: Entity<NotificationList>,
-    _source_observer: Subscription,
-    notification_subscriptions: Vec<Subscription>,
-}
-
-impl BottomRightNotifications {
-    fn new(source: Entity<NotificationList>, cx: &mut Context<Self>) -> Self {
-        let source_observer = cx.observe(&source, |this, source, cx| {
-            this.refresh_notification_subscriptions(&source, cx);
-            cx.notify();
-        });
-        let mut this = Self {
-            source,
-            _source_observer: source_observer,
-            notification_subscriptions: Vec::new(),
-        };
-        let source = this.source.clone();
-        this.refresh_notification_subscriptions(&source, cx);
-        this
-    }
-
-    fn refresh_notification_subscriptions(
-        &mut self,
-        source: &Entity<NotificationList>,
-        cx: &mut Context<Self>,
-    ) {
-        let notifications = source.read(cx).notifications();
-        self.notification_subscriptions = notifications
-            .iter()
-            .map(|notification| {
-                cx.subscribe(notification, |_, _, _: &DismissEvent, cx| cx.notify())
-            })
-            .collect();
-    }
-}
-
-impl Render for BottomRightNotifications {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut notifications = self.source.read(cx).notifications();
-        if notifications.len() > 10 {
-            notifications.drain(..notifications.len() - 10);
-        }
-
-        div().absolute().bottom_4().right_4().child(
-            gpui_kit::component::v_flex()
-                .id("bottom-right-notification-list")
-                .gap_3()
-                .children(notifications),
-        )
-    }
-}
 
 /// Builds the navigation pane shared by all main views. Its geometry must
 /// remain identical everywhere because its state is shared.
@@ -727,7 +671,6 @@ pub struct AviaryApp {
     /// Kept alive for as long as the "remind me on…" dialog is open: its
     /// closure only borrows the picker, so nothing else owns it.
     pub snooze_dialog_picker: Option<Entity<gpui_kit::component::date_picker::DatePickerState>>,
-    notification_layer: Option<Entity<BottomRightNotifications>>,
 
     #[cfg(target_os = "linux")]
     pub tray: Option<crate::tray::TrayHandle>,
@@ -1150,21 +1093,12 @@ impl AviaryApp {
             imap_form: None,
             folder_dialog_input: None,
             snooze_dialog_picker: None,
-            notification_layer: None,
             #[cfg(target_os = "linux")]
             tray,
         };
         app.restore_session_editors(restored_session, window, cx);
         cx.observe_self(|app, _| app.session_dirty = true).detach();
         app
-    }
-
-    pub(super) fn install_notification_layer(
-        &mut self,
-        source: Entity<NotificationList>,
-        cx: &mut Context<Self>,
-    ) {
-        self.notification_layer = Some(cx.new(|cx| BottomRightNotifications::new(source, cx)));
     }
 
     // ----------------------------------------------------------------
@@ -1376,34 +1310,34 @@ impl AviaryApp {
         let input =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("tags-new-name-placeholder")));
         let entity = cx.entity();
-        gpui_kit::component::WindowExt::open_dialog(window, cx, move |dialog, _window, _cx| {
-            let entity = entity.clone();
-            let input = input.clone();
-            let account_id = account_id.clone();
-            dialog
-                .title(tr!("tags-create-title"))
-                .button_props(
-                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
-                )
-                .overlay_closable(false)
-                .close_button(false)
-                .child(gpui_kit::component::input::Input::new(&input))
-                .on_ok(move |_, _window, cx| {
-                    let name = input.read(cx).value().trim().to_string();
-                    if name.is_empty() {
-                        return false;
-                    }
-                    entity.update(cx, |this, cx| {
-                        this.send(Cmd::CreateTag {
-                            account_id: account_id.clone(),
-                            name,
-                            color: None,
+        gpui_kit::component::WindowExt::open_alert_dialog(
+            window,
+            cx,
+            move |dialog, _window, _cx| {
+                let entity = entity.clone();
+                let input = input.clone();
+                let account_id = account_id.clone();
+                dialog
+                    .title(tr!("tags-create-title"))
+                    .confirmation()
+                    .child(gpui_kit::component::input::Input::new(&input))
+                    .on_ok(move |_, _window, cx| {
+                        let name = input.read(cx).value().trim().to_string();
+                        if name.is_empty() {
+                            return false;
+                        }
+                        entity.update(cx, |this, cx| {
+                            this.send(Cmd::CreateTag {
+                                account_id: account_id.clone(),
+                                name,
+                                color: None,
+                            });
+                            cx.notify();
                         });
-                        cx.notify();
-                    });
-                    true
-                })
-        });
+                        true
+                    })
+            },
+        );
     }
 
     /// Displays a readable, persistent error while retaining details

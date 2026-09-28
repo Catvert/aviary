@@ -6,6 +6,7 @@ use super::super::compose::ComposeInit;
 use super::super::util;
 use crate::model::{AccountId, MailFolder};
 use crate::runtime::Cmd;
+use crate::ui::components::confirm_dialog::ConfirmationDialog as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
@@ -1098,7 +1099,7 @@ impl AviaryApp {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("folders-name-hint")));
         self.folder_dialog_input = Some(input.clone());
         let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_alert_dialog(cx, move |dialog, _window, _cx| {
             let entity = entity.clone();
             let input = input.clone();
             let account_id = account_id.clone();
@@ -1109,11 +1110,7 @@ impl AviaryApp {
                 } else {
                     tr!("folders-new-title")
                 })
-                .button_props(
-                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
-                )
-                .overlay_closable(false)
-                .close_button(false)
+                .confirmation()
                 .child(Input::new(&input))
                 .on_ok(move |_, _window, cx| {
                     let name = input.read(cx).value().trim().to_string();
@@ -1144,18 +1141,14 @@ impl AviaryApp {
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
         self.folder_dialog_input = Some(input.clone());
         let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_alert_dialog(cx, move |dialog, _window, _cx| {
             let entity = entity.clone();
             let input = input.clone();
             let account_id = account_id.clone();
             let id = id.clone();
             dialog
                 .title(tr!("folders-rename-title"))
-                .button_props(
-                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
-                )
-                .overlay_closable(false)
-                .close_button(false)
+                .confirmation()
                 .child(Input::new(&input))
                 .on_ok(move |_, _window, cx| {
                     let new_name = input.read(cx).value().trim().to_string();
@@ -1184,17 +1177,13 @@ impl AviaryApp {
         cx: &mut Context<Self>,
     ) {
         let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_alert_dialog(cx, move |dialog, _window, _cx| {
             let entity = entity.clone();
             let account_id = account_id.clone();
             let id = id.clone();
             dialog
                 .title(tr!("folders-delete-title"))
-                .button_props(
-                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
-                )
-                .overlay_closable(false)
-                .close_button(false)
+                .confirmation()
                 .child(div().child(tr!("folders-delete-confirm-short", { name: name.clone() })))
                 .on_ok(move |_, window, cx| {
                     entity.update(cx, |this, cx| {

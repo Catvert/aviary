@@ -8,6 +8,7 @@
 use crate::model::{AccountId, Message, MessageRef, SentMessage};
 use crate::runtime::Cmd;
 use crate::ui::app::{AviaryApp, PendingSentRestore, SESSION_SENT_SNAPSHOT_CAP};
+use crate::ui::components::confirm_dialog::ConfirmationDialog as _;
 use crate::ui::settings::{
     AppSession, CalendarSession, ContactsSession, MailboxSession, SentMessageSession,
     SessionViewerTab,
@@ -230,15 +231,11 @@ impl AviaryApp {
 
     pub(crate) fn confirm_reset_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_alert_dialog(cx, move |dialog, _window, _cx| {
             let entity = entity.clone();
             dialog
                 .title(tr!("reset-session-title"))
-                .button_props(
-                    gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true),
-                )
-                .overlay_closable(false)
-                .close_button(false)
+                .confirmation()
                 .child(div().child(tr!("reset-session-confirm")))
                 .on_ok(move |_, window, cx| {
                     entity.update(cx, |this, cx| {

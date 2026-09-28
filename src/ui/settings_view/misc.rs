@@ -3,6 +3,7 @@
 use super::super::app::AviaryApp;
 use super::labelled;
 use crate::runtime::Cmd;
+use crate::ui::components::confirm_dialog::ConfirmationDialog as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex,
@@ -347,16 +348,14 @@ impl AviaryApp {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 let _ = this;
                                 let entity = cx.entity();
-                                gpui_kit::component::WindowExt::open_dialog(
+                                gpui_kit::component::WindowExt::open_alert_dialog(
                                     window,
                                     cx,
                                     move |dialog, _window, _cx| {
                                         let entity = entity.clone();
                                         dialog
                                             .title(tr!("settings-factory-reset-title"))
-                                            .button_props(gpui_kit::component::dialog::DialogButtonProps::default().show_cancel(true))
-                .overlay_closable(false)
-                .close_button(false)
+                                            .confirmation()
                                             .child(
                                                 div().child(tr!(
                                                     "settings-factory-reset-confirm-short"
