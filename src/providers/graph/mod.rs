@@ -243,13 +243,7 @@ pub(super) fn from_label(r: Option<GraphRecipient>) -> String {
     };
     let name = r.email_address.name.unwrap_or_default();
     let addr = r.email_address.address.unwrap_or_default();
-    if name.is_empty() {
-        addr
-    } else if addr.is_empty() {
-        name
-    } else {
-        format!("{name} <{addr}>")
-    }
+    crate::ui::util::format_mailbox(&name, &addr)
 }
 
 pub(super) async fn post_json(

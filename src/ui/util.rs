@@ -12,12 +12,81 @@ pub fn escape_html_text(text: &str) -> String {
 }
 
 /// Splits input such as "a@b.c, d@e.f; g@h.i" into individual addresses.
+///
+/// Separators inside a quoted display name (`"Doe, Jane" <j@x.test>`) or
+/// inside angle brackets belong to the entry and do not split it.
 pub fn parse_addresses(s: &str) -> Vec<String> {
-    s.split([',', ';'])
-        .map(|x| x.trim())
-        .filter(|x| !x.is_empty())
-        .map(String::from)
-        .collect()
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escaped = false;
+    let mut angle_depth = 0u32;
+    for ch in s.chars() {
+        if in_quotes {
+            current.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_quotes = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_quotes = true;
+                current.push(ch);
+            }
+            '<' => {
+                angle_depth += 1;
+                current.push(ch);
+            }
+            '>' => {
+                angle_depth = angle_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' | ';' if angle_depth == 0 => {
+                push_entry(&mut out, &mut current);
+            }
+            _ => current.push(ch),
+        }
+    }
+    push_entry(&mut out, &mut current);
+    out
+}
+
+fn push_entry(out: &mut Vec<String>, current: &mut String) {
+    let entry = current.trim();
+    if !entry.is_empty() {
+        out.push(entry.to_string());
+    }
+    current.clear();
+}
+
+/// `Name <addr>` with the name quoted (RFC 5322 quoted-string) when it holds
+/// characters that would otherwise break list parsing, such as a comma.
+pub fn format_mailbox(name: &str, address: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        return address.to_string();
+    }
+    if address.is_empty() {
+        return name.to_string();
+    }
+    let special = name.chars().any(|c| {
+        matches!(
+            c,
+            ',' | ';' | '<' | '>' | '"' | '@' | '(' | ')' | ':' | '\\' | '[' | ']'
+        )
+    });
+    let already_quoted = name.len() >= 2 && name.starts_with('"') && name.ends_with('"');
+    if special && !already_quoted {
+        let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\" <{address}>")
+    } else {
+        format!("{name} <{address}>")
+    }
 }
 
 /// Like `parse_addresses`, but reduces each `Name <addr@host>` entry to its
@@ -49,13 +118,49 @@ pub fn extract_email(from: &str) -> Option<String> {
 }
 
 /// Display-name part of `Display <addr@host>`, falling back to the address.
+/// A quoted name keeps its commas and has its escapes undone.
 pub fn display_name(from: &str) -> String {
-    let name = from.split('<').next().unwrap_or("").trim();
+    let trimmed = from.trim();
+    let name_end = if trimmed.starts_with('"') {
+        let mut escaped = false;
+        let mut end = None;
+        for (i, c) in trimmed.char_indices().skip(1) {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                end = Some(i + 1);
+                break;
+            }
+        }
+        end.unwrap_or(trimmed.len())
+    } else {
+        trimmed.find('<').unwrap_or(trimmed.len())
+    };
+    let name = trimmed[..name_end].trim();
     if name.is_empty() {
         extract_email(from).unwrap_or_else(|| from.to_string())
+    } else if name.len() >= 2 && name.starts_with('"') && name.ends_with('"') {
+        unescape_quoted(&name[1..name.len() - 1])
     } else {
         name.trim_matches('"').to_string()
     }
+}
+
+fn unescape_quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(n) = chars.next() {
+                out.push(n);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Stable per-account color: user override (`0xRRGGBB`) or hue
@@ -201,6 +306,52 @@ pub fn dedup_append(list: &mut Vec<MessageHeader>, extra: Vec<MessageHeader>) {
 
 #[cfg(test)]
 mod tests {
+    use super::{display_name, format_mailbox, parse_addresses, parse_bare_addresses};
+
+    #[test]
+    fn quoted_name_with_comma_stays_one_recipient() {
+        let list = r#""Doe, Jane" <jane@example.com>, bob@example.com"#;
+        assert_eq!(
+            parse_addresses(list),
+            vec![r#""Doe, Jane" <jane@example.com>"#, "bob@example.com"]
+        );
+        assert_eq!(
+            parse_bare_addresses(list),
+            vec!["jane@example.com", "bob@example.com"]
+        );
+    }
+
+    #[test]
+    fn escaped_quotes_and_semicolons_do_not_split() {
+        let list = r#""Doe \"JD\", Jane; Jr" <jane@example.com>; a@example.com"#;
+        assert_eq!(parse_addresses(list).len(), 2);
+        assert_eq!(
+            display_name(&parse_addresses(list)[0]),
+            r#"Doe "JD", Jane; Jr"#
+        );
+    }
+
+    #[test]
+    fn plain_lists_and_single_address_still_split() {
+        assert_eq!(parse_addresses("a@x.test, b@x.test; c@x.test").len(), 3);
+        assert_eq!(parse_addresses("a@x.test"), vec!["a@x.test"]);
+        assert_eq!(parse_addresses("Jane <a@x.test>, b@x.test").len(), 2);
+    }
+
+    #[test]
+    fn format_mailbox_quotes_only_when_needed() {
+        assert_eq!(
+            format_mailbox("Jane Doe", "j@x.test"),
+            "Jane Doe <j@x.test>"
+        );
+        let quoted = format_mailbox("Doe, Jane", "j@x.test");
+        assert_eq!(quoted, r#""Doe, Jane" <j@x.test>"#);
+        assert_eq!(display_name(&quoted), "Doe, Jane");
+        assert_eq!(parse_addresses(&quoted), vec![quoted.clone()]);
+        let tricky = format_mailbox(r#"Doe "J", Jane"#, "j@x.test");
+        assert_eq!(display_name(&tricky), r#"Doe "J", Jane"#);
+        assert_eq!(format_mailbox("", "j@x.test"), "j@x.test");
+    }
     use super::{color_to_packed, packed_color};
 
     #[test]

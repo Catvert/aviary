@@ -2892,3 +2892,27 @@ mod signature_block_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod recipient_roundtrip_tests {
+    use super::{normalized_address, push_unique_recipient};
+    use crate::ui::util;
+
+    /// Reply-all joins recipients into the `To` field, which is parsed again
+    /// by the address field: a name containing a comma must survive it.
+    #[test]
+    fn reply_all_recipients_with_comma_survive_the_field_roundtrip() {
+        let sender = util::format_mailbox("Doe, Jane", "jane@example.com");
+        let other = util::format_mailbox("Bob Roe", "bob@example.com");
+        let mut to = Vec::new();
+        push_unique_recipient(&mut to, &sender, Some("me@example.com"), &[]);
+        push_unique_recipient(&mut to, &other, Some("me@example.com"), &[]);
+        let field = to.join(", ");
+        assert_eq!(util::parse_addresses(&field), to);
+        assert_eq!(
+            util::parse_bare_addresses(&field),
+            vec!["jane@example.com", "bob@example.com"]
+        );
+        assert_eq!(normalized_address(&sender), "jane@example.com");
+    }
+}

@@ -1512,12 +1512,7 @@ pub(crate) fn render_address(addr: Option<&Address<'_>>) -> String {
     };
     let email = first.address.as_deref().unwrap_or("");
     let name = first.name.as_deref().unwrap_or("");
-    match (name.is_empty(), email.is_empty()) {
-        (false, false) => format!("{name} <{email}>"),
-        (true, false) => email.to_string(),
-        (false, true) => name.to_string(),
-        (true, true) => String::new(),
-    }
+    crate::ui::util::format_mailbox(name, email)
 }
 
 /// Render every address in an RFC 5322 list header (To, Cc) as its own
@@ -1531,12 +1526,7 @@ pub(crate) fn render_address_list(addr: Option<&Address<'_>>) -> Vec<String> {
         .filter_map(|a| {
             let email = a.address.as_deref().unwrap_or("");
             let name = a.name.as_deref().unwrap_or("");
-            match (name.is_empty(), email.is_empty()) {
-                (false, false) => Some(format!("{name} <{email}>")),
-                (true, false) => Some(email.to_string()),
-                (false, true) => Some(name.to_string()),
-                (true, true) => None,
-            }
+            Some(crate::ui::util::format_mailbox(name, email)).filter(|s| !s.is_empty())
         })
         .collect()
 }
