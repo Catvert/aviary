@@ -242,6 +242,11 @@ impl AviaryApp {
             attachment_id.clone(),
         );
         self.attachments.in_flight.remove(&key);
+        for handle in &self.composes {
+            let _ = handle.view.update(cx, |view, cx| {
+                view.on_attachment_fetched(&account_id, &message_id, &attachment_id, &bytes, cx)
+            });
+        }
 
         let update = |message: &mut Message| {
             if message.header.account_id == account_id && message.header.id == message_id {
@@ -318,8 +323,14 @@ impl AviaryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        for handle in &self.composes {
+            let _ = handle.view.update(cx, |view, cx| {
+                view.on_attachment_fetch_error(&account_id, &message_id, &attachment_id, &error, cx)
+            });
+        }
         let key = (account_id.clone(), message_id.clone(), attachment_id);
-        self.attachments.in_flight.remove(&key);
+        // A download a composer asked for reports its failure there.
+        let requested_here = self.attachments.in_flight.remove(&key);
         self.attachments.pending_opens.remove(&key);
         if self.attachments.pending_archive.as_ref().is_some_and(
             |(archive_account, archive_message, _)| {
@@ -328,6 +339,9 @@ impl AviaryApp {
         ) {
             self.attachments.pending_archive = None;
             self.attachments.saving_archive = false;
+        }
+        if !requested_here {
+            return;
         }
         self.notify_error(
             tr!("viewer-attachment-fetch-error", { error: error }),

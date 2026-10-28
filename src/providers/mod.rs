@@ -108,10 +108,28 @@ pub struct OutgoingMessage<'a> {
     /// Inline images embedded in the body via `cid:`.
     pub attachments: &'a [crate::model::InlineImage],
     /// Non-inline file attachments — the recipient sees these as
-    /// downloadable attachments. Bytes are required (`bytes: Some(_)`)
-    /// for outgoing messages; runtime fetches them when the user picks a
-    /// file or forwards an existing attachment.
+    /// downloadable attachments. Bytes are required (`bytes: Some(_)`):
+    /// the composer downloads a forwarded attachment before sending it, and
+    /// [`ensure_file_contents`] refuses anything that slipped through.
     pub files: &'a [crate::model::Attachment],
+}
+
+/// Refuses an outgoing message carrying an attachment without bytes.
+///
+/// Received attachments are listed without their content, and every backend
+/// used to serialize a missing body as an empty part: a forward went out with
+/// files the recipient could not open, and nothing said so. Failing the send
+/// is the one outcome the user notices.
+fn ensure_file_contents(msg: &OutgoingMessage<'_>) -> Result<()> {
+    if let Some(file) = msg.files.iter().find(|file| file.bytes.is_none()) {
+        bail!(
+            "{}",
+            crate::tr!("mail-error-attachment-not-downloaded", {
+                filename: file.filename.clone()
+            })
+        );
+    }
+    Ok(())
 }
 
 /// Move target meaning "archive this message", whatever the backend's own
@@ -788,6 +806,7 @@ impl Session<'_> {
     /// call, so the `Message-ID` can be read before sending. Gmail returns
     /// its ids for free either way; SMTP never has any.
     pub async fn send_mail(&self, msg: &OutgoingMessage<'_>, track_sent: bool) -> Result<SentIds> {
+        ensure_file_contents(msg)?;
         match self {
             Session::Graph { client, .. } => {
                 if track_sent {
@@ -810,6 +829,7 @@ impl Session<'_> {
         reply_to_id: &str,
         msg: &OutgoingMessage<'_>,
     ) -> Result<SentIds> {
+        ensure_file_contents(msg)?;
         match self {
             Session::Graph { client, .. } => {
                 graph::send_reply(client, reply_to_id, &graph_outgoing(msg)).await
@@ -848,6 +868,7 @@ impl Session<'_> {
         msg: &OutgoingMessage<'_>,
         replace_id: Option<&str>,
     ) -> Result<Option<String>> {
+        ensure_file_contents(msg)?;
         match self {
             Session::Graph { client, .. } => {
                 graph::save_draft(client, &graph_outgoing(msg), replace_id)
@@ -1192,6 +1213,37 @@ mod mime_tests {
         let smtp =
             String::from_utf8(build_rfc822(&message, &[], false).unwrap().formatted()).unwrap();
         assert!(!smtp.contains("Bcc: hidden@example.com"));
+    }
+
+    #[test]
+    fn an_attachment_without_bytes_is_refused_rather_than_sent_empty() {
+        let to = vec!["to@example.com".to_string()];
+        let mut files = vec![FileAttachment {
+            id: "attachment-1".to_string(),
+            filename: "rapport.pdf".to_string(),
+            mime: "application/pdf".to_string(),
+            size: 2048,
+            bytes: None,
+        }];
+        let message = |files: &[FileAttachment]| {
+            ensure_file_contents(&OutgoingMessage {
+                from: "from@example.com",
+                to: &to,
+                cc: &[],
+                bcc: &[],
+                subject: "Tr: rapport",
+                body: "<p>Ci-joint</p>",
+                body_is_html: true,
+                attachments: &[],
+                files,
+            })
+        };
+
+        let error = message(&files).unwrap_err().to_string();
+        assert!(error.contains("rapport.pdf"), "{error}");
+
+        files[0].bytes = Some(b"%PDF".to_vec());
+        assert!(message(&files).is_ok());
     }
 
     #[test]

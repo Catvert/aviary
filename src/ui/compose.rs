@@ -13,7 +13,7 @@ use super::settings::MailBodyOptions;
 use super::util;
 use crate::ai::{AiPromptPreset, AiSettings};
 use crate::blocks::BlockKind;
-use crate::model::{AccountId, Attachment, InlineImage, Message, Signature, Template};
+use crate::model::{AccountId, Attachment, InlineImage, Message, MessageRef, Signature, Template};
 use crate::proofreading::LanguageToolSettings;
 use crate::runtime::Cmd;
 use gpui_kit::component::{
@@ -28,6 +28,7 @@ use gpui_kit::{
     WeakEntity, Window,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
@@ -127,6 +128,12 @@ pub struct ComposeInit {
     pub draft_id: Option<String>,
     pub inline_images: Vec<InlineImage>,
     pub files: Vec<Attachment>,
+    /// Message `files` were copied from (forward, reopened draft). Providers
+    /// list a received attachment without its bytes, so the composer
+    /// downloads them from there: sent as they were, they left as empty parts
+    /// the recipient could not open.
+    #[serde(default)]
+    pub files_source: Option<MessageRef>,
     /// Do not add the default signature because the body already contains it,
     /// as when an inline reply is continued in a window.
     pub skip_signature: bool,
@@ -286,6 +293,10 @@ impl ComposeInit {
             },
         ];
         Self {
+            files_source: Some(MessageRef {
+                account_id: account_id.clone(),
+                id: m.header.id.clone(),
+            }),
             from_account_id: Some(account_id),
             subject: make_forward_subject(&m.header.subject),
             body_kinds: Some(body_kinds),
@@ -318,6 +329,10 @@ impl ComposeInit {
             })
             .filter(|kinds| !kinds.is_empty());
         Self {
+            files_source: Some(MessageRef {
+                account_id: account_id.clone(),
+                id: m.header.id.clone(),
+            }),
             from_account_id: Some(account_id),
             to: m.to.join(", "),
             cc: m.cc.join(", "),
@@ -471,6 +486,13 @@ pub struct ComposeView {
     /// next to the message actually sent. Waiting for the reply is the one
     /// order in which the send always names the draft that exists.
     send_after_draft_save: bool,
+    /// See `ComposeInit::files_source`.
+    files_source: Option<MessageRef>,
+    /// Attachment ids requested from `files_source` and not answered yet.
+    attachment_fetches: HashSet<String>,
+    /// Send requested before every attachment's bytes arrived, run once they
+    /// have.
+    send_after_attachments: bool,
     autosave_pending_fingerprint: Option<u64>,
     last_autosave_fingerprint: u64,
     /// Fingerprint of the content the composer opened with, so replacing a
@@ -832,6 +854,9 @@ impl ComposeView {
             draft_save_in_flight: false,
             manual_draft_save_in_flight: false,
             send_after_draft_save: false,
+            files_source: init.files_source,
+            attachment_fetches: HashSet::new(),
+            send_after_attachments: false,
             autosave_pending_fingerprint: None,
             last_autosave_fingerprint: 0,
             initial_fingerprint: 0,
@@ -843,6 +868,9 @@ impl ComposeView {
         view.refresh_signature_choices(cx);
         view.last_autosave_fingerprint = view.draft_fingerprint(cx);
         view.initial_fingerprint = view.last_autosave_fingerprint;
+        if !pending_send {
+            view.request_missing_attachments();
+        }
         view
     }
 
@@ -939,6 +967,7 @@ impl ComposeView {
             draft_id: self.draft_id.clone(),
             inline_images: editor.images().to_vec(),
             files: self.files.clone(),
+            files_source: self.files_source.clone(),
             skip_signature: true,
             default_template_applied: false,
         }
@@ -1055,9 +1084,27 @@ impl ComposeView {
             cx.notify();
             return;
         }
+        if let Some(file) = self.unfetchable_attachment() {
+            self.error = Some(
+                tr!("compose-attachment-unavailable", {
+                    filename: file.filename.clone()
+                })
+                .to_string(),
+            );
+            cx.notify();
+            return;
+        }
         self.sending = true;
         self.outbox_queued = false;
         self.error = None;
+        if self.attachments_pending() {
+            // Resumed by `on_attachment_fetched`; asking again also retries
+            // a download that failed.
+            self.send_after_attachments = true;
+            self.request_missing_attachments();
+            cx.notify();
+            return;
+        }
         if self.draft_save_in_flight || self.manual_draft_save_in_flight {
             // Resumed by `resume_send_after_draft_save`; `sending` already
             // locks the editor and keeps a new autosave from starting.
@@ -1111,6 +1158,7 @@ impl ComposeView {
 
     pub(crate) fn cancel_pending_send(&mut self, cx: &mut Context<Self>) {
         self.send_after_draft_save = false;
+        self.send_after_attachments = false;
         self.pending_send = None;
         self.sending = false;
         self.outbox_queued = false;
@@ -1124,6 +1172,13 @@ impl ComposeView {
             return;
         };
         if self.sending || self.send_after_draft_save {
+            return;
+        }
+        if self.attachments_pending() {
+            // The draft would hold empty attachments.
+            self.error = Some(tr!("compose-attachments-downloading").to_string());
+            self.request_missing_attachments();
+            cx.notify();
             return;
         }
         let (to, cc, bcc, subject) = self.payload(cx);
@@ -1156,7 +1211,11 @@ impl ComposeView {
     /// to save every 400 ms; this method mirrors changed content to the
     /// provider without blocking the editor or displaying repetitive toasts.
     pub(crate) fn maybe_autosave_draft(&mut self, cx: &mut Context<Self>) {
-        if self.sending || self.ai_running || self.draft_save_in_flight {
+        if self.sending
+            || self.ai_running
+            || self.draft_save_in_flight
+            || self.attachments_pending()
+        {
             return;
         }
         let Some(from) = self.from_account_id.clone() else {
@@ -1187,6 +1246,103 @@ impl ComposeView {
             },
             autosave: true,
         });
+    }
+
+    /// Some attachment still has no bytes: sent or saved now, it would leave
+    /// as an empty part.
+    fn attachments_pending(&self) -> bool {
+        self.files.iter().any(|file| file.bytes.is_none())
+    }
+
+    /// An attachment without bytes that nothing can download.
+    fn unfetchable_attachment(&self) -> Option<&Attachment> {
+        self.files.iter().find(|file| {
+            file.bytes.is_none() && (file.id.is_empty() || self.files_source.is_none())
+        })
+    }
+
+    /// Asks the runtime for every attachment of `files_source` whose bytes
+    /// are missing and not already requested.
+    fn request_missing_attachments(&mut self) {
+        let Some(source) = &self.files_source else {
+            return;
+        };
+        for file in &self.core.files {
+            if file.bytes.is_some()
+                || file.id.is_empty()
+                || !self.attachment_fetches.insert(file.id.clone())
+            {
+                continue;
+            }
+            let _ = self.cmd_tx.send(Cmd::FetchAttachment {
+                account_id: source.account_id.clone(),
+                message_id: source.id.clone(),
+                attachment_id: file.id.clone(),
+            });
+        }
+    }
+
+    fn is_files_source(&self, account_id: &AccountId, message_id: &str) -> bool {
+        self.files_source
+            .as_ref()
+            .is_some_and(|source| &source.account_id == account_id && source.id == message_id)
+    }
+
+    pub(crate) fn on_attachment_fetched(
+        &mut self,
+        account_id: &AccountId,
+        message_id: &str,
+        attachment_id: &str,
+        bytes: &[u8],
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_files_source(account_id, message_id) {
+            return;
+        }
+        self.attachment_fetches.remove(attachment_id);
+        for file in &mut self.core.files {
+            if file.id == attachment_id && file.bytes.is_none() {
+                file.bytes = Some(bytes.to_vec());
+            }
+        }
+        if self.send_after_attachments && !self.attachments_pending() {
+            self.send_after_attachments = false;
+            self.trigger_send(cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn on_attachment_fetch_error(
+        &mut self,
+        account_id: &AccountId,
+        message_id: &str,
+        attachment_id: &str,
+        error: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_files_source(account_id, message_id) {
+            return;
+        }
+        self.attachment_fetches.remove(attachment_id);
+        let Some(file) = self
+            .files
+            .iter()
+            .find(|file| file.id == attachment_id && file.bytes.is_none())
+        else {
+            return;
+        };
+        self.error = Some(
+            tr!("compose-attachment-fetch-failed", {
+                filename: file.filename.clone(),
+                error: error
+            })
+            .to_string(),
+        );
+        if self.send_after_attachments {
+            self.send_after_attachments = false;
+            self.sending = false;
+        }
+        cx.notify();
     }
 
     fn pick_attachment(&mut self, cx: &mut Context<Self>) {
@@ -1333,6 +1489,11 @@ pub(crate) fn draft_fingerprint_for_init(init: &ComposeInit) -> u64 {
     let mut init = init.clone();
     init.draft_id = None;
     init.pending_send = false;
+    // Bytes downloaded after opening are not an edit: the attachment was
+    // already listed, and counting them would autosave an untouched forward.
+    for file in &mut init.files {
+        file.bytes = None;
+    }
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     if let Ok(bytes) = serde_json::to_vec(&init) {
         bytes.hash(&mut hasher);
@@ -1706,7 +1867,11 @@ impl ComposeView {
             let attachment_to_open = attachment.clone();
             let entity = cx.entity();
             let filename = f.filename.clone();
-            let size = attachments::format_size(f.size);
+            let size = if f.bytes.is_none() && self.files_source.is_some() {
+                tr!("compose-attachment-downloading").to_string()
+            } else {
+                attachments::format_size(f.size)
+            };
             file_chips = file_chips.child(
                 Button::new(gpui_kit::ElementId::Name(format!("file-{ix}").into()))
                     .outline()
@@ -2723,6 +2888,32 @@ impl AviaryApp {
             .view
             .update(cx, |view, cx| view.on_ai_error(error, cx));
         true
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::{draft_fingerprint_for_init, ComposeInit};
+    use crate::model::Attachment;
+
+    #[test]
+    fn downloading_a_listed_attachment_is_not_an_edit() {
+        let mut init = ComposeInit {
+            files: vec![Attachment {
+                id: "attachment-1".into(),
+                filename: "rapport.pdf".into(),
+                mime: "application/pdf".into(),
+                size: 2048,
+                bytes: None,
+            }],
+            ..ComposeInit::default()
+        };
+        let before = draft_fingerprint_for_init(&init);
+        init.files[0].bytes = Some(b"%PDF".to_vec());
+        assert_eq!(draft_fingerprint_for_init(&init), before);
+
+        init.files[0].filename = "autre.pdf".into();
+        assert_ne!(draft_fingerprint_for_init(&init), before);
     }
 }
 

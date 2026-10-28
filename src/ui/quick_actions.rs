@@ -488,8 +488,15 @@ impl AviaryApp {
             self.schedule_quick_action(request, None, window, cx);
             return;
         }
+        // The reader lists attachments without their bytes; a forward needs
+        // them, which the loader below downloads.
         if let Some(message) = self.displayed_message().filter(|message| {
-            message.header.account_id == account_id && message.header.id == message_id
+            message.header.account_id == account_id
+                && message.header.id == message_id
+                && message
+                    .attachments
+                    .iter()
+                    .all(|attachment| attachment.bytes.is_some())
         }) {
             self.schedule_quick_action(request, Some((*message).clone()), window, cx);
             return;
