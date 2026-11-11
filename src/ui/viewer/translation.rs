@@ -23,10 +23,18 @@ pub struct ViewerTranslationState {
 /// model remain unchanged.
 pub struct ViewerTranslation {
     pub request_id: u64,
-    pub message_id: String,
+    /// `(account, id)`: IMAP ids repeat across accounts, and an id alone
+    /// showed one account's translation under the other account's message.
+    pub message: MessageRef,
     pub html: String,
     pub running: bool,
     pub visible: bool,
+}
+
+impl ViewerTranslation {
+    pub(crate) fn is_for(&self, header: &MessageHeader) -> bool {
+        self.message.account_id == header.account_id && self.message.id == header.id
+    }
 }
 
 pub(super) fn translated_body_element(
@@ -128,7 +136,7 @@ impl AviaryApp {
             .viewer_translation
             .result
             .as_ref()
-            .filter(|translation| translation.message_id == message.header.id);
+            .filter(|translation| translation.is_for(&message.header));
         let running = self
             .viewer_translation
             .result
@@ -256,7 +264,10 @@ impl AviaryApp {
         };
         self.viewer_translation.result = Some(ViewerTranslation {
             request_id,
-            message_id: message.header.id.clone(),
+            message: MessageRef {
+                account_id: message.header.account_id.clone(),
+                id: message.header.id.clone(),
+            },
             html: String::new(),
             running: true,
             visible: true,

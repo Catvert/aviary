@@ -333,7 +333,7 @@ impl AviaryApp {
     /// Drops the "snoozed" filter once nothing is put off any more. Leaving it
     /// on would show an empty list and no reason for it — the messages did not
     /// disappear, they came back to the list the filter is hiding.
-    fn leave_empty_snooze_filter(&mut self) {
+    pub(crate) fn leave_empty_snooze_filter(&mut self) {
         let empty = self
             .settings
             .accounts

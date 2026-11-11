@@ -1618,22 +1618,46 @@ impl AviaryApp {
             }
         }
 
-        if let Some((_, header)) = removal.mailbox.as_ref().or(removal.search.as_ref()) {
-            let reference = MessageRef {
-                account_id: header.account_id.clone(),
-                id: header.id.clone(),
-            };
-            self.optimistic_removal_origins.remove(&reference);
+        // Where the message was when it left. "Annuler" can be clicked after
+        // the user moved on — another folder, another search — and the header
+        // must only return to the listing it was taken from: put back
+        // blindly, a message deleted from the inbox reappeared in Sent.
+        let origin = removal
+            .mailbox
+            .as_ref()
+            .or(removal.search.as_ref())
+            .and_then(|(_, header)| {
+                self.optimistic_removal_origins.remove(&MessageRef {
+                    account_id: header.account_id.clone(),
+                    id: header.id.clone(),
+                })
+            });
+        let same_folder = origin
+            .as_ref()
+            .and_then(|origin| origin.folder.as_ref())
+            .is_some_and(|folder| folder == &self.listing_scope());
+        let same_search = self.mailbox.search.results.is_some()
+            && origin.as_ref().is_some_and(|origin| {
+                origin.search_request == Some(self.mailbox.search.request_id)
+            });
+        if same_folder {
+            restore_header(&mut self.mailbox.messages, removal.mailbox);
         }
-        restore_header(&mut self.mailbox.messages, removal.mailbox);
-        if let Some(messages) = &mut self.mailbox.search.results {
-            restore_header(messages, removal.search);
+        if same_search {
+            if let Some(messages) = &mut self.mailbox.search.results {
+                restore_header(messages, removal.search);
+            }
         }
         if let SenderHistoryState::Loaded { messages, .. } = &mut self.sender_history {
             restore_header(messages, removal.sender_history);
         }
+        // The selection goes back to the message only where its row did; with
+        // no recorded origin (a removal from the sender history alone) the
+        // listing was never involved.
         if let Some(selection) = removal.selection {
-            if self.mailbox.selected_id.is_none() {
+            if self.mailbox.selected_id.is_none()
+                && (origin.is_none() || same_folder || same_search)
+            {
                 self.mailbox.selected_id = selection.message_id;
                 self.mailbox.selected = selection.message;
                 self.mailbox.thread = selection.thread;

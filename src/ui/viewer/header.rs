@@ -226,14 +226,14 @@ impl AviaryApp {
                     )
                 }),
         );
-        let message_id = m.header.id.clone();
+        let translated_header = m.header.clone();
         let translation_active = self.viewer_translation.open
             || self
                 .viewer_translation
                 .result
                 .as_ref()
                 .is_some_and(|translation| {
-                    translation.message_id == message_id && translation.visible
+                    translation.is_for(&translated_header) && translation.visible
                 });
         bar = bar.child(
             Button::new("translate-message")
@@ -246,7 +246,7 @@ impl AviaryApp {
                     this.viewer_translation.open = !this.viewer_translation.open;
                     if let Some(translation) = &mut this.viewer_translation.result {
                         translation.visible =
-                            this.viewer_translation.open && translation.message_id == message_id;
+                            this.viewer_translation.open && translation.is_for(&translated_header);
                     }
                     cx.notify();
                 })),
@@ -845,11 +845,7 @@ impl AviaryApp {
         // The "you replied" banner stays only while no card above the
         // message shows our reply (a follow-up from the other party alone
         // does not withdraw it).
-        let has_sent_details = self
-            .mailbox
-            .sent_messages
-            .get(&m.header.id)
-            .is_some_and(|messages| !messages.is_empty())
+        let has_sent_details = self.mailbox.sent_for(&m.header).next().is_some()
             || self
                 .thread_newer_messages(m)
                 .iter()

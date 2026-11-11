@@ -15,15 +15,18 @@
 use super::super::app::AviaryApp;
 use super::super::compose::{ComposeInit, ComposeView};
 use super::super::settings::InlineReplySession;
-use crate::model::{AccountId, Message};
+use crate::model::{AccountId, Message, MessageRef};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{div, prelude::*, AnyElement, Context, Entity, Subscription, Window};
 
 pub struct InlineReply {
     pub compose_id: u64,
     /// Currently displayed message: keeps the panel mounted even when the
-    /// target is an older message extracted from its quoted body.
-    pub message_id: String,
+    /// target is an older message extracted from its quoted body. A full
+    /// reference, not a bare id: IMAP ids (`INBOX:42`) repeat across
+    /// accounts, and an id alone drew one account's reply above the other
+    /// account's message — from where it would have been sent.
+    pub message: MessageRef,
     /// Local target identity, so the same quoted reply is not opened twice.
     pub reply_target_id: String,
     pub view: Entity<ComposeView>,
@@ -36,7 +39,10 @@ impl AviaryApp {
     pub fn start_inline_reply(&mut self, m: &Message, window: &mut Window, cx: &mut Context<Self>) {
         let init = ComposeInit::reply(m.header.account_id.clone(), m);
         self.start_inline_reply_with_init(
-            m.header.id.clone(),
+            MessageRef {
+                account_id: m.header.account_id.clone(),
+                id: m.header.id.clone(),
+            },
             m.header.id.clone(),
             init,
             window,
@@ -53,7 +59,10 @@ impl AviaryApp {
     ) {
         let init = self.reply_all_init(m.header.account_id.clone(), m);
         self.start_inline_reply_with_init(
-            m.header.id.clone(),
+            MessageRef {
+                account_id: m.header.account_id.clone(),
+                id: m.header.id.clone(),
+            },
             m.header.id.clone(),
             init,
             window,
@@ -75,7 +84,12 @@ impl AviaryApp {
         let mut init = self.reply_all_init(quoted.header.account_id.clone(), quoted);
         init.reply_to = None;
         self.start_inline_reply_with_init(
-            displayed_message_id,
+            MessageRef {
+                // A quoted fragment is cut out of the displayed message and
+                // carries its account.
+                account_id: quoted.header.account_id.clone(),
+                id: displayed_message_id,
+            },
             quoted.header.id.clone(),
             init,
             window,
@@ -85,25 +99,23 @@ impl AviaryApp {
 
     fn start_inline_reply_with_init(
         &mut self,
-        displayed_message_id: String,
+        displayed: MessageRef,
         reply_target_id: String,
         init: ComposeInit,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if let Some(pending) = &self.pending_inline_reply {
-            if pending.reply_target_id == reply_target_id {
+            if pending.message == displayed && pending.reply_target_id == reply_target_id {
                 return;
             }
             // The panel is taken by a reply awaiting its send-undo window.
             self.open_inline_compose(init, window, cx);
             return;
         }
-        if self
-            .inline_reply
-            .as_ref()
-            .is_some_and(|reply| reply.reply_target_id == reply_target_id)
-        {
+        if self.inline_reply.as_ref().is_some_and(|reply| {
+            reply.message == displayed && reply.reply_target_id == reply_target_id
+        }) {
             return;
         }
         if self
@@ -121,7 +133,7 @@ impl AviaryApp {
             self.build_reply_panel_compose(init, window, cx);
         self.inline_reply = Some(InlineReply {
             compose_id,
-            message_id: displayed_message_id,
+            message: displayed,
             reply_target_id,
             view,
             _event_subscription: event_subscription,
@@ -161,10 +173,57 @@ impl AviaryApp {
         );
     }
 
+    /// Detaches the reply panel from a message that no longer exists.
+    ///
+    /// The panel used to be dropped on the spot, with whatever had been typed
+    /// in it: archiving the original from a phone was enough to lose a reply
+    /// in progress. It is set aside instead, and the next render moves it to
+    /// a reader tab. A panel hidden for its send-undo window is left alone —
+    /// its send is under way and routed by `compose_id`, not by the message.
+    pub(crate) fn release_reply_panels_of(&mut self, reference: &MessageRef) {
+        if self
+            .inline_reply
+            .as_ref()
+            .is_some_and(|reply| &reply.message == reference)
+        {
+            self.orphaned_reply_panels.extend(self.inline_reply.take());
+        }
+    }
+
+    /// Gives every orphaned panel a tab if it holds work, and closes it
+    /// otherwise — the same hand-over as replying to another message.
+    pub(crate) fn rehome_orphaned_reply_panels(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for reply in std::mem::take(&mut self.orphaned_reply_panels) {
+            let init = reply
+                .view
+                .read(cx)
+                .has_work_in_progress(cx)
+                .then(|| reply.view.read(cx).to_init(cx));
+            self.composes.retain(|handle| handle.id != reply.compose_id);
+            self.session_dirty = true;
+            let Some(init) = init else { continue };
+            let active_tab = self.mailbox.active_tab;
+            self.open_inline_compose(init, window, cx);
+            self.mailbox.active_tab = active_tab;
+            self.toast(
+                window,
+                cx,
+                gpui_kit::component::notification::Notification::info(tr!(
+                    "reply-panel-moved-to-tab"
+                )),
+            );
+        }
+    }
+
     pub(crate) fn inline_reply_session(&self, cx: &gpui_kit::App) -> Option<InlineReplySession> {
         let reply = self.inline_reply.as_ref()?;
         Some(InlineReplySession {
-            displayed_message_id: reply.message_id.clone(),
+            displayed_message_id: reply.message.id.clone(),
+            displayed_account_id: Some(reply.message.account_id.clone()),
             reply_target_id: reply.reply_target_id.clone(),
             compose: reply.view.read(cx).to_init(cx),
         })
@@ -177,8 +236,19 @@ impl AviaryApp {
         cx: &mut Context<Self>,
     ) {
         let Some(session) = session else { return };
+        // Sessions written before the panel recorded its account: a reply is
+        // initialised to send from the account of the message it answers.
+        let Some(account_id) = session
+            .displayed_account_id
+            .or_else(|| session.compose.from_account_id.clone())
+        else {
+            return;
+        };
         self.start_inline_reply_with_init(
-            session.displayed_message_id,
+            MessageRef {
+                account_id,
+                id: session.displayed_message_id,
+            },
             session.reply_target_id,
             session.compose,
             window,
@@ -197,7 +267,9 @@ impl AviaryApp {
         let view = self
             .inline_reply
             .as_ref()
-            .filter(|reply| reply.message_id == m.header.id)
+            .filter(|reply| {
+                reply.message.account_id == m.header.account_id && reply.message.id == m.header.id
+            })
             .map(|reply| reply.view.clone())?;
         let theme = cx.theme().clone();
         Some(

@@ -643,7 +643,10 @@ pub(crate) fn close_current(
     let visible_reply = this
         .displayed_message()
         .zip(this.inline_reply.as_ref())
-        .filter(|(message, reply)| message.header.id == reply.message_id)
+        .filter(|(message, reply)| {
+            message.header.account_id == reply.message.account_id
+                && message.header.id == reply.message.id
+        })
         .map(|(_, reply)| reply.compose_id);
     if let Some(compose_id) = visible_reply {
         this.close_compose(compose_id, cx);

@@ -186,6 +186,7 @@ impl AviaryApp {
         self.inline_composes.clear();
         self.inline_reply = None;
         self.pending_inline_reply = None;
+        self.orphaned_reply_panels.clear();
         self.viewer_translation.result = None;
         self.viewer_translation.open = false;
         self.pending_kanban_open = None;

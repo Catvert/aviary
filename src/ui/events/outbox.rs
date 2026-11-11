@@ -165,6 +165,11 @@ impl AviaryApp {
         let reply =
             self.take_bulk_message_completion(&account_id, &id, MessageMutationKind::Delete, None);
         self.set_message_pinned(&account_id, &id, false);
+        // A deleted message has nothing left to wake.
+        if self.settings.unsnooze_message(&account_id, &id) {
+            self.settings.save();
+            self.leave_empty_snooze_filter();
+        }
         self.remove_message_everywhere(&account_id, &id);
         self.update_tray_unread();
         if !reply.is_bulk() {

@@ -306,6 +306,7 @@ impl AviaryApp {
 impl Render for AviaryApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ui::theme::apply_window_scale(window, cx);
+        self.rehome_orphaned_reply_panels(window, cx);
         self.message_row_hover.request_frame(window);
         let authenticated = matches!(self.auth, AuthState::Authenticated);
         let show_auth = self.imap_form.is_some()

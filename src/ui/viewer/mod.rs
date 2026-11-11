@@ -751,9 +751,7 @@ impl AviaryApp {
                 .viewer_translation
                 .result
                 .as_ref()
-                .is_some_and(|translation| {
-                    translation.message_id == m.header.id && translation.visible
-                });
+                .is_some_and(|translation| translation.is_for(&m.header) && translation.visible);
 
         let header = self.render_viewer_header(m, &chrome, cx).into_any_element();
         let translation_panel = if staged {
@@ -906,9 +904,7 @@ impl AviaryApp {
             .viewer_translation
             .result
             .as_ref()
-            .filter(|translation| {
-                translation.message_id == message.header.id && translation.visible
-            })
+            .filter(|translation| translation.is_for(&message.header) && translation.visible)
         {
             return translated_body_element(
                 message,
@@ -1255,15 +1251,13 @@ impl AviaryApp {
     }
 
     fn thread_newer_messages(&self, source: &Message) -> Vec<MessageHeader> {
-        let snapshots = self.mailbox.sent_messages.get(&source.header.id);
+        let snapshots: Vec<_> = self.mailbox.sent_for(&source.header).collect();
         let mut newer: Vec<MessageHeader> = self
             .thread_without_duplicates(&source.header)
             .into_iter()
             .filter(|h| {
                 h.received > source.header.received
-                    && !snapshots.is_some_and(|messages| {
-                        messages.iter().any(|sent| snapshot_covers(sent, h))
-                    })
+                    && !snapshots.iter().any(|sent| snapshot_covers(sent, h))
             })
             .collect();
         newer.sort_by_key(|h| std::cmp::Reverse(h.received));

@@ -13,12 +13,14 @@ use std::rc::Rc;
 /// The Graph delta stream does not carry extended properties: a
 /// `last_action: None` means unavailable information, not a cleared action.
 fn preserve_last_action(old: &[MessageHeader], new: &mut [MessageHeader]) {
-    let known: std::collections::HashMap<&str, _> = old
+    // Keyed by account as well: a unified listing mixes accounts, and IMAP
+    // ids repeat from one to the next.
+    let known: std::collections::HashMap<(&AccountId, &str), _> = old
         .iter()
         .filter(|message| message.last_action.is_some())
         .map(|message| {
             (
-                message.id.as_str(),
+                (&message.account_id, message.id.as_str()),
                 (message.last_action, message.last_action_at),
             )
         })
@@ -27,7 +29,7 @@ fn preserve_last_action(old: &[MessageHeader], new: &mut [MessageHeader]) {
         .iter_mut()
         .filter(|message| message.last_action.is_none())
     {
-        if let Some((action, at)) = known.get(message.id.as_str()) {
+        if let Some((action, at)) = known.get(&(&message.account_id, message.id.as_str())) {
             message.last_action = *action;
             message.last_action_at = *at;
         }

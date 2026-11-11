@@ -575,6 +575,9 @@ pub(crate) struct CalendarSession {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct InlineReplySession {
     pub displayed_message_id: String,
+    /// Absent from sessions written before the panel recorded its account.
+    #[serde(default)]
+    pub displayed_account_id: Option<AccountId>,
     pub reply_target_id: String,
     pub compose: ComposeInit,
 }
@@ -1211,6 +1214,25 @@ impl Settings {
         account.snoozed_messages.len() != before
     }
 
+    /// Follows a put-off message to the id a move gave it, reporting whether
+    /// it had a deadline.
+    pub(crate) fn rename_snoozed_message(
+        &mut self,
+        account_id: &AccountId,
+        old_id: &str,
+        new_id: &str,
+    ) -> bool {
+        let Some(entry) = self
+            .accounts
+            .get_mut(account_id)
+            .and_then(|account| account.snoozed_messages.iter_mut().find(|e| e.id == old_id))
+        else {
+            return false;
+        };
+        entry.id = new_id.to_string();
+        true
+    }
+
     pub(crate) fn snoozed_until(&self, account_id: &AccountId, id: &str) -> Option<DateTime<Utc>> {
         self.accounts
             .get(account_id)?
@@ -1231,7 +1253,19 @@ impl Settings {
         };
         match std::fs::read_to_string(&path) {
             Ok(text) => Self::from_json(&text).unwrap_or_else(|e| {
-                log::warn!("unreadable settings.json ({e:#}); using defaults");
+                // The next `save()` overwrites this file with the defaults.
+                // Set it aside first: signatures, templates, quick actions
+                // and the block list live nowhere else.
+                let backup = path.with_extension("json.unreadable");
+                match std::fs::copy(&path, &backup) {
+                    Ok(_) => log::warn!(
+                        "unreadable settings.json ({e:#}); using defaults, original kept as {}",
+                        backup.display()
+                    ),
+                    Err(copy_error) => log::warn!(
+                        "unreadable settings.json ({e:#}); using defaults (backup failed: {copy_error})"
+                    ),
+                }
                 Self::default()
             }),
             Err(_) => Self::default(),
@@ -1279,8 +1313,22 @@ impl Settings {
     }
 }
 
-#[cfg(unix)]
+/// Writes the file whole or not at all: to a sibling temporary file, then a
+/// rename over the target. Truncating `settings.json` in place meant a crash,
+/// a kill or a full disk mid-write left it cut short — and an unreadable
+/// settings file loads as the defaults.
 fn write_settings_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let temporary = path.with_extension("json.tmp");
+    let written =
+        write_private_file(&temporary, bytes).and_then(|()| std::fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written
+}
+
+#[cfg(unix)]
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::fs::PermissionsExt;
@@ -1290,20 +1338,35 @@ fn write_settings_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<
         .write(true)
         .mode(0o600)
         .open(path)?;
-    // `mode` applies only at creation; also protect settings files created by
-    // older Aviary versions before writing a secret subscription URL.
+    // `mode` applies only at creation; a temporary file left by an
+    // interrupted save keeps whatever it had. The file may hold a secret
+    // subscription URL.
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(bytes)
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 #[cfg(not(unix))]
-fn write_settings_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_save_replaces_the_file_whole_and_leaves_no_temporary() {
+        let dir = std::env::temp_dir().join(format!("aviary-settings-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        write_settings_file(&path, b"first").unwrap();
+        write_settings_file(&path, b"second").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn default_rendering_settings() {

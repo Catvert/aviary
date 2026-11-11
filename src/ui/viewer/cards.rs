@@ -103,12 +103,7 @@ impl AviaryApp {
         if mode == BodyViewMode::Source {
             return Vec::new();
         }
-        let snapshots = self
-            .mailbox
-            .sent_messages
-            .get(&source.header.id)
-            .cloned()
-            .unwrap_or_default();
+        let snapshots: Vec<_> = self.mailbox.sent_for(&source.header).cloned().collect();
         let promoted = self.thread_newer_messages(source);
         let options = self.settings.global.mail_body_options();
         let mut cards = Vec::with_capacity(snapshots.len() + promoted.len());
@@ -475,7 +470,7 @@ impl AviaryApp {
         // The loaded thread corresponds to the selection; `thread_without_
         // duplicates` also checks it belongs to the displayed message's
         // conversation, and drops the other mailbox copies of that message.
-        let local_sent = self.mailbox.sent_messages.get(&m.header.id);
+        let local_sent: Vec<_> = self.mailbox.sent_for(&m.header).collect();
         // Thread messages promoted to cards above the source
         // (`thread_newer_messages`) leave the plain conversation list.
         let promoted: HashSet<String> = self
@@ -487,10 +482,7 @@ impl AviaryApp {
             .thread_without_duplicates(&m.header)
             .into_iter()
             .filter(|h| {
-                !promoted.contains(&h.id)
-                    && !local_sent.is_some_and(|messages| {
-                        messages.iter().any(|sent| snapshot_covers(sent, h))
-                    })
+                !promoted.contains(&h.id) && !local_sent.iter().any(|sent| snapshot_covers(sent, h))
             })
             .collect();
         if others.is_empty() {

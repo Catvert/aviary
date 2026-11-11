@@ -198,6 +198,23 @@ pub struct MailboxState {
 }
 
 impl MailboxState {
+    /// Reply/forward snapshots sent in answer to this message.
+    ///
+    /// `sent_messages` is keyed by the original's provider id alone, and IMAP
+    /// ids (`INBOX:42`) repeat across accounts: every reader of the map goes
+    /// through here so one account's replies never show under the other
+    /// account's message.
+    pub(crate) fn sent_for<'a>(
+        &'a self,
+        original: &'a MessageHeader,
+    ) -> impl Iterator<Item = &'a SentMessage> + 'a {
+        self.sent_messages
+            .get(&original.id)
+            .into_iter()
+            .flatten()
+            .filter(move |sent| sent.message.header.account_id == original.account_id)
+    }
+
     /// Leaves search mode and reports whether the regular mailbox listing
     /// still needs its first load. This happens when the application starts
     /// with a search restored from the previous session.

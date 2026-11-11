@@ -589,6 +589,11 @@ pub struct AviaryApp {
     /// Reply hidden as soon as Send is clicked. It remains intact until the
     /// undo delay expires and the provider confirms or rejects the send.
     pub(crate) pending_inline_reply: Option<super::viewer::InlineReply>,
+    /// Reply panels whose message disappeared under them (archived from
+    /// another device, moved by a server rule). Re-homed on the next render,
+    /// which has the `Window` the removal path lacks — see
+    /// `rehome_orphaned_reply_panels`.
+    pub(crate) orphaned_reply_panels: Vec<super::viewer::InlineReply>,
     /// Reader translation panel: target language, whether it is open, and the
     /// streamed result for the displayed message.
     pub viewer_translation: super::viewer::ViewerTranslationState,
@@ -1061,6 +1066,7 @@ impl AviaryApp {
             inline_composes: Vec::new(),
             inline_reply: None,
             pending_inline_reply: None,
+            orphaned_reply_panels: Vec::new(),
             viewer_translation: super::viewer::ViewerTranslationState {
                 target: viewer_translation_target,
                 open: false,
@@ -2017,29 +2023,19 @@ impl AviaryApp {
         let same = |message: &MessageHeader| &message.account_id == account_id && message.id == id;
         let same_ref =
             |reference: &MessageRef| &reference.account_id == account_id && reference.id == id;
-        // The reply panels only name the message they sit above, not its
-        // account: they belong to this message if the reader shows it.
-        let displayed_here = self.mailbox.selected.as_ref().is_some_and(|message| {
-            &message.header.account_id == account_id && message.header.id == id
-        }) || self.mailbox.is_selected(account_id, id)
-            || self
-                .mailbox
-                .open_tabs
-                .iter()
-                .any(|tab| tab.message_ref().as_ref().is_some_and(same_ref));
         // `sent_messages` is keyed by the original's provider id alone; only
         // drop the snapshots that belong to this account.
-        let sent_belongs_here = self.mailbox.sent_messages.get(id).is_some_and(|sent| {
-            sent.iter()
-                .all(|message| &message.message.header.account_id == account_id)
-        });
-        if sent_belongs_here {
-            if let Some(sent) = self.mailbox.sent_messages.remove(id) {
-                for message in sent {
-                    self.mailbox
-                        .expanded_sent_messages
-                        .remove(&message.message.header.id);
+        if let Some(sent) = self.mailbox.sent_messages.get_mut(id) {
+            let expanded = &mut self.mailbox.expanded_sent_messages;
+            sent.retain(|message| {
+                let gone = &message.message.header.account_id == account_id;
+                if gone {
+                    expanded.remove(&message.message.header.id);
                 }
+                !gone
+            });
+            if sent.is_empty() {
+                self.mailbox.sent_messages.remove(id);
             }
         }
         self.optimistic_removal_origins.remove(&MessageRef {
@@ -2099,20 +2095,10 @@ impl AviaryApp {
             !(pending.session.message.account_id == *account_id
                 && (pending.related_to == id || pending.session.message.id == id))
         });
-        if self
-            .inline_reply
-            .as_ref()
-            .is_some_and(|r| displayed_here && r.message_id == id)
-        {
-            self.inline_reply = None;
-        }
-        if self
-            .pending_inline_reply
-            .as_ref()
-            .is_some_and(|reply| displayed_here && reply.message_id == id)
-        {
-            self.pending_inline_reply = None;
-        }
+        self.release_reply_panels_of(&MessageRef {
+            account_id: account_id.clone(),
+            id: id.to_string(),
+        });
     }
 
     pub(super) fn update_tray_unread(&self) {

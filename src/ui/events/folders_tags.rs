@@ -3,7 +3,7 @@
 use super::super::app::{AviaryApp, BulkReply};
 use super::super::state::{SenderHistoryState, ThreadBodyState};
 use super::super::util;
-use crate::model::{AccountId, MailFolder, Message, MessageHeader, MessageRef, Tag};
+use crate::model::{AccountId, MailFolder, Message, MessageHeader, MessageRef, Provider, Tag};
 use crate::runtime::{Cmd, MessageMutationKind};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{Context, Window};
@@ -153,6 +153,25 @@ impl AviaryApp {
         // Graph changes a message id when it crosses folders. Keep a local
         // pin attached when the provider reports a replacement id.
         self.replace_pinned_message_id(&account_id, &message_id, new_id.as_deref());
+        // A deadline is local state keyed by the message id, and has to follow
+        // it. Graph reports the id the move produced; Gmail keeps the id (a
+        // move is a label change); IMAP changes it without saying to what, so
+        // there the deadline can only be dropped — left behind, it woke a
+        // dead id and raised an error toast at its hour.
+        let snooze_changed = match new_id.as_deref() {
+            Some(new_id) => self
+                .settings
+                .rename_snoozed_message(&account_id, &message_id, new_id),
+            None => {
+                self.account(&account_id)
+                    .is_some_and(|account| account.provider == Provider::Imap)
+                    && self.settings.unsnooze_message(&account_id, &message_id)
+            }
+        };
+        if snooze_changed {
+            self.settings.save();
+            self.leave_empty_snooze_filter();
+        }
         self.remove_message_everywhere(&account_id, &message_id);
         if let Some(new_id) = new_id {
             log::debug!("message moved, new id: {new_id}");
