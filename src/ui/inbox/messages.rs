@@ -21,8 +21,8 @@ use gpui_kit::component::{
     v_flex, v_virtual_list, ActiveTheme, Disableable, IconName, Selectable, Sizable, StyledExt,
 };
 use gpui_kit::{
-    div, prelude::*, px, App, AvailableSpace, Context, MouseButton, ScrollStrategy,
-    ScrollWheelEvent, Window,
+    div, prelude::*, px, relative, rems, App, AvailableSpace, Context, FontWeight, HighlightStyle,
+    MouseButton, ScrollStrategy, ScrollWheelEvent, StyledText, Window,
 };
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -37,6 +37,11 @@ const LOAD_MORE_THRESHOLD: gpui_kit::Pixels = px(320.);
 /// Keep the shortcut out of the way while the first couple of rows are still
 /// visible; after that, returning to the list's beginning becomes useful.
 const SCROLL_TO_TOP_THRESHOLD: gpui_kit::Pixels = px(180.);
+/// Height of a message row in the compact view, in rems so it follows the
+/// interface scale. Fixed rather than left to its content: every compact row
+/// is then the same height whatever it carries (tags, checkbox, quick-action
+/// buttons), which is what the virtual list's per-variant measurement assumes.
+const COMPACT_ROW_HEIGHT: gpui_kit::Rems = gpui_kit::Rems(1.625);
 const SEARCH_CONTACT_SUGGESTIONS: usize = 4;
 const SEARCH_HISTORY_SUGGESTIONS: usize = 4;
 
@@ -391,6 +396,9 @@ struct MessageListCacheKey {
     revision: u64,
     ui_scale: u32,
     language: super::super::settings::LanguageChoice,
+    /// The compact view changes every height, so it remeasures like a scale
+    /// change does.
+    compact: bool,
 }
 
 pub(crate) struct MessageListCache {
@@ -847,6 +855,7 @@ impl AviaryApp {
             revision: self.message_list_revision,
             ui_scale: self.settings.global.ui_scale.to_bits(),
             language: self.settings.global.language,
+            compact: self.settings.global.compact_message_list,
         }
     }
 
@@ -1324,13 +1333,16 @@ impl AviaryApp {
             return div().into_any_element();
         };
         let theme = cx.theme().clone();
+        let compact = self.settings.global.compact_message_list;
         div()
             .px_2()
             .when(pinned && section_end, |el| el.pb_0p5())
             .child(
                 div()
                     .relative()
-                    .pt_0p5()
+                    // Compact rows sit almost flush: the gap between two of
+                    // them is space no message gets.
+                    .map(|el| if compact { el.pt(px(1.)) } else { el.pt_0p5() })
                     .when(pinned, |el| {
                         el.bg(theme.warning.opacity(0.1))
                             .px_0p5()
@@ -1377,10 +1389,11 @@ impl AviaryApp {
     ) -> gpui_kit::AnyElement {
         let theme = cx.theme().clone();
         let section_key = key.to_string();
+        let compact = self.settings.global.compact_message_list;
 
         div()
             .px_2()
-            .pt_2()
+            .map(|el| if compact { el.pt_1p5() } else { el.pt_2() })
             .when(pinned && collapsed, |el| el.pb_0p5())
             .child(
                 h_flex()
@@ -1391,7 +1404,7 @@ impl AviaryApp {
                     .items_center()
                     .relative()
                     .px_2()
-                    .py_1p5()
+                    .map(|el| if compact { el.py_0p5() } else { el.py_1p5() })
                     .rounded(theme.radius)
                     .cursor_pointer()
                     .text_sm()
@@ -1499,6 +1512,10 @@ impl AviaryApp {
         };
         let snoozed_until = self.settings.snoozed_until(&aid, &mid);
         let bulk_selectable = context_scope == "mailbox";
+        // The compact view is the mailbox list's alone: sender history and
+        // Contacts reuse this row in narrow columns, where three short lines
+        // read better than one truncated to nothing.
+        let compact = bulk_selectable && self.settings.global.compact_message_list;
         let bulk_selection_active = bulk_selectable && !self.mailbox.selected_messages.is_empty();
         // Checking a conversation checks its loaded members; the box only
         // reads as checked once every one of them is.
@@ -1563,16 +1580,205 @@ impl AviaryApp {
                 )
             });
 
+        // The pieces of a row are built once and laid out twice: on three
+        // lines by default, on a single one in the compact view. Both layouts
+        // therefore offer the same controls, wired to the same handlers.
+        //
+        // The chevron is the only way to expand a thread in place: clicking
+        // anywhere else on the row opens its newest message.
+        let chevron = group.cloned().map(|group| {
+            let expanded = group.expanded;
+            div()
+                .id(gpui_kit::ElementId::Name(
+                    format!("conversation-toggle-{}-{}", aid.0, group.key.1).into(),
+                ))
+                .flex_none()
+                .cursor_pointer()
+                .child(
+                    gpui_kit::component::Icon::new(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .xsmall()
+                    .text_color(theme.muted_foreground),
+                )
+                .on_click({
+                    let entity = entity.clone();
+                    let key = group.key.clone();
+                    move |_, _, cx| {
+                        cx.stop_propagation();
+                        entity.update(cx, |this, cx| {
+                            this.toggle_conversation_expanded(key.clone());
+                            cx.notify();
+                        });
+                    }
+                })
+        });
+        let select_box = bulk_selection_active.then(|| {
+            div()
+                .id(gpui_kit::ElementId::Name(
+                    format!("message-select-wrapper-{}-{}", aid.0, m.id).into(),
+                ))
+                .flex_none()
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(
+                    Checkbox::new(gpui_kit::ElementId::Name(
+                        format!("message-select-{}-{}", aid.0, m.id).into(),
+                    ))
+                    .xsmall()
+                    .checked(bulk_selected)
+                    .on_click({
+                        let entity = entity.clone();
+                        let reference = reference.clone();
+                        let group_members = group_members.clone();
+                        move |checked: &bool, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                match &group_members {
+                                    Some(members) => {
+                                        this.toggle_conversation_selection(members, *checked)
+                                    }
+                                    None => {
+                                        this.toggle_message_selection(reference.clone(), *checked)
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }
+                    }),
+                )
+        });
+        let sender = div()
+            .truncate()
+            .text_sm()
+            .when(!is_read, |el| el.font_semibold())
+            .child(util::display_name(&m.from));
+        // Reply/forward arrow, as in Outlook.
+        let action_icon = m.last_action.map(|action| {
+            crate::ui::icons::app_icon(match action {
+                crate::model::LastAction::Forwarded => "forward",
+                crate::model::LastAction::Replied | crate::model::LastAction::RepliedAll => "reply",
+            })
+            .xsmall()
+            .text_color(theme.muted_foreground)
+        });
+        let attachment_icon = m
+            .has_attachments
+            .then(|| crate::ui::icons::app_icon("paperclip").xsmall());
+        // A pending deadline replaces the received date rather than
+        // sitting next to it: the row's height is keyed by
+        // `MsgEntryVariant`, and one more element in this column
+        // would be a visual variant nothing measures. It only ever
+        // shows under the "snoozed" filter anyway — everywhere else
+        // a put-off message is not in the list at all — where when
+        // it comes back is the column worth reading.
+        let date = div()
+            .text_xs()
+            .text_color(if snoozed_until.is_some() {
+                theme.warning
+            } else {
+                theme.muted_foreground
+            })
+            .child(match snoozed_until {
+                Some(until) => crate::ui::snooze::deadline_label(until, chrono::Local::now()),
+                None if time_only => util::short_time(&m.received),
+                None => util::short_date(&m.received),
+            });
+        let pin_button = div()
+            .id(gpui_kit::ElementId::Name(
+                format!("pin-top-{}", m.id).into(),
+            ))
+            .cursor_pointer()
+            .child(
+                crate::ui::icons::app_icon(if is_pinned { "pin" } else { "pin-off" })
+                    .xsmall()
+                    .text_color(if is_pinned {
+                        theme.warning
+                    } else {
+                        theme.muted_foreground
+                    }),
+            )
+            .on_click({
+                let entity = entity.clone();
+                let aid = aid.clone();
+                let mid = mid.clone();
+                let group_members = group_members.clone();
+                move |_, _, cx| {
+                    cx.stop_propagation();
+                    entity.update(cx, |this, cx| {
+                        match &group_members {
+                            Some(members) => this.set_conversation_pinned(members, !is_pinned),
+                            None => this.set_message_pinned(&aid, &mid, !is_pinned),
+                        }
+                        cx.notify();
+                    });
+                }
+            });
+        let star_button = div()
+            .id(gpui_kit::ElementId::Name(format!("star-{}", m.id).into()))
+            .cursor_pointer()
+            .child(
+                gpui_kit::component::Icon::new(if is_flagged {
+                    IconName::Star
+                } else {
+                    IconName::StarOff
+                })
+                .xsmall()
+                .text_color(if is_flagged {
+                    theme.warning
+                } else {
+                    theme.muted_foreground
+                }),
+            )
+            .on_click({
+                let entity = entity.clone();
+                let aid = aid.clone();
+                let mid = mid.clone();
+                move |_, window, cx| {
+                    cx.stop_propagation();
+                    entity.update(cx, |this, cx| {
+                        if this.offline_accounts.contains(&aid) {
+                            return;
+                        }
+                        this.set_flag_undoable(
+                            MessageRef {
+                                account_id: aid.clone(),
+                                id: mid.clone(),
+                            },
+                            !is_flagged,
+                            is_flagged,
+                            window,
+                            cx,
+                        );
+                        cx.notify();
+                    });
+                }
+            });
+        let subject = if m.subject.is_empty() {
+            tr!("no-subject").to_string()
+        } else {
+            m.subject.clone()
+        };
+        // Thread size. It counts what the *cache* knows, not the page on
+        // screen, so it does not creep upward as the user scrolls into older
+        // messages of the same thread.
+        let count_pill = group.map(|group| {
+            div()
+                .flex_none()
+                .px_1p5()
+                .rounded_full()
+                .bg(theme.secondary)
+                .text_xs()
+                .text_color(theme.secondary_foreground)
+                .child(group.total.to_string())
+        });
+        let preview = util::clean_preview(&m.preview);
+
         let row = div()
             .id(gpui_kit::ElementId::Name(
                 format!("msg-{context_scope}-{}-{}", aid.0, m.id).into(),
             ))
-            .flex()
-            .flex_col()
             .relative()
-            .gap_0p5()
-            .px_2()
-            .py_1p5()
             .rounded(theme.radius)
             .cursor_pointer()
             .bg(row_background)
@@ -1601,254 +1807,122 @@ impl AviaryApp {
                         .rounded(px(1.))
                         .bg(theme.primary),
                 )
-            })
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .items_center()
-                    // The chevron is the only way to expand a thread in
-                    // place: clicking anywhere else on the row opens its
-                    // newest message.
-                    .when_some(group.cloned(), |row, group| {
-                        let expanded = group.expanded;
-                        row.child(
-                            div()
-                                .id(gpui_kit::ElementId::Name(
-                                    format!("conversation-toggle-{}-{}", aid.0, group.key.1).into(),
-                                ))
-                                .flex_none()
-                                .cursor_pointer()
-                                .child(
-                                    gpui_kit::component::Icon::new(if expanded {
-                                        IconName::ChevronDown
-                                    } else {
-                                        IconName::ChevronRight
-                                    })
-                                    .xsmall()
-                                    .text_color(theme.muted_foreground),
-                                )
-                                .on_click({
-                                    let entity = entity.clone();
-                                    let key = group.key.clone();
-                                    move |_, _, cx| {
-                                        cx.stop_propagation();
-                                        entity.update(cx, |this, cx| {
-                                            this.toggle_conversation_expanded(key.clone());
-                                            cx.notify();
-                                        });
-                                    }
-                                }),
-                        )
-                    })
-                    .when(bulk_selection_active, |row| {
-                        row.child(
-                            div()
-                                .id(gpui_kit::ElementId::Name(
-                                    format!("message-select-wrapper-{}-{}", aid.0, m.id).into(),
-                                ))
-                                .flex_none()
-                                .on_click(|_, _, cx| cx.stop_propagation())
-                                .child(
-                                    Checkbox::new(gpui_kit::ElementId::Name(
-                                        format!("message-select-{}-{}", aid.0, m.id).into(),
-                                    ))
-                                    .xsmall()
-                                    .checked(bulk_selected)
-                                    .on_click({
-                                        let entity = entity.clone();
-                                        let reference = reference.clone();
-                                        let group_members = group_members.clone();
-                                        move |checked: &bool, _, cx| {
-                                            entity.update(cx, |this, cx| {
-                                                match &group_members {
-                                                    Some(members) => this
-                                                        .toggle_conversation_selection(
-                                                            members, *checked,
-                                                        ),
-                                                    None => this.toggle_message_selection(
-                                                        reference.clone(),
-                                                        *checked,
-                                                    ),
-                                                }
-                                                cx.notify();
-                                            });
-                                        }
-                                    }),
-                                ),
-                        )
-                    })
-                    .children(account_dot)
-                    .child(
-                        div()
-                            .flex_1()
-                            .truncate()
-                            .text_sm()
-                            .when(!is_read, |el| el.font_semibold())
-                            .child(util::display_name(&m.from)),
-                    )
-                    // Reply/forward arrow, as in Outlook.
-                    .when_some(m.last_action, |el, action| {
-                        el.child(
-                            crate::ui::icons::app_icon(match action {
-                                crate::model::LastAction::Forwarded => "forward",
-                                crate::model::LastAction::Replied
-                                | crate::model::LastAction::RepliedAll => "reply",
-                            })
-                            .xsmall()
-                            .text_color(theme.muted_foreground),
-                        )
-                    })
-                    .when(m.has_attachments, |el| {
-                        el.child(crate::ui::icons::app_icon("paperclip").xsmall())
-                    })
-                    // A pending deadline replaces the received date rather than
-                    // sitting next to it: the row's height is keyed by
-                    // `MsgEntryVariant`, and one more element in this column
-                    // would be a visual variant nothing measures. It only ever
-                    // shows under the "snoozed" filter anyway — everywhere else
-                    // a put-off message is not in the list at all — where when
-                    // it comes back is the column worth reading.
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(if snoozed_until.is_some() {
-                                theme.warning
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child(match snoozed_until {
-                                Some(until) => {
-                                    crate::ui::snooze::deadline_label(until, chrono::Local::now())
-                                }
-                                None if time_only => util::short_time(&m.received),
-                                None => util::short_date(&m.received),
-                            }),
-                    )
-                    .children(quick_actions)
-                    .child(
-                        div()
-                            .id(gpui_kit::ElementId::Name(
-                                format!("pin-top-{}", m.id).into(),
-                            ))
-                            .cursor_pointer()
-                            .child(
-                                crate::ui::icons::app_icon(if is_pinned {
-                                    "pin"
-                                } else {
-                                    "pin-off"
-                                })
-                                .xsmall()
-                                .text_color(if is_pinned {
-                                    theme.warning
-                                } else {
-                                    theme.muted_foreground
-                                }),
-                            )
-                            .on_click({
-                                let entity = entity.clone();
-                                let aid = aid.clone();
-                                let mid = mid.clone();
-                                let group_members = group_members.clone();
-                                move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    entity.update(cx, |this, cx| {
-                                        match &group_members {
-                                            Some(members) => {
-                                                this.set_conversation_pinned(members, !is_pinned)
-                                            }
-                                            None => this.set_message_pinned(&aid, &mid, !is_pinned),
-                                        }
-                                        cx.notify();
-                                    });
-                                }
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id(gpui_kit::ElementId::Name(format!("star-{}", m.id).into()))
-                            .cursor_pointer()
-                            .child(
-                                gpui_kit::component::Icon::new(if is_flagged {
-                                    IconName::Star
-                                } else {
-                                    IconName::StarOff
-                                })
-                                .xsmall()
-                                .text_color(if is_flagged {
-                                    theme.warning
-                                } else {
-                                    theme.muted_foreground
-                                }),
-                            )
-                            .on_click({
-                                let entity = entity.clone();
-                                let aid = aid.clone();
-                                let mid = mid.clone();
-                                move |_, window, cx| {
-                                    cx.stop_propagation();
-                                    entity.update(cx, |this, cx| {
-                                        if this.offline_accounts.contains(&aid) {
-                                            return;
-                                        }
-                                        this.set_flag_undoable(
-                                            MessageRef {
-                                                account_id: aid.clone(),
-                                                id: mid.clone(),
-                                            },
-                                            !is_flagged,
-                                            is_flagged,
-                                            window,
-                                            cx,
-                                        );
-                                        cx.notify();
-                                    });
-                                }
-                            }),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .items_center()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_sm()
-                            .truncate()
-                            .when(!is_read, |el| el.font_semibold())
-                            .child(if m.subject.is_empty() {
-                                tr!("no-subject").to_string()
-                            } else {
-                                m.subject.clone()
-                            }),
-                    )
-                    // Thread size. It counts what the *cache* knows, not the
-                    // page on screen, so it does not creep upward as the user
-                    // scrolls into older messages of the same thread.
-                    .when_some(group.map(|group| group.total), |el, total| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .px_1p5()
-                                .rounded_full()
-                                .bg(theme.secondary)
-                                .text_xs()
-                                .text_color(theme.secondary_foreground)
-                                .child(total.to_string()),
-                        )
-                    }),
-            )
-            .child(
-                h_flex().gap_1().items_center().children(tags).child(
+            });
+        let row = if compact {
+            // Subject and preview share one text element, so the line
+            // truncates once, at its end, instead of each half fighting for
+            // the width. The two runs are in order and disjoint, as
+            // `with_highlights` requires.
+            let subject_end = subject.len();
+            let mut line = subject;
+            let mut highlights = Vec::with_capacity(2);
+            if !is_read {
+                highlights.push((
+                    0..subject_end,
+                    HighlightStyle {
+                        font_weight: Some(FontWeight::SEMIBOLD),
+                        ..Default::default()
+                    },
+                ));
+            }
+            if !preview.is_empty() {
+                line.push_str("  ");
+                let preview_start = line.len();
+                line.push_str(&preview);
+                highlights.push((
+                    preview_start..line.len(),
+                    HighlightStyle {
+                        color: Some(theme.muted_foreground),
+                        ..Default::default()
+                    },
+                ));
+            }
+            row.flex()
+                .items_center()
+                .gap_1p5()
+                .px_2()
+                .h(COMPACT_ROW_HEIGHT)
+                .overflow_hidden()
+                .children(chevron)
+                .children(select_box)
+                .children(account_dot)
+                // A column rather than a flexible cell: subjects line up
+                // down the list, which is what makes it scannable.
+                .child(
+                    sender
+                        .flex_none()
+                        .w(relative(0.22))
+                        .min_w(rems(4.5))
+                        .max_w(rems(13.)),
+                )
+                .children(
+                    tags.into_iter()
+                        .take(2)
+                        .map(|tag| div().flex_none().child(tag)),
+                )
+                .child(
                     div()
                         .flex_1()
-                        .text_xs()
+                        .min_w_0()
                         .truncate()
-                        .text_color(theme.muted_foreground)
-                        .child(util::clean_preview(&m.preview)),
-                ),
-            )
+                        .text_sm()
+                        .child(StyledText::new(line).with_highlights(highlights)),
+                )
+                .children(count_pill)
+                .children(action_icon)
+                .children(attachment_icon)
+                .child(date.flex_none())
+                .children(quick_actions)
+                .child(pin_button)
+                .child(star_button)
+        } else {
+            row.flex()
+                .flex_col()
+                .gap_0p5()
+                .px_2()
+                .py_1p5()
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .children(chevron)
+                        .children(select_box)
+                        .children(account_dot)
+                        .child(sender.flex_1())
+                        .children(action_icon)
+                        .children(attachment_icon)
+                        .child(date)
+                        .children(quick_actions)
+                        .child(pin_button)
+                        .child(star_button),
+                )
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_sm()
+                                .truncate()
+                                .when(!is_read, |el| el.font_semibold())
+                                .child(subject),
+                        )
+                        .children(count_pill),
+                )
+                .child(
+                    h_flex().gap_1().items_center().children(tags).child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .truncate()
+                            .text_color(theme.muted_foreground)
+                            .child(preview),
+                    ),
+                )
+        };
+        let row = row
             .with_hover_motion(cx, motion_key, |this| &mut this.message_row_hover)
             .on_click({
                 let entity = entity.clone();
@@ -2743,6 +2817,20 @@ impl AviaryApp {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.mailbox.show_flagged_only = !this.mailbox.show_flagged_only;
                         this.invalidate_message_list();
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("toggle-compact-list")
+                    .ghost()
+                    .small()
+                    .selected(self.settings.global.compact_message_list)
+                    .icon(crate::ui::icons::app_icon("list"))
+                    .tooltip(tr!("messages-compact-view"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let compact = &mut this.settings.global.compact_message_list;
+                        *compact = !*compact;
+                        this.settings.save();
                         cx.notify();
                     })),
             )

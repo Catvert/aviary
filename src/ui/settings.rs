@@ -662,6 +662,12 @@ pub struct GlobalSettings {
     /// as in every mainstream client; search results stay flat regardless.
     #[serde(default = "default_group_by_conversation")]
     pub group_by_conversation: bool,
+    /// Draws each message of the mailbox list on a single line — sender,
+    /// subject and the start of the body side by side — so two to three times
+    /// as many fit on screen. Sender history, Contacts and the kanban keep
+    /// the three-line row: they are narrow columns, not a mailbox.
+    #[serde(default)]
+    pub compact_message_list: bool,
     pub notifications_enabled: bool,
     pub tray_enabled: bool,
     /// Enables an undo window before common mutations (move, delete, tag,
@@ -926,6 +932,7 @@ impl Default for GlobalSettings {
             start_maximized: false,
             collapse_quoted_messages: true,
             group_by_conversation: default_group_by_conversation(),
+            compact_message_list: false,
             notifications_enabled: true,
             tray_enabled: true,
             action_delay_enabled: false,

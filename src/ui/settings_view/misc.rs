@@ -50,6 +50,7 @@ impl AviaryApp {
         let used_mb = self.mail_cache_used_bytes as f64 / (1024.0 * 1024.0);
         let measured_limit_mb = self.mail_cache_limit_bytes as f64 / (1024.0 * 1024.0);
         let group_by_conversation = self.settings.global.group_by_conversation;
+        let compact_message_list = self.settings.global.compact_message_list;
 
         v_flex()
             .child(
@@ -72,6 +73,24 @@ impl AviaryApp {
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(tr!("settings-group-by-conversation-help")),
+                    )
+                    .child(
+                        Switch::new("compact-message-list")
+                            .checked(compact_message_list)
+                            .label(tr!("settings-compact-message-list"))
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                // The density is part of the list's cache
+                                // key, so the heights remeasure by themselves.
+                                this.settings.global.compact_message_list = *checked;
+                                this.settings.save();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tr!("settings-compact-message-list-help")),
                     ),
             )
             .child(
