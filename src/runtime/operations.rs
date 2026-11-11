@@ -95,7 +95,14 @@ fn durable_operation(command: Cmd) -> Option<(AccountId, OperationKind)> {
             account_id,
             id,
             read,
-        } => Some((account_id, OperationKind::MarkRead { id, read })),
+        } => Some((
+            account_id,
+            OperationKind::MarkRead {
+                id,
+                read,
+                silent: false,
+            },
+        )),
         Cmd::AddTag {
             account_id,
             message_id,
@@ -546,7 +553,7 @@ async fn execute(account: Arc<BgAccount>, operation: StoredOperation) {
         OperationKind::SetFlag { id, flagged } => {
             mailbox::perform_set_flag(account.clone(), id, flagged).await
         }
-        OperationKind::MarkRead { id, read } => {
+        OperationKind::MarkRead { id, read, .. } => {
             mailbox::perform_mark_read(account.clone(), id, read).await
         }
         OperationKind::Send {
@@ -914,6 +921,14 @@ async fn handle_failure(account: Arc<BgAccount>, operation: StoredOperation, err
         return;
     }
 
+    if matches!(operation.kind, OperationKind::MarkRead { silent: true, .. }) {
+        // Nothing to roll back and nobody to tell: see `silent`.
+        log::warn!("read receipt abandoned: {raw_error}");
+        if let Err(store_error) = account.global.operations.remove(operation.id).await {
+            log::warn!("removing abandoned read receipt: {store_error:#}");
+        }
+        return;
+    }
     if let Some(compose_id) = operation.kind.compose_id() {
         // The editor session remains the recoverable source for a send that
         // cannot be retried safely. Removing the operation avoids a duplicate
@@ -1122,7 +1137,7 @@ fn send_retry_is_safe(error: &anyhow::Error) -> bool {
     }
 }
 
-fn mutation_is_retryable(error: &anyhow::Error) -> bool {
+pub(super) fn mutation_is_retryable(error: &anyhow::Error) -> bool {
     if request_error(error).is_some_and(|request| request.is_connect() || request.is_timeout()) {
         return true;
     }

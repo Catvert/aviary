@@ -1263,6 +1263,7 @@
   "runtime-error-sender-history": "Sender history: %{error}",
   "runtime-error-operation-store": "Could not preserve the pending operation: %{error}",
   "runtime-error-inline-image-too-large": "Image too large (maximum %{max} MB)",
+  "runtime-error-inline-image-refused": "This image cannot be embedded: the address is not public or does not return an image.",
   "operation-deferred": "The action was saved and will be retried when the account reconnects.",
   "operation-failed": "The action could not be completed: %{error}",
   "bulk-deferred": "The actions were saved and will be retried when the account reconnects.",

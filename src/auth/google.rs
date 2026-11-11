@@ -348,7 +348,13 @@ pub async fn refresh(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        bail!(tr!("auth-error-google-refresh", { status: status, body: body }));
+        // The status travels as data, not only as text — see the same
+        // remark in `auth::microsoft::refresh`.
+        return Err(crate::providers::error::ProviderError::new(
+            status,
+            tr!("auth-error-google-refresh", { status: status, body: body }).to_string(),
+        )
+        .into());
     }
     let tr: TokenResponse = resp.json().await?;
     Ok(Tokens {

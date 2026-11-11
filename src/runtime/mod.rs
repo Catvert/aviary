@@ -182,10 +182,6 @@ pub(super) struct BgAccount {
     /// transport-level `graph_request_gate` separately limits the HTTP
     /// requests hidden inside those operations.
     pub mailbox_gate: Arc<Semaphore>,
-    /// Read receipts are deliberately outside the message-open critical path.
-    /// Serialize them separately so rapid navigation cannot occupy every
-    /// mailbox permit with low-priority provider updates.
-    pub deferred_read_gate: Arc<Semaphore>,
 }
 
 /// Owned credentials for one provider call. Constructed each time by
@@ -365,7 +361,7 @@ async fn run(
             let g = global.clone();
             tokio::spawn(async move {
                 let stored_id = (!stored_id.0.is_empty()).then_some(stored_id);
-                auth_flow::resume_session(g, tokens, stored_id).await;
+                auth_flow::restore_stored_session(g, tokens, stored_id).await;
             });
         }
     }
@@ -562,7 +558,11 @@ async fn run(
                 tokio::spawn(operations::submit(
                     global.clone(),
                     account_id,
-                    operation_store::OperationKind::MarkRead { id, read },
+                    operation_store::OperationKind::MarkRead {
+                        id,
+                        read,
+                        silent: false,
+                    },
                 ));
             }
             // No spawn: schedules or cancels the account's periodic task.
@@ -971,7 +971,7 @@ async fn fetch_inline_image_for_editor(
     cid: String,
     url: String,
 ) {
-    match fetch_inline_image(&global.http, &url).await {
+    match fetch_inline_image(&url).await {
         Ok((bytes, mime)) => global.emit(Evt::InlineImageFetched {
             editor_id,
             cid,
@@ -987,28 +987,75 @@ async fn fetch_inline_image_for_editor(
 }
 
 /// Fetch the bytes of an external image referenced by a pasted `<img src=...>`
-/// tag. Mime is read from `Content-Type`, falling back to `image/png`
-/// (recipients tolerate the wrong subtype better than no type).
+/// tag.
+///
+/// The URL comes from pasted content, never from the user: whatever page the
+/// fragment was copied from chose it, and the bytes fetched here are then
+/// *sent* to the recipient as an inline part. Two things follow.
+///
+/// - **Only public hosts are contacted.** `<img src="http://127.0.0.1:…">` or
+///   an intranet address would otherwise make Aviary read a resource only this
+///   machine can reach and mail it out. Redirects are followed by hand so each
+///   hop goes through the same check.
+/// - **Only images are accepted.** The declared `Content-Type` must be an
+///   image; without one, the bytes must at least start like an image. Anything
+///   else used to be labelled `image/png` and attached.
 ///
 /// The size cap is enforced *while* streaming: buffering the whole response
 /// first would let a hostile source exhaust memory before the check ever ran.
-async fn fetch_inline_image(http: &reqwest::Client, url: &str) -> Result<(Vec<u8>, String)> {
+async fn fetch_inline_image(url: &str) -> Result<(Vec<u8>, String)> {
     use futures::StreamExt as _;
 
     const MAX_BYTES: usize = 16 * 1024 * 1024;
-    let resp = http
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?
-        .error_for_status()?;
-    let mime = resp
+    const MAX_REDIRECTS: usize = 5;
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .read_timeout(std::time::Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or_default()
+    });
+
+    let mut target = reqwest::Url::parse(url).with_context(|| format!("GET {url}"))?;
+    let mut redirects = 0;
+    let resp = loop {
+        ensure_public_http_url(&target).await?;
+        let resp = client
+            .get(target.clone())
+            .send()
+            .await
+            .with_context(|| format!("GET {target}"))?;
+        if !resp.status().is_redirection() {
+            break resp.error_for_status()?;
+        }
+        let next = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|location| target.join(location).ok());
+        match next {
+            Some(next) if redirects < MAX_REDIRECTS => {
+                redirects += 1;
+                target = next;
+            }
+            _ => anyhow::bail!(tr!("runtime-error-inline-image-refused")),
+        }
+    };
+    let declared = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(';').next().unwrap_or(s).trim().to_ascii_lowercase())
-        .filter(|s| s.starts_with("image/"))
-        .unwrap_or_else(|| "image/png".to_string());
+        .map(|s| s.split(';').next().unwrap_or(s).trim().to_ascii_lowercase());
+    // A declared type that is not an image is a refusal, not a hint.
+    if declared
+        .as_deref()
+        .is_some_and(|mime| !mime.starts_with("image/") && mime != "application/octet-stream")
+    {
+        anyhow::bail!(tr!("runtime-error-inline-image-refused"));
+    }
+    let declared = declared.filter(|mime| mime.starts_with("image/"));
 
     // An advertised length above the cap fails before a single chunk is read.
     if resp
@@ -1030,5 +1077,108 @@ async fn fetch_inline_image(http: &reqwest::Client, url: &str) -> Result<(Vec<u8
         }
         bytes.extend_from_slice(&chunk);
     }
+    let mime = match declared {
+        Some(mime) => mime,
+        None => image::guess_format(&bytes)
+            .map(|format| format.to_mime_type().to_string())
+            .map_err(|_| anyhow::anyhow!(tr!("runtime-error-inline-image-refused")))?,
+    };
     Ok((bytes, mime))
+}
+
+/// Accepts an `http(s)` URL whose host resolves to public addresses only.
+async fn ensure_public_http_url(url: &reqwest::Url) -> Result<()> {
+    let refused = || anyhow::anyhow!(tr!("runtime-error-inline-image-refused"));
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(refused());
+    }
+    let host = url.host_str().ok_or_else(refused)?;
+    let port = url.port_or_known_default().ok_or_else(refused)?;
+    let mut resolved = false;
+    for address in tokio::net::lookup_host((host.trim_matches(['[', ']']), port))
+        .await
+        .with_context(|| format!("resolving {host}"))?
+    {
+        resolved = true;
+        if !is_public_address(address.ip()) {
+            return Err(refused());
+        }
+    }
+    if resolved {
+        Ok(())
+    } else {
+        Err(refused())
+    }
+}
+
+/// Whether an address is reachable from the public internet — as opposed to
+/// this machine, its LAN or its link.
+fn is_public_address(address: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match address {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                // Carrier-grade NAT, 100.64.0.0/10.
+                || (a == 100 && (64..128).contains(&b)))
+        }
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_public_address(IpAddr::V4(v4)),
+            None => {
+                let first = v6.segments()[0];
+                !(v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_multicast()
+                    // Unique local fc00::/7 and link-local fe80::/10.
+                    || (first & 0xfe00) == 0xfc00
+                    || (first & 0xffc0) == 0xfe80)
+            }
+        },
+    }
+}
+
+#[cfg(test)]
+mod inline_image_tests {
+    use super::{ensure_public_http_url, is_public_address};
+
+    #[test]
+    fn only_public_addresses_pass() {
+        for refused in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "::1",
+            "::ffff:127.0.0.1",
+            "fe80::1",
+            "fd00::1",
+        ] {
+            assert!(!is_public_address(refused.parse().unwrap()), "{refused}");
+        }
+        for accepted in ["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"] {
+            assert!(is_public_address(accepted.parse().unwrap()), "{accepted}");
+        }
+    }
+
+    #[tokio::test]
+    async fn local_and_non_http_urls_are_refused_before_any_request() {
+        for url in [
+            "http://127.0.0.1:8080/secret.png",
+            "http://[::1]/x.png",
+            "http://localhost/x.png",
+            "file:///etc/passwd",
+            "ftp://192.0.2.1/x.png",
+        ] {
+            let url = reqwest::Url::parse(url).unwrap();
+            assert!(ensure_public_http_url(&url).await.is_err(), "{url}");
+        }
+    }
 }

@@ -32,6 +32,12 @@ pub(super) enum OperationKind {
     MarkRead {
         id: String,
         read: bool,
+        /// The read receipt of an *open*: a side effect the user did not ask
+        /// for by name. It is replayed like any mutation, but reports nothing
+        /// — no deferral toast for every message read offline, no error toast
+        /// for a message that was deleted elsewhere meanwhile.
+        #[serde(default)]
+        silent: bool,
     },
     Send {
         compose_id: u64,
@@ -88,6 +94,7 @@ impl OperationKind {
             Self::Delete { .. } => Some(MessageMutationKind::Delete),
             Self::Move { .. } => Some(MessageMutationKind::Move),
             Self::SetFlag { flagged, .. } => Some(MessageMutationKind::SetFlag(*flagged)),
+            Self::MarkRead { silent: true, .. } => None,
             Self::MarkRead { read, .. } => Some(MessageMutationKind::MarkRead(*read)),
             Self::Send { .. } | Self::QuickAction { .. } | Self::SetTag { .. } => None,
         }
@@ -711,36 +718,81 @@ impl OperationDb {
 
     fn load_due(&mut self, account_id: &AccountId, now: i64) -> Result<LoadedOperations> {
         self.retry_delivered_cleanup();
+        // Every pending row is read, not only the due ones: a row waiting out
+        // a retry backoff holds back the later operations on the same message.
+        // Without that, "mark read" deferred by a dropped connection ran
+        // *after* the "mark unread" the user issued meanwhile, and won — and a
+        // deferred move left whatever followed it aiming at a dead id.
+        //
+        // Only a row that has been *attempted* holds others back. One merely
+        // scheduled for the end of an undo window has not started: what the
+        // user does in the meantime is free to go first, as it always did.
         let mut statement = self.conn.prepare(
-            "SELECT id,kind_json,attempts
+            "SELECT id,kind_json,attempts,next_attempt_at
              FROM pending_operations
-             WHERE account_id=?1 AND state='pending' AND next_attempt_at<=?2
+             WHERE account_id=?1 AND state='pending'
              ORDER BY id",
         )?;
-        let rows = statement.query_map(params![account_id.0, now], |row| {
+        let rows = statement.query_map(params![account_id.0], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
             ))
         })?;
         let mut loaded = LoadedOperations::default();
+        // Message -> the deadline its blocking row waits for.
+        let mut held_messages: std::collections::HashMap<String, i64> = Default::default();
+        let mut postponed: Vec<(i64, i64)> = Vec::new();
         for row in rows {
-            let (id, json, attempts) = row?;
+            let (id, json, attempts, next_attempt_at) = row?;
             if self.delivered.contains(&id) {
                 continue;
             }
-            match decode_kind(id, &json) {
-                Ok(kind) => loaded.ready.push(StoredOperation {
+            let due = next_attempt_at <= now;
+            let kind = match decode_kind(id, &json) {
+                Ok(kind) => kind,
+                // Set aside when its turn comes; until then it holds nothing.
+                Err(unreadable) => {
+                    if due {
+                        loaded.unreadable.push(unreadable);
+                    }
+                    continue;
+                }
+            };
+            let message = kind.message_id().map(str::to_string);
+            let blocked_until = message
+                .as_ref()
+                .and_then(|message| held_messages.get(message).copied());
+            match (due, blocked_until) {
+                (true, None) => loaded.ready.push(StoredOperation {
                     id,
                     account_id: account_id.clone(),
                     kind,
                     attempts: attempts.max(0) as u32,
                 }),
-                Err(unreadable) => loaded.unreadable.push(unreadable),
+                // Due but held: it takes its blocker's deadline. Left due, it
+                // would be the outbox's earliest deadline and the retry timer
+                // would spin on a row that cannot run yet.
+                (true, Some(until)) => postponed.push((id, until)),
+                (false, blocked) => {
+                    if attempts > 0 || blocked.is_some() {
+                        if let Some(message) = message {
+                            let until = blocked.unwrap_or(0).max(next_attempt_at);
+                            held_messages.insert(message, until);
+                        }
+                    }
+                }
             }
         }
         drop(statement);
+        for (id, until) in postponed {
+            self.conn.execute(
+                "UPDATE pending_operations SET next_attempt_at=?2 WHERE id=?1",
+                params![id, until],
+            )?;
+        }
         self.set_aside(&loaded.unreadable)?;
         Ok(loaded)
     }
@@ -1017,6 +1069,83 @@ mod tests {
 
         db.remove(operation.id).unwrap();
         assert_eq!(db.next_attempt_at(&account_id).unwrap(), None);
+    }
+
+    #[test]
+    fn a_deferred_operation_holds_back_later_ones_on_the_same_message() {
+        let conn = Connection::open_in_memory().unwrap();
+        OperationDb::initialize_schema(&conn).unwrap();
+        let mut db = OperationDb::with_connection(conn);
+        let account_id = AccountId("account@example.test".into());
+        let now = chrono::Utc::now().timestamp();
+        let mark = |id: &str, read| OperationKind::MarkRead {
+            id: id.into(),
+            read,
+            silent: false,
+        };
+
+        let first = db
+            .enqueue_at(account_id.clone(), mark("message-1", true), now)
+            .unwrap();
+        db.defer(first.id, 1, now + 300, "synthetic failure")
+            .unwrap();
+        let second = db
+            .enqueue_at(account_id.clone(), mark("message-1", false), now)
+            .unwrap();
+        let other = db
+            .enqueue_at(account_id.clone(), mark("message-2", true), now)
+            .unwrap();
+
+        let ready: Vec<_> = db.load_due(&account_id, now).unwrap().ready;
+        let ids: Vec<_> = ready.iter().map(|operation| operation.id).collect();
+        assert_eq!(
+            ids,
+            [other.id],
+            "the later change waits for the deferred one"
+        );
+        db.remove(other.id).unwrap();
+        assert_eq!(
+            db.next_attempt_at(&account_id).unwrap(),
+            Some(now + 300),
+            "a held row must not keep the retry timer spinning"
+        );
+
+        let ready = db.load_due(&account_id, now + 300).unwrap().ready;
+        let ids: Vec<_> = ready.iter().map(|operation| operation.id).collect();
+        assert_eq!(ids, [first.id, second.id], "then both run, in order");
+    }
+
+    #[test]
+    fn an_operation_waiting_for_its_undo_window_holds_nothing_back() {
+        let conn = Connection::open_in_memory().unwrap();
+        OperationDb::initialize_schema(&conn).unwrap();
+        let mut db = OperationDb::with_connection(conn);
+        let account_id = AccountId("account@example.test".into());
+        let now = chrono::Utc::now().timestamp();
+
+        db.enqueue_at(
+            account_id.clone(),
+            OperationKind::Delete {
+                id: "message-1".into(),
+            },
+            now + 5,
+        )
+        .unwrap();
+        let immediate = db
+            .enqueue_at(
+                account_id.clone(),
+                OperationKind::MarkRead {
+                    id: "message-1".into(),
+                    read: true,
+                    silent: false,
+                },
+                now,
+            )
+            .unwrap();
+
+        let ready = db.load_due(&account_id, now).unwrap().ready;
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, immediate.id);
     }
 
     #[test]

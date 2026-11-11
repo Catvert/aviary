@@ -1263,6 +1263,7 @@
   "runtime-error-sender-history": "Historique de l’expéditeur : %{error}",
   "runtime-error-operation-store": "Impossible de conserver l’opération en attente : %{error}",
   "runtime-error-inline-image-too-large": "Image trop volumineuse (maximum %{max} Mo)",
+  "runtime-error-inline-image-refused": "Cette image ne peut pas être intégrée : l'adresse n'est pas publique ou ne renvoie pas une image.",
   "operation-deferred": "L’action a été enregistrée et sera réessayée au retour de la connexion.",
   "operation-failed": "L’action n’a pas pu être terminée : %{error}",
   "bulk-deferred": "Les actions ont été enregistrées et seront réessayées au retour de la connexion.",

@@ -148,7 +148,14 @@ pub async fn refresh(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        bail!("refresh failed ({status}): {body}");
+        // Carries the status as data: as bare text a 503 from the token
+        // endpoint read as a permanent failure, and the mutation being
+        // drained was dropped from the outbox instead of being deferred.
+        return Err(crate::providers::error::ProviderError::new(
+            status,
+            format!("refresh failed ({status}): {body}"),
+        )
+        .into());
     }
     let tr: TokenResponse = resp.json().await?;
     Ok(Tokens {

@@ -732,9 +732,32 @@ pub(super) async fn set_auto_refresh(
     }
 }
 
+/// Tells the provider that an opened message has been read, through the
+/// durable outbox.
+///
+/// This used to be one best-effort call made after the body was fetched: read
+/// offline, or with the fetch failing, or under a 429, the message was read
+/// here and nowhere else — bold again at the next listing, unread on every
+/// other device. As an outbox row it survives all three, and a restart.
+///
+/// Detached on purpose: selecting another row aborts the open task, and a
+/// drain must never run inside a task that can be aborted.
+fn submit_read_receipt(account: &Arc<BgAccount>, id: &str) {
+    tokio::spawn(super::operations::submit(
+        account.global.clone(),
+        account.id.clone(),
+        super::operation_store::OperationKind::MarkRead {
+            id: id.to_string(),
+            read: true,
+            silent: true,
+        },
+    ));
+}
+
 pub(super) async fn open_message(account: Arc<BgAccount>, id: String) {
     let started = std::time::Instant::now();
     let cache_started = std::time::Instant::now();
+    let mut read_receipt_submitted = false;
     let had_cached = match account
         .global
         .cache
@@ -742,6 +765,10 @@ pub(super) async fn open_message(account: Arc<BgAccount>, id: String) {
         .await
     {
         Ok(Some(message)) => {
+            if !message.header.is_read {
+                submit_read_receipt(&account, &id);
+                read_receipt_submitted = true;
+            }
             account
                 .global
                 .cache
@@ -818,43 +845,8 @@ pub(super) async fn open_message(account: Arc<BgAccount>, id: String) {
                 attachment_count
             );
             drop(permit);
-            if mark_read_deferred {
-                // This task must outlive `open_message`: selecting another row
-                // aborts the current open task, but must not cancel a read
-                // receipt that the UI has already applied optimistically.
-                tokio::spawn(async move {
-                    let mark_read_started = std::time::Instant::now();
-                    let _serial = account
-                        .deferred_read_gate
-                        .clone()
-                        .acquire_owned()
-                        .await
-                        .expect("deferred read semaphore is never closed");
-                    let queue_elapsed = mark_read_started.elapsed();
-                    let auth = match account.ensure_auth().await {
-                        Ok(auth) => auth,
-                        Err(e) => {
-                            log::warn!("deferred mark_read authentication failed: {e:#}");
-                            return;
-                        }
-                    };
-                    let mailbox_started = std::time::Instant::now();
-                    let _permit = account.mailbox_permit().await;
-                    let mailbox_elapsed = mailbox_started.elapsed();
-                    let provider_started = std::time::Instant::now();
-                    match account.session(&auth).mark_read(&id, true).await {
-                        Ok(()) => log::debug!(
-                            "deferred mark_read completed in {} ms \
-                             (provider={:?}, queue_ms={}, mailbox_wait_ms={}, provider_ms={})",
-                            mark_read_started.elapsed().as_millis(),
-                            account.provider,
-                            queue_elapsed.as_millis(),
-                            mailbox_elapsed.as_millis(),
-                            provider_started.elapsed().as_millis()
-                        ),
-                        Err(e) => log::warn!("deferred mark_read failed: {e:#}"),
-                    }
-                });
+            if mark_read_deferred && !read_receipt_submitted {
+                submit_read_receipt(&account, &id);
             }
         }
         Err(e) => {

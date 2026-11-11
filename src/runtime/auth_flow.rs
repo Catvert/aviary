@@ -126,16 +126,115 @@ pub(super) async fn google_login_flow(
     });
 }
 
-/// Bring up a `BgAccount` from a freshly issued or restored token set:
-/// fetch `/me`, then register and announce the account. This is the single
-/// entry point that
-/// guarantees `accounts` map keys equal `account.id` before any other
-/// task runs against the account.
+/// Why a session could not be brought up, and whether trying again can help.
+struct RestoreFailure {
+    message: String,
+    /// The server was not reached or answered with a transient status: the
+    /// same tokens may well work in a minute.
+    retryable: bool,
+}
+
+impl RestoreFailure {
+    fn permanent(message: String) -> Self {
+        Self {
+            message,
+            retryable: false,
+        }
+    }
+
+    fn classified(message: String, cause: &anyhow::Error) -> Self {
+        Self {
+            message,
+            retryable: super::operations::mutation_is_retryable(cause),
+        }
+    }
+}
+
+/// Pauses between attempts to restore a stored account, the last one
+/// repeating. Slow on purpose: this runs for as long as the machine is
+/// offline.
+const RESTORE_RETRY_PAUSES: [std::time::Duration; 5] = [
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(15),
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(60),
+    std::time::Duration::from_secs(300),
+];
+
+/// Bring up a `BgAccount` from a freshly issued token set (a sign-in that
+/// just completed): one attempt, the failure reported as it is.
 pub(super) async fn resume_session(
     global: Arc<BgGlobal>,
-    mut tokens: Tokens,
+    tokens: Tokens,
     stored_id: Option<AccountId>,
 ) {
+    let provider = tokens.provider;
+    if let Err(failure) = try_resume_session(&global, tokens).await {
+        emit_restore_error(&global, stored_id, provider, failure.message);
+    }
+}
+
+/// Restores an account persisted by a previous run, **and keeps trying while
+/// the failure is one that time can fix**.
+///
+/// This used to be a single attempt: Aviary started offline — or at login,
+/// before the network was up — reported the account unavailable and never
+/// looked again, so every command for it was dropped until a restart, outbox
+/// included. The failure is still reported at once (the UI lists the account
+/// as unavailable); `AccountReady` replaces it when an attempt gets through.
+/// A refused credential is not retried: asking again would only hammer the
+/// server with a password it has already rejected.
+pub(super) async fn restore_stored_session(
+    global: Arc<BgGlobal>,
+    tokens: Tokens,
+    stored_id: Option<AccountId>,
+) {
+    let provider = tokens.provider;
+    let mut attempt = 0usize;
+    loop {
+        let failure = match try_resume_session(&global, tokens.clone()).await {
+            Ok(()) => return,
+            Err(failure) => failure,
+        };
+        if attempt == 0 || !failure.retryable {
+            emit_restore_error(
+                &global,
+                stored_id.clone(),
+                provider,
+                failure.message.clone(),
+            );
+        }
+        if !failure.retryable {
+            return;
+        }
+        let pause = RESTORE_RETRY_PAUSES[attempt.min(RESTORE_RETRY_PAUSES.len() - 1)];
+        attempt += 1;
+        log::info!(
+            "account restore failed, retrying in {pause:?}: {}",
+            failure.message
+        );
+        tokio::time::sleep(pause).await;
+        // Signed out, or signed in again by hand, while we were waiting.
+        if let Some(id) = &stored_id {
+            if global.accounts.read().await.contains_key(id)
+                || !auth::list_persisted_accounts()
+                    .iter()
+                    .any(|(persisted, _)| persisted == id)
+            {
+                return;
+            }
+        }
+    }
+}
+
+/// Fetch `/me`, then register and announce the account. This is the single
+/// entry point that guarantees `accounts` map keys equal `account.id` before
+/// any other task runs against the account.
+async fn try_resume_session(
+    global: &Arc<BgGlobal>,
+    mut tokens: Tokens,
+) -> Result<(), RestoreFailure> {
+    let global = global.clone();
     let provider = tokens.provider;
     let (client_id, client_secret, tenant) = match provider {
         Provider::Microsoft => (
@@ -156,8 +255,7 @@ pub(super) async fn resume_session(
     // access_token has expired.
     if let Err(e) = ensure_fresh_token(&global, &mut tokens).await {
         let error = tr!("auth-error-refresh", { error: format!("{e:#}") });
-        emit_restore_error(&global, stored_id, provider, error.to_string());
-        return;
+        return Err(RestoreFailure::classified(error.to_string(), &e));
     }
 
     // Build the auth context for the initial `/me` call. For IMAP this means
@@ -177,15 +275,13 @@ pub(super) async fn resume_session(
                     "auth-error-imap-password-missing",
                     { error: format!("{e:#}") }
                 );
-                emit_restore_error(&global, stored_id, provider, error.to_string());
-                return;
+                return Err(RestoreFailure::permanent(error.to_string()));
             }
             Err(e) => {
                 let error = tr!("auth-error-imap-password-missing", {
                     error: format!("{e:#}")
                 });
-                emit_restore_error(&global, stored_id, provider, error.to_string());
-                return;
+                return Err(RestoreFailure::permanent(error.to_string()));
             }
         }
     } else {
@@ -195,13 +291,9 @@ pub(super) async fn resume_session(
     let session = match (provider, &tokens.imap_config, imap_password.as_deref()) {
         (Provider::Imap, Some(cfg), Some(pwd)) => Session::Imap(ImapAuth::from_config(cfg, pwd)),
         (Provider::Imap, _, _) => {
-            emit_restore_error(
-                &global,
-                stored_id,
-                provider,
+            return Err(RestoreFailure::permanent(
                 tr!("auth-error-imap-config-incomplete").to_string(),
-            );
-            return;
+            ));
         }
         (Provider::Microsoft, _, _) => Session::Graph {
             client: crate::providers::graph::Client::without_gate(&global.http, &access_token),
@@ -216,8 +308,7 @@ pub(super) async fn resume_session(
         Ok(a) => a,
         Err(e) => {
             let error = tr!("auth-error-me", { error: format!("{e:#}") });
-            emit_restore_error(&global, stored_id, provider, error.to_string());
-            return;
+            return Err(RestoreFailure::classified(error.to_string(), &e));
         }
     };
     let id = account.id.clone();
@@ -236,7 +327,7 @@ pub(super) async fn resume_session(
             global.emit(Evt::AccountReady(account));
             tokio::spawn(super::operations::drain_account(existing));
         }
-        return;
+        return Ok(());
     }
 
     let bg = Arc::new(BgAccount {
@@ -264,11 +355,11 @@ pub(super) async fn resume_session(
         // individual HTTP requests. Gmail and IMAP also benefit from avoiding
         // unbounded UI-triggered fan-outs.
         mailbox_gate: Arc::new(Semaphore::new(3)),
-        deferred_read_gate: Arc::new(Semaphore::new(1)),
     });
     global.accounts.write().await.insert(id, bg.clone());
     global.emit(Evt::AccountReady(account));
     tokio::spawn(super::operations::drain_account(bg));
+    Ok(())
 }
 
 fn emit_restore_error(
