@@ -90,6 +90,11 @@ pub struct MailSearchState {
     pub menu_open: bool,
     /// Keyboard-highlighted row in the flattened contact/history suggestions.
     pub menu_selection: Option<usize>,
+    /// Accounts whose provider has not answered the current submission yet.
+    /// What separates "still searching" from "found nothing": without it the
+    /// list announced "no results" the instant a query was submitted, then
+    /// filled in a second later.
+    pub pending: std::collections::HashSet<crate::model::AccountId>,
 }
 
 impl MailSearchState {
@@ -97,6 +102,7 @@ impl MailSearchState {
         self.request_id = self.request_id.wrapping_add(1);
         self.query = query;
         self.results = Some(Vec::new());
+        self.pending.clear();
     }
 
     pub(crate) fn accepts_results(&self, request_id: u64, query: &str) -> bool {
@@ -198,6 +204,7 @@ impl MailboxState {
     pub(crate) fn clear_search(&mut self) -> bool {
         self.search.query.clear();
         self.search.results = None;
+        self.search.pending.clear();
         !self.messages_loaded
     }
 

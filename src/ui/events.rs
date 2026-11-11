@@ -574,7 +574,8 @@ impl AviaryApp {
                 account_id,
                 query,
                 messages,
-            } => self.on_search_results(request_id, account_id, query, messages),
+                finished,
+            } => self.on_search_results(request_id, account_id, query, messages, finished),
             Evt::CalendarEvents {
                 account_id,
                 from,

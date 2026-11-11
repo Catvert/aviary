@@ -524,7 +524,6 @@ pub(crate) struct MailboxSession {
     pub selected_folder_id: Option<String>,
     pub unified_selected_account: Option<AccountId>,
     pub selected_message: Option<MessageRef>,
-    pub search_query: String,
     pub search_history: Vec<String>,
     pub search_scope: MailSearchScope,
     pub search_sort: MailSearchSort,

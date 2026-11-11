@@ -1122,7 +1122,17 @@ pub(super) async fn search_messages(
     // the result into their own dialect, so `de:alice` means the same thing
     // whichever answers.
     let parsed = crate::search_query::SearchQuery::parse(&query);
+    // Every path below ends with a `finished` reply, including the failures:
+    // the UI is waiting for it to stop announcing a search in progress.
+    let finished = |messages: Vec<MessageHeader>| Evt::SearchResults {
+        request_id,
+        account_id: account.id.clone(),
+        query: query.clone(),
+        messages,
+        finished: true,
+    };
     if parsed.is_empty() {
+        account.emit(finished(Vec::new()));
         return;
     }
     let cached = account
@@ -1144,6 +1154,7 @@ pub(super) async fn search_messages(
                 account_id: account.id.clone(),
                 query: query.clone(),
                 messages,
+                finished: false,
             });
         }
         Ok(_) => {}
@@ -1161,6 +1172,7 @@ pub(super) async fn search_messages(
             } else {
                 log::info!("search served from cache only: {e:#}");
             }
+            account.emit(finished(Vec::new()));
             return;
         }
     };
@@ -1185,14 +1197,12 @@ pub(super) async fn search_messages(
             for m in &mut messages {
                 m.account_id = account.id.clone();
             }
-            account.emit(Evt::SearchResults {
-                request_id,
-                account_id: account.id.clone(),
-                query,
-                messages,
-            });
+            account.emit(finished(messages));
         }
-        Err(e) => account.emit(Evt::Error(e.to_string())),
+        Err(e) => {
+            account.emit(Evt::Error(e.to_string()));
+            account.emit(finished(Vec::new()));
+        }
     }
 }
 

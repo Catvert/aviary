@@ -638,6 +638,12 @@ pub struct AviaryApp {
     /// from `Root` and skips the view's `Aviary` context.
     shortcut_focus: FocusHandle,
     pub search_input: Entity<InputState>,
+    /// Set by whatever leaves search mode without a `Window` at hand (a
+    /// folder click); the messages pane empties the field on its next render.
+    /// The field, `search.query` and `search.results` must agree: a field
+    /// still showing a query over an unfiltered list reads as a search that
+    /// silently stopped working.
+    pub(super) search_input_reset_pending: bool,
     pub(super) mail_search_scroll: super::components::overlay_popover::OverlayPopoverScroll,
     pub contacts_search_input: Entity<InputState>,
     /// Scroll position and wheel motion of every scrollable pane.
@@ -898,12 +904,12 @@ impl AviaryApp {
             None
         };
 
-        let initial_search_query = restored_session.mailbox.search_query.clone();
-        let search_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(tr!("search-hint"))
-                .default_value(initial_search_query)
-        });
+        // A search does not survive a restart, only its history does. What was
+        // persisted used to be the *text of the field* — a draft never
+        // submitted, or the leftover of a search already left — and the
+        // session came back in search mode on it, list empty, with nothing on
+        // screen saying why. Re-running a query is one click in the history.
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("search-hint")));
         let viewer_translation_target = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(tr!("viewer-translation-target-placeholder"))
@@ -994,8 +1000,6 @@ impl AviaryApp {
             selected_id: restored_session.mailbox.selected_message.clone(),
             selected: None,
             search: MailSearchState {
-                query: restored_session.mailbox.search_query.clone(),
-                results: (!restored_session.mailbox.search_query.is_empty()).then(Vec::new),
                 history: restored_session.mailbox.search_history.clone(),
                 scope: restored_session.mailbox.search_scope,
                 sort: restored_session.mailbox.search_sort,
@@ -1077,6 +1081,7 @@ impl AviaryApp {
             reader_scroll_reset_pending: false,
             shortcut_focus,
             search_input,
+            search_input_reset_pending: false,
             mail_search_scroll: super::components::overlay_popover::OverlayPopoverScroll::default(),
             contacts_search_input,
             scrolls: Scrolls::default(),
@@ -1488,7 +1493,10 @@ impl AviaryApp {
         self.mailbox.selected = None;
         self.mailbox.selected_id = None;
         self.mailbox.thread = None;
-        self.mailbox.search.results = None;
+        // Changing folder leaves the search, field included (see
+        // `search_input_reset_pending`).
+        self.mailbox.clear_search();
+        self.search_input_reset_pending = true;
         self.mailbox.tag_filters.clear();
         self.mailbox.last_auto_refresh_sent = None;
         self.invalidate_message_list();
@@ -1523,6 +1531,7 @@ impl AviaryApp {
         let scope = self.mail_search_scope();
         for aid in self.active_account_ids() {
             let limit = self.fetch_limit(&aid);
+            self.mailbox.search.pending.insert(aid.clone());
             self.send(Cmd::Search {
                 request_id: self.mailbox.search.request_id,
                 account_id: aid,
@@ -1596,7 +1605,31 @@ impl AviaryApp {
         cx.notify();
     }
 
+    /// Whether a submitted search is still waiting for an account on screen.
+    pub(crate) fn mail_search_in_flight(&self) -> bool {
+        !self.mailbox.search.pending.is_empty()
+            && self
+                .active_account_ids()
+                .iter()
+                .any(|account_id| self.mailbox.search.pending.contains(account_id))
+    }
+
+    /// Re-runs the active search, if any, and reports whether there was one.
+    pub(crate) fn rerun_mail_search(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.mailbox.search.results.is_none() {
+            return false;
+        }
+        let query = self.mailbox.search.query.clone();
+        self.submit_search(query, window, cx);
+        true
+    }
+
     pub(super) fn clear_mail_search(&mut self) {
+        self.search_input_reset_pending = true;
         let needs_mailbox_load = self.mailbox.clear_search();
         self.invalidate_message_list();
         if needs_mailbox_load {

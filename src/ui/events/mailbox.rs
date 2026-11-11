@@ -608,16 +608,20 @@ impl AviaryApp {
         account_id: AccountId,
         query: String,
         messages: Vec<MessageHeader>,
+        finished: bool,
     ) {
         if !self.event_relevant(&account_id)
             || !self.mailbox.search.accepts_results(request_id, &query)
         {
             return;
         }
+        if finished {
+            self.mailbox.search.pending.remove(&account_id);
+        }
         let Some(results) = self.mailbox.search.results.as_mut() else {
             return;
         };
-        util::dedup_append(results, messages);
+        merge_search_results(results, messages, finished);
         self.sort_search_results();
     }
 
@@ -669,5 +673,81 @@ impl AviaryApp {
                 }
             }
         }
+    }
+}
+
+/// Folds one reply into the accumulated results.
+///
+/// The local index answers first and the provider second, often with the same
+/// messages. The provider's copy is the current one — the cached header may
+/// carry a read or flag state that changed since — so it replaces the cached
+/// row in place, keeping the position relevance gave it; new hits append.
+fn merge_search_results(
+    results: &mut Vec<MessageHeader>,
+    incoming: Vec<MessageHeader>,
+    from_provider: bool,
+) {
+    for message in incoming {
+        match results
+            .iter_mut()
+            .find(|known| known.account_id == message.account_id && known.id == message.id)
+        {
+            Some(known) if from_provider => *known = message,
+            Some(_) => {}
+            None => results.push(message),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_search_results;
+    use crate::model::{AccountId, MessageHeader};
+    use chrono::Utc;
+
+    fn header(account: &str, id: &str, is_read: bool) -> MessageHeader {
+        MessageHeader {
+            id: id.to_string(),
+            account_id: AccountId(account.into()),
+            subject: String::new(),
+            from: String::new(),
+            received: Utc::now(),
+            preview: String::new(),
+            is_read,
+            is_flagged: false,
+            has_attachments: false,
+            tags: Vec::new(),
+            last_action: None,
+            last_action_at: None,
+            conversation_id: None,
+            internet_message_id: None,
+        }
+    }
+
+    #[test]
+    fn the_provider_copy_replaces_the_cached_hit_in_place() {
+        let mut results = vec![header("a", "1", false), header("a", "2", false)];
+        merge_search_results(
+            &mut results,
+            vec![header("a", "3", true), header("a", "1", true)],
+            true,
+        );
+
+        let ids: Vec<_> = results.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["1", "2", "3"], "relevance order is kept");
+        assert!(results[0].is_read, "the cached row took the fresh state");
+    }
+
+    #[test]
+    fn a_local_reply_never_overwrites_and_ids_stay_per_account() {
+        let mut results = vec![header("a", "1", true)];
+        merge_search_results(
+            &mut results,
+            vec![header("a", "1", false), header("b", "1", false)],
+            false,
+        );
+
+        assert_eq!(results.len(), 2, "the same id on another account is new");
+        assert!(results[0].is_read);
     }
 }

@@ -271,3 +271,19 @@ active et si son identifiant et sa requête correspondent : comparer le texte se
 laissait revenir une réponse ancienne après une nouvelle recherche identique ou
 un changement de périmètre. La restauration des comptes ne relance une recherche
 que si son mode est encore actif (`results.is_some()`).
+
+**Trois choses doivent toujours s'accorder : le texte du champ, `search.query` et
+`search.results`.** Un champ qui affiche encore une requête au-dessus d'une liste
+non filtrée se lit comme une recherche qui a cessé de fonctionner. Toute sortie du
+mode recherche vide donc le champ : `clear_mail_search` et `select_folder` posent
+`search_input_reset_pending`, que le volet applique à son rendu suivant (aucune des
+deux n'a de `Window` sous la main). **Une recherche ne survit pas à un redémarrage**,
+seul son historique est persisté : la session enregistrait le *texte du champ* — un
+brouillon jamais soumis, ou le reste d'une recherche déjà quittée — et redémarrait
+en mode recherche dessus. `Evt::SearchResults` porte `finished` : la phase locale ne
+l'est jamais, la réponse du provider (ou son échec, ou l'absence d'authentification)
+l'est toujours, ce qui vide `search.pending` et permet d'afficher « Recherche en
+cours… » plutôt qu'« aucun résultat » pendant qu'un compte n'a pas répondu. La copie
+du provider **remplace** en place la ligne venue du cache (`merge_search_results`) :
+elle porte l'état lu/suivi courant. F5 relance la recherche active au lieu de
+rafraîchir le dossier caché derrière elle.

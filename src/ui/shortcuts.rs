@@ -191,14 +191,20 @@ pub(crate) fn new_message(
 pub(crate) fn refresh(
     this: &mut AviaryApp,
     _: &Refresh,
-    _: &mut Window,
+    window: &mut Window,
     cx: &mut Context<AviaryApp>,
 ) {
     if !authenticated(this) {
         return;
     }
     match this.view {
-        MainView::Mail => this.send_refresh(),
+        // Refreshing what is on screen: with a search active that is the
+        // search, not the folder listing hidden behind it.
+        MainView::Mail => {
+            if !this.rerun_mail_search(window, cx) {
+                this.send_refresh();
+            }
+        }
         MainView::Calendar => this.calendar.force_reload(),
         MainView::Kanban => this.reload_kanban(),
         MainView::Contacts => this.reload_contacts(),

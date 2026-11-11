@@ -836,6 +836,10 @@ pub enum Evt {
         account_id: AccountId,
         query: String,
         messages: Vec<MessageHeader>,
+        /// Last word of this account for this submission: the provider
+        /// answered, or failed. The local phase is never final. Lets the UI
+        /// tell "still searching" from "found nothing".
+        finished: bool,
     },
     CalendarEvents {
         account_id: AccountId,

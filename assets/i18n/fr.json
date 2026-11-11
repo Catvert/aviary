@@ -974,6 +974,7 @@
   "bulk-clear": "Effacer la sélection",
   "messages-empty": "Aucun message.",
   "messages-empty-results": "Aucun résultat.",
+  "messages-searching": "Recherche en cours…",
   "messages-empty-flagged": "Aucun message marqué.",
   "messages-empty-flagged-results": "Aucun résultat marqué.",
   "messages-empty-tags": "Aucun message avec ces étiquettes.",

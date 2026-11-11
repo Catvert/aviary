@@ -970,6 +970,7 @@
   "bulk-clear": "Clear selection",
   "messages-empty": "No messages.",
   "messages-empty-results": "No results.",
+  "messages-searching": "Searching…",
   "messages-empty-flagged": "No flagged messages.",
   "messages-empty-flagged-results": "No flagged results.",
   "messages-empty-tags": "No messages with these tags.",

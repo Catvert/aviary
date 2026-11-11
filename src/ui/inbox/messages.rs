@@ -1083,7 +1083,15 @@ impl AviaryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        if std::mem::take(&mut self.search_input_reset_pending)
+            && self.mailbox.search.results.is_none()
+            && !self.search_input.read(cx).value().is_empty()
+        {
+            self.search_input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
         let searching = self.mailbox.search.results.is_some();
+        let search_in_flight = searching && self.mail_search_in_flight();
         let flagged_only = self.mailbox.show_flagged_only;
         let filtering_tags = !self.mailbox.tag_filters.is_empty();
         // Walking every loaded header to prune the selection costs two string
@@ -1170,7 +1178,19 @@ impl AviaryApp {
                         .child(tr!("status-loading-messages")),
                 )
             })
-            .when(entries.is_empty() && !initial_loading, |el| {
+            .when(entries.is_empty() && search_in_flight, |el| {
+                el.child(
+                    h_flex()
+                        .w_full()
+                        .p_4()
+                        .gap_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(Spinner::new().small())
+                        .child(tr!("messages-searching")),
+                )
+            })
+            .when(entries.is_empty() && !initial_loading && !search_in_flight, |el| {
                 el.child(
                     div()
                         .p_4()

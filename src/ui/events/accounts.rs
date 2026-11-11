@@ -80,6 +80,7 @@ impl AviaryApp {
                 if self.mailbox.search.results.is_none() {
                     self.request_mailbox_refresh();
                 } else {
+                    self.mailbox.search.pending.insert(account_id.clone());
                     self.send(Cmd::Search {
                         request_id: self.mailbox.search.request_id,
                         account_id: account_id.clone(),

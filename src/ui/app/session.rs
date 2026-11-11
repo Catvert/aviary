@@ -136,7 +136,6 @@ impl AviaryApp {
                                 .cloned()
                         })
                     }),
-                search_query: self.search_input.read(cx).value().to_string(),
                 search_history: self.mailbox.search.history.clone(),
                 search_scope: self.mailbox.search.scope,
                 search_sort: self.mailbox.search.sort,
