@@ -769,6 +769,11 @@ impl AviaryApp {
                 .await;
             if this
                 .update_in(cx, |app, _, cx| {
+                    let before = app.composes.len();
+                    app.composes.retain(ComposeHandle::is_live);
+                    if app.composes.len() != before {
+                        app.session_dirty = true;
+                    }
                     if app.session_dirty {
                         app.persist_session(cx);
                     }

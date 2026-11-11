@@ -576,11 +576,7 @@ fn write_mark_of_the_web(path: &Path) {
 /// symlink redirect the write. `create_new` on both the directory and the file
 /// makes each of those a hard error rather than a silent success.
 fn stage_temporary_attachment(filename: &str, bytes: &[u8]) -> Result<PathBuf> {
-    let root = std::env::temp_dir().join("aviary-attachments");
-    create_private_dir_all(&root)?;
-
-    let directory = root.join(unique_suffix());
-    create_private_dir(&directory)?;
+    let directory = private_attachment_directory()?;
 
     let path = directory.join(sanitize_filename(filename));
     let mut options = std::fs::OpenOptions::new();
@@ -601,17 +597,57 @@ fn stage_temporary_attachment(filename: &str, bytes: &[u8]) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Creates the shared parent, tolerating a directory we already own. It only
-/// ever holds per-open subdirectories, so a hostile pre-creation cannot expose
-/// anything by itself — but keeping it `0700` avoids leaking the names.
-fn create_private_dir_all(path: &Path) -> Result<()> {
-    match create_private_dir(path) {
-        Err(error) if path.is_dir() => {
-            log::debug!("reusing temporary attachment root: {error:#}");
-            Ok(())
-        }
-        result => result,
+/// A fresh `0700` directory for one open, under the shared
+/// `aviary-attachments` root when that root can be trusted and under a root of
+/// its own otherwise.
+///
+/// `/tmp` is shared: another local user can create `aviary-attachments` first,
+/// under their own name. A directory of theirs lets them list what we stage
+/// in it and — between our write and the system viewer opening the path —
+/// swap our random subdirectory for one of their making. The root is
+/// therefore used only if it is a real directory (not a symlink), ours, and
+/// closed to everyone else; "ours" is established without a platform call, by
+/// comparing its owner with that of the subdirectory we just created in it.
+fn private_attachment_directory() -> Result<PathBuf> {
+    let root = std::env::temp_dir().join("aviary-attachments");
+    if let Err(error) = create_private_dir(&root) {
+        log::debug!("reusing temporary attachment root: {error:#}");
     }
+    let trusted = std::fs::symlink_metadata(&root)
+        .ok()
+        .filter(|metadata| metadata.file_type().is_dir());
+    if let Some(root_metadata) = trusted {
+        let directory = root.join(unique_suffix());
+        if create_private_dir(&directory).is_ok() {
+            if attachment_root_is_ours(&root, &root_metadata, &directory) {
+                return Ok(directory);
+            }
+            let _ = std::fs::remove_dir(&directory);
+        }
+    }
+    log::warn!("temporary attachment root cannot be trusted; using a private one");
+    let directory = std::env::temp_dir().join(format!("aviary-attachments-{}", unique_suffix()));
+    create_private_dir(&directory)?;
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn attachment_root_is_ours(root: &Path, root_metadata: &std::fs::Metadata, created: &Path) -> bool {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let Ok(ours) = std::fs::symlink_metadata(created).map(|metadata| metadata.uid()) else {
+        return false;
+    };
+    if root_metadata.uid() != ours {
+        return false;
+    }
+    root_metadata.mode() & 0o077 == 0
+        || std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).is_ok()
+}
+
+#[cfg(not(unix))]
+fn attachment_root_is_ours(_: &Path, _: &std::fs::Metadata, _: &Path) -> bool {
+    // The per-user temporary directory is already private on Windows.
+    true
 }
 
 fn create_private_dir(path: &Path) -> Result<()> {

@@ -44,6 +44,16 @@ pub struct ComposeHandle {
     _preference_subscription: gpui_kit::Subscription,
 }
 
+impl ComposeHandle {
+    /// Whether the composer behind this handle still exists. A window closed
+    /// through its own title bar drops its view without telling anyone; the
+    /// handle — and the two subscriptions it holds — would otherwise stay
+    /// for the rest of the session.
+    pub(crate) fn is_live(&self) -> bool {
+        self.pending_view.is_some() || self.view.upgrade().is_some()
+    }
+}
+
 /// Composer embedded in the main window's reader pane, which is the default
 /// mode for a new message, like inline reply.
 pub struct InlineCompose {
@@ -493,6 +503,11 @@ pub struct ComposeView {
     /// Send requested before every attachment's bytes arrived, run once they
     /// have.
     send_after_attachments: bool,
+    /// A manual save (Ctrl+S) asked for while an autosave was in flight, for
+    /// the same reason: both would go out with the same `replace_id` — `None`
+    /// for a draft not saved yet — and create two drafts, only one of whose
+    /// ids the composer would remember.
+    save_after_draft_save: bool,
     autosave_pending_fingerprint: Option<u64>,
     last_autosave_fingerprint: u64,
     /// Fingerprint of the content the composer opened with, so replacing a
@@ -857,6 +872,7 @@ impl ComposeView {
             files_source: init.files_source,
             attachment_fetches: HashSet::new(),
             send_after_attachments: false,
+            save_after_draft_save: false,
             autosave_pending_fingerprint: None,
             last_autosave_fingerprint: 0,
             initial_fingerprint: 0,
@@ -1145,6 +1161,18 @@ impl ComposeView {
 
     /// Runs a send deferred by `trigger_send` once no draft save is in flight
     /// any more, now that `draft_id` names the draft the provider holds.
+    /// Runs the manual save that waited for an autosave, unless a send was
+    /// asked for meanwhile — the send supersedes it.
+    fn resume_save_after_draft_save(&mut self, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.save_after_draft_save)
+            || self.send_after_draft_save
+            || self.draft_save_in_flight
+        {
+            return;
+        }
+        self.trigger_save_draft(cx);
+    }
+
     fn resume_send_after_draft_save(&mut self, cx: &mut Context<Self>) {
         if !self.send_after_draft_save
             || self.draft_save_in_flight
@@ -1179,6 +1207,12 @@ impl ComposeView {
             self.error = Some(tr!("compose-attachments-downloading").to_string());
             self.request_missing_attachments();
             cx.notify();
+            return;
+        }
+        if self.draft_save_in_flight {
+            // Resumed by `resume_save_after_draft_save` with the id the
+            // autosave is about to report.
+            self.save_after_draft_save = true;
             return;
         }
         let (to, cc, bcc, subject) = self.payload(cx);
@@ -1442,6 +1476,7 @@ impl ComposeView {
             .autosave_pending_fingerprint
             .take()
             .unwrap_or_else(|| self.draft_fingerprint(cx));
+        self.resume_save_after_draft_save(cx);
         self.resume_send_after_draft_save(cx);
         cx.notify();
     }
@@ -1472,6 +1507,8 @@ impl ComposeView {
                 self.resume_send_after_draft_save(cx);
             } else {
                 self.error = Some(error);
+                // The save the user asked for by hand still deserves its try.
+                self.resume_save_after_draft_save(cx);
             }
         } else {
             // A manual save that failed was the user's explicit request:

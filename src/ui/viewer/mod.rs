@@ -931,7 +931,7 @@ impl AviaryApp {
         // a full-width row instead allocates the
         // available without using a persisted measurement or percentage.
         let mut content = v_flex().flex_1().min_w_0().gap_2();
-        if let Some(current) = split.current {
+        if let Some(current) = &split.current {
             let current = current.as_message(message, "current");
             content = content.child(body_fragment_element(
                 &current,
@@ -943,12 +943,12 @@ impl AviaryApp {
             ));
         }
 
-        for (index, quoted) in split.quoted.into_iter().enumerate() {
+        for (index, quoted) in split.quoted.iter().enumerate() {
             let key = format!("{}:quoted:{index}", message.header.id);
             let expanded = self.mailbox.expanded_quoted_sections.contains(&key);
             let toggle_key = key.clone();
             let source_id = message.header.id.clone();
-            let jump_target = self.quoted_message_target(message, &quoted, index);
+            let jump_target = self.quoted_message_target(message, quoted, index);
             let label = tr!("viewer-quoted-message", { number: index + 1 });
             let preview = quoted.preview.clone();
             let quoted_date = quoted.received().map(|date| util::short_date(&date));
@@ -1176,7 +1176,7 @@ impl AviaryApp {
         split
             .quoted
             .get(index)
-            .map(|part| part.as_message(source, &format!("quoted-{index}")))
+            .map(|part| (*part.as_message(source, &format!("quoted-{index}"))).clone())
     }
 
     /// Resolve an embedded quote to exactly one native message in the loaded

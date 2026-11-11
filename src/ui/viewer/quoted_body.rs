@@ -15,6 +15,7 @@ use scraper::{ElementRef, Html, Selector};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
@@ -29,6 +30,13 @@ pub(super) struct BodyPart {
     raw_html: Option<String>,
     pub(super) preview: String,
     headers: QuotedHeaders,
+    /// The `Message` view of this fragment, built on first use and shared
+    /// from then on, with the suffix it was built for. The reader asks for it
+    /// on every frame; rebuilding meant cloning the fragment's HTML and the
+    /// bytes of every inline image it references behind each frame of a hover
+    /// or scroll transition — the very churn `Rc<Message>` removed for the
+    /// selection itself.
+    rendered: std::cell::OnceCell<(String, Rc<Message>)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -44,7 +52,21 @@ impl BodyPart {
     /// Construit la vue `Message` minimale attendue par les renderers. Les
     /// attachments are not copied, and only CID images actually referenced by
     /// this fragment are cloned.
-    pub(super) fn as_message(&self, source: &Message, suffix: &str) -> Message {
+    pub(super) fn as_message(&self, source: &Message, suffix: &str) -> Rc<Message> {
+        let (built_for, message) = self.rendered.get_or_init(|| {
+            (
+                suffix.to_string(),
+                Rc::new(self.build_message(source, suffix)),
+            )
+        });
+        if built_for == suffix {
+            message.clone()
+        } else {
+            Rc::new(self.build_message(source, suffix))
+        }
+    }
+
+    fn build_message(&self, source: &Message, suffix: &str) -> Message {
         let mut header = source.header.clone();
         header.id = format!("{}:{suffix}", source.header.id);
         if let Some(from) = &self.headers.from {
@@ -149,7 +171,7 @@ const CACHE_CAPACITY: usize = 32;
 thread_local! {
     /// gpui renders on a single thread. A local cache avoids traversing the DOM
     /// and reconverting each fragment on every `cx.notify()`.
-    static SPLIT_CACHE: RefCell<VecDeque<(u64, Option<QuotedBody>)>> =
+    static SPLIT_CACHE: RefCell<VecDeque<(u64, Option<Rc<QuotedBody>>)>> =
         const { RefCell::new(VecDeque::new()) };
 }
 
@@ -157,7 +179,7 @@ thread_local! {
 ///
 /// `None` means that no sufficiently reliable boundary was found:
 /// l'appelant doit alors rendre le message original tel quel.
-pub(super) fn split_message(message: &Message) -> Option<QuotedBody> {
+pub(super) fn split_message(message: &Message) -> Option<Rc<QuotedBody>> {
     let key = split_cache_key(message);
     if let Some(cached) = SPLIT_CACHE.with(|cache| {
         cache
@@ -169,7 +191,7 @@ pub(super) fn split_message(message: &Message) -> Option<QuotedBody> {
         return cached;
     }
 
-    let split = split_message_uncached(message);
+    let split = split_message_uncached(message).map(Rc::new);
     SPLIT_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if cache.len() >= CACHE_CAPACITY {
@@ -327,6 +349,7 @@ fn html_part(html: &str, source: &Message) -> BodyPart {
         headers: extract_quoted_headers(&body),
         body,
         raw_html: Some(html.to_string()),
+        rendered: std::cell::OnceCell::new(),
     }
 }
 
@@ -355,6 +378,7 @@ fn parts_from_markdown(
         headers: extract_quoted_headers(&body),
         raw_html: synthesize_html.then(|| markdown_to_html(&body)),
         body,
+        rendered: std::cell::OnceCell::new(),
     };
     (current.map(make), quoted.into_iter().map(make).collect())
 }
@@ -1322,7 +1346,7 @@ mod tests {
             </div></body></html>"#;
         let split = split_message(&message("", Some(html))).expect("conversation detected");
 
-        let current = split.current.expect("current message");
+        let current = split.current.as_ref().expect("current message");
         assert!(current.body.contains("Réponse actuelle distincte."));
         assert!(!current.body.contains("Message précédent distinct."));
         assert!(!current
@@ -1405,7 +1429,7 @@ mod tests {
         }];
 
         let split = split_message(&source).expect("conversation detected");
-        let current = split.current.expect("current message");
+        let current = split.current.as_ref().expect("current message");
         let rendered = current.as_message(&source, "0");
         let rendered_html = rendered.raw_body.as_deref().expect("current HTML");
 
@@ -1565,7 +1589,10 @@ mod tests {
             <div>Corps cité</div>"#;
         let source = message("", Some(html));
         let split = split_message(&source).expect("conversation detected");
-        let mut header = split.quoted[0].as_message(&source, "quoted-0").header;
+        let mut header = split.quoted[0]
+            .as_message(&source, "quoted-0")
+            .header
+            .clone();
 
         // Même mail, même date : seuls les préfixes de réponse diffèrent.
         header.subject = "TR : RE: Message historique".into();

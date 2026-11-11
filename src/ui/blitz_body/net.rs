@@ -214,17 +214,7 @@ impl NetProvider for MailNet {
                 let deliveries = self.deliveries.clone();
                 pending.remote.fetch_add(1, Ordering::SeqCst);
                 runtime.spawn(async move {
-                    let fetched = async {
-                        http_client()
-                            .get(url.clone())
-                            .send()
-                            .await
-                            .ok()?
-                            .bytes()
-                            .await
-                            .ok()
-                    }
-                    .await;
+                    let fetched = fetch_capped(url.as_str()).await;
                     push_delivery(
                         &deliveries,
                         Delivery {
@@ -314,6 +304,36 @@ fn normalize_cid(value: &str) -> String {
         .trim_start_matches('<')
         .trim_end_matches('>')
         .to_string()
+}
+
+/// Largest remote resource the reader downloads. A mail picks its own image
+/// URLs and can list dozens of them, all fetched at once: unbounded, fifty
+/// `<img>` pointed at a fast stream were hundreds of megabytes in memory
+/// before a single one failed to decode.
+const MAX_REMOTE_RESOURCE_BYTES: usize = 20 * 1024 * 1024;
+
+/// Fetches a remote resource, giving up as soon as it exceeds the cap — on
+/// the advertised length when there is one, while streaming otherwise.
+async fn fetch_capped(url: &str) -> Option<Bytes> {
+    use futures::StreamExt as _;
+
+    let response = http_client().get(url).send().await.ok()?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_REMOTE_RESOURCE_BYTES as u64)
+    {
+        return None;
+    }
+    let mut body: Vec<u8> = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if body.len() + chunk.len() > MAX_REMOTE_RESOURCE_BYTES {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some(Bytes::from(body))
 }
 
 #[cfg(test)]
