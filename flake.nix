@@ -67,7 +67,7 @@
       {
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "aviary";
-          version = "0.2.10";
+          version = "0.3.0";
           src = self;
 
           # `patches/` pins three crates through [patch.crates-io], so the lock
