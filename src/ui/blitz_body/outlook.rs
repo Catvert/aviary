@@ -122,14 +122,14 @@ fn repair_table_layout(html: &str) -> String {
         if let Some((_, value)) = table
             .attrs
             .iter_mut()
-            .find(|(name, _)| name.local.as_ref() == "style")
+            .find(|(name, _)| &*name.local == "style")
         {
             value.clear();
             value.push_slice(&style);
         } else if let Some((height_name, _)) = table
             .attrs
             .iter()
-            .find(|(name, _)| name.local.as_ref() == "height")
+            .find(|(name, _)| &*name.local == "height")
         {
             let mut style_name = height_name.clone();
             style_name.local = "style".into();
@@ -148,7 +148,7 @@ fn repair_table_layout(html: &str) -> String {
         let Some((_, value)) = cell
             .attrs
             .iter_mut()
-            .find(|(name, _)| name.local.as_ref() == "style")
+            .find(|(name, _)| &*name.local == "style")
         else {
             continue;
         };
@@ -367,7 +367,7 @@ fn repair_block_image_dimensions(html: &str) -> String {
         let (_, value) = image
             .attrs
             .iter_mut()
-            .find(|(name, _)| name.local.as_ref() == "style")
+            .find(|(name, _)| &*name.local == "style")
             .expect("block image style still present");
         value.clear();
         value.push_slice(&style);
@@ -432,7 +432,7 @@ fn repair_extreme_calc_widths(html: &str) -> String {
         let (_, value) = element
             .attrs
             .iter_mut()
-            .find(|(name, _)| name.local.as_ref() == "style")
+            .find(|(name, _)| &*name.local == "style")
             .expect("style still present");
         value.clear();
         value.push_slice(&style);
@@ -505,7 +505,7 @@ fn repair_inline_block_table_cells(html: &str) -> String {
         let (_, value) = cell
             .attrs
             .iter_mut()
-            .find(|(name, _)| name.local.as_ref() == "style")
+            .find(|(name, _)| &*name.local == "style")
             .expect("table cell style still present");
         value.clear();
         value.push_slice(&style);

@@ -16,8 +16,8 @@ use gpui_kit::component::{
     v_flex, v_virtual_list, ActiveTheme, IconName, Sizable, StyledExt, VirtualListScrollHandle,
 };
 use gpui_kit::{
-    div, point, prelude::*, px, AvailableSpace, Context, Hsla, Pixels, Point, ScrollHandle,
-    ScrollWheelEvent, Window,
+    div, point, prelude::*, px, AvailableSpace, Context, Hsla, Pixels, Point, ScrollEvent,
+    ScrollHandle, Window,
 };
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -122,11 +122,7 @@ fn normalized_tag_name(name: &str) -> String {
     name.trim().to_lowercase()
 }
 
-fn scroll_board_by_shift_wheel(
-    board: &ScrollHandle,
-    event: &ScrollWheelEvent,
-    window: &Window,
-) -> bool {
+fn scroll_board_by_shift_wheel(board: &ScrollHandle, event: &ScrollEvent, window: &Window) -> bool {
     if !event.modifiers.shift {
         return false;
     }
@@ -147,7 +143,7 @@ fn scroll_board_by_shift_wheel(
 fn transfer_shift_wheel_to_board(
     column: &ScrollHandle,
     board: &ScrollHandle,
-    event: &ScrollWheelEvent,
+    event: &ScrollEvent,
     window: &Window,
 ) -> bool {
     if !event.modifiers.shift {
@@ -652,9 +648,9 @@ impl AviaryApp {
         // Do not let gpui translate a plain vertical wheel into horizontal
         // movement. Shift + wheel is handled explicitly below and in columns.
         board.style().restrict_scroll_to_axis = Some(true);
-        board = board.on_scroll_wheel(cx.listener({
+        board = board.on_scroll(cx.listener({
             let horizontal_scroll = horizontal_scroll.clone();
-            move |_, event: &ScrollWheelEvent, window, cx| {
+            move |_, event: &ScrollEvent, window, cx| {
                 if scroll_board_by_shift_wheel(&horizontal_scroll, event, window) {
                     cx.stop_propagation();
                     cx.notify();
@@ -1089,11 +1085,11 @@ impl AviaryApp {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .on_scroll_wheel(cx.listener({
+                    .on_scroll(cx.listener({
                         let handle = scroll_handle.base_handle().clone();
                         let key = key.clone();
                         let horizontal_scroll = horizontal_scroll.clone();
-                        move |this, event: &ScrollWheelEvent, window, cx| {
+                        move |this, event: &ScrollEvent, window, cx| {
                             if transfer_shift_wheel_to_board(
                                 &handle,
                                 &horizontal_scroll,

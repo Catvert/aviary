@@ -41,6 +41,7 @@ use self::history::Snapshot;
 use self::proofreading::{
     hunspell_is_suppressed, language_issue_at, LanguageToolResult, SpellingResult,
 };
+use crate::ui::shortcuts::key_binding;
 
 use self::clipboard::standalone_image_cid;
 use super::{
@@ -62,8 +63,8 @@ use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
     actions, prelude::*, px, App, Entity, EntityId, FocusHandle, Focusable as _, FontStyle,
-    FontWeight, HighlightStyle, KeyBinding, Pixels, ScrollDelta, ScrollHandle, ScrollWheelEvent,
-    StrikethroughStyle, Subscription, UnderlineStyle, Window,
+    FontWeight, HighlightStyle, Pixels, ScrollDelta, ScrollEvent, ScrollHandle, StrikethroughStyle,
+    Subscription, UnderlineStyle, Window,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
@@ -154,24 +155,25 @@ fn initial_image_width(bytes: &[u8]) -> Option<u32> {
 /// Call once at startup (see `ui::run`).
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("secondary-c", CopySelection, Some(CONTEXT)),
-        KeyBinding::new("secondary-x", CutSelection, Some(CONTEXT)),
-        KeyBinding::new("secondary-a", SelectAllBlocks, Some(CONTEXT)),
-        KeyBinding::new("backspace", DeleteSelection, Some(CONTEXT)),
-        KeyBinding::new("delete", DeleteSelection, Some(CONTEXT)),
-        KeyBinding::new("escape", CancelSelection, Some(CONTEXT)),
-        KeyBinding::new("up", SelectPrevBlock, Some(CONTEXT)),
-        KeyBinding::new("down", SelectNextBlock, Some(CONTEXT)),
-        KeyBinding::new("enter", FocusSelectedBlock, Some(CONTEXT)),
-        KeyBinding::new("secondary-z", UndoBlocks, Some(CONTEXT)),
-        KeyBinding::new("secondary-shift-z", RedoBlocks, Some(CONTEXT)),
-        KeyBinding::new("ctrl-y", RedoBlocks, Some(CONTEXT)),
-        KeyBinding::new("secondary-k", InsertLink, Some(CONTEXT)),
+        key_binding(cx, "secondary-c", CopySelection, Some(CONTEXT)),
+        key_binding(cx, "secondary-x", CutSelection, Some(CONTEXT)),
+        key_binding(cx, "secondary-a", SelectAllBlocks, Some(CONTEXT)),
+        key_binding(cx, "backspace", DeleteSelection, Some(CONTEXT)),
+        key_binding(cx, "delete", DeleteSelection, Some(CONTEXT)),
+        key_binding(cx, "escape", CancelSelection, Some(CONTEXT)),
+        key_binding(cx, "up", SelectPrevBlock, Some(CONTEXT)),
+        key_binding(cx, "down", SelectNextBlock, Some(CONTEXT)),
+        key_binding(cx, "enter", FocusSelectedBlock, Some(CONTEXT)),
+        key_binding(cx, "secondary-z", UndoBlocks, Some(CONTEXT)),
+        key_binding(cx, "secondary-shift-z", RedoBlocks, Some(CONTEXT)),
+        key_binding(cx, "ctrl-y", RedoBlocks, Some(CONTEXT)),
+        key_binding(cx, "secondary-k", InsertLink, Some(CONTEXT)),
         // Also bound inside a focused input: inserting a link is something you
         // do while typing, not while a whole block is selected. The action is
         // unknown to `BlockInput`, so it bubbles up to the editor container
         // without a capture.
-        KeyBinding::new(
+        key_binding(
+            cx,
             "secondary-k",
             InsertLink,
             Some(super::components::block_input::INPUT_CONTEXT),
@@ -829,7 +831,7 @@ impl BlockEditor {
         self
     }
 
-    fn adjust_zoom(&mut self, event: &ScrollWheelEvent, window: &Window) -> bool {
+    fn adjust_zoom(&mut self, event: &ScrollEvent, window: &Window) -> bool {
         if !event.modifiers.control && !event.modifiers.platform {
             return false;
         }

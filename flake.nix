@@ -70,7 +70,7 @@
           version = "0.2.10";
           src = self;
 
-          # `patches/` pins four crates through [patch.crates-io], so the lock
+          # `patches/` pins three crates through [patch.crates-io], so the lock
           # file references paths inside the tree rather than registry hashes.
           cargoLock = {
             lockFile = ./Cargo.lock;

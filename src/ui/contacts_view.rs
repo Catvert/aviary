@@ -10,9 +10,7 @@ use gpui_kit::component::{
     input::Input,
     v_flex, v_virtual_list, ActiveTheme, IconName, Sizable, StyledExt,
 };
-use gpui_kit::{
-    div, prelude::*, px, AvailableSpace, Context, ScrollStrategy, ScrollWheelEvent, Window,
-};
+use gpui_kit::{div, prelude::*, px, AvailableSpace, Context, ScrollEvent, ScrollStrategy, Window};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -110,9 +108,9 @@ impl AviaryApp {
                 .id("contacts-scroll")
                 .flex_1()
                 .min_h_0()
-                .on_scroll_wheel(cx.listener({
+                .on_scroll(cx.listener({
                     let handle = base_handle;
-                    move |this, event: &ScrollWheelEvent, window, cx| {
+                    move |this, event: &ScrollEvent, window, cx| {
                         if this
                             .scrolls
                             .contacts

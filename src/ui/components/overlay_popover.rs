@@ -9,7 +9,7 @@ use super::super::motion::{ease_out_cubic, WheelScrollMotion};
 use gpui_kit::component::{v_flex, ActiveTheme};
 use gpui_kit::{
     deferred, point, prelude::*, px, Animation, AnimationExt as _, AnyElement, App, ElementId,
-    IntoElement, Pixels, RenderOnce, ScrollHandle, ScrollWheelEvent, Window,
+    IntoElement, Pixels, RenderOnce, ScrollEvent, ScrollHandle, Window,
 };
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -144,7 +144,7 @@ impl RenderOnce for OverlayPopover {
             .max_h(self.max_height)
             .when(self.constrain_width, |panel| panel.max_w_full())
             .overflow_hidden()
-            .on_scroll_wheel(move |event: &ScrollWheelEvent, window, _cx| {
+            .on_scroll(move |event: &ScrollEvent, window, _cx| {
                 if wheel_scroll
                     .0
                     .borrow_mut()

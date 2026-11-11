@@ -20,7 +20,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     div, point, prelude::*, px, Context, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
-    Point, ScrollWheelEvent, Window,
+    Point, ScrollEvent, Window,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -1634,9 +1634,9 @@ impl AviaryApp {
                 .id("calendar-grid-scroll")
                 .flex_1()
                 .min_h_0()
-                .on_scroll_wheel(cx.listener({
+                .on_scroll(cx.listener({
                     let handle = base_handle;
-                    move |this, event: &ScrollWheelEvent, window, cx| {
+                    move |this, event: &ScrollEvent, window, cx| {
                         if this
                             .scrolls
                             .calendar

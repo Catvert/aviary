@@ -10,6 +10,8 @@
 //! [`tile_image`]).
 
 use super::*;
+use blitz_dom::UserAgentStylesheet;
+use std::sync::LazyLock;
 
 /// Typography context specific to Blitz.
 ///
@@ -228,18 +230,24 @@ pub(super) fn render_doc(
     ));
 
     let theme_css = job.theme.css();
-    let mut ua_stylesheets = vec![blitz_dom::DEFAULT_CSS.to_string(), MAIL_UA_CSS.to_string()];
+    // The static sheets are parsed once and shared: documents given the same
+    // user-agent sheets in the same order also share Stylo's cached cascade.
+    static MAIL_SHEET: LazyLock<UserAgentStylesheet> =
+        LazyLock::new(|| UserAgentStylesheet::parse(MAIL_UA_CSS));
+    static FRAGMENT_SHEET: LazyLock<UserAgentStylesheet> =
+        LazyLock::new(|| UserAgentStylesheet::parse(FRAGMENT_UA_CSS));
+    let mut ua_stylesheets = vec![UserAgentStylesheet::default_sheet(), MAIL_SHEET.clone()];
     if job.intrinsic_height {
-        ua_stylesheets.push(FRAGMENT_UA_CSS.to_string());
+        ua_stylesheets.push(FRAGMENT_SHEET.clone());
     }
     if job.force_uniform_font_family || job.force_uniform_font_size {
-        ua_stylesheets.push(uniform_typography_ua_css(
+        ua_stylesheets.push(UserAgentStylesheet::parse(&uniform_typography_ua_css(
             job.force_uniform_font_family,
             job.force_uniform_font_size,
             job.uniform_font_size,
-        ));
+        )));
     }
-    ua_stylesheets.push(theme_css);
+    ua_stylesheets.push(UserAgentStylesheet::parse(&theme_css));
     let themed_html = adapt_dark_colors(&job.html, job.theme);
     let html = disambiguate_html5_doctype(&themed_html);
     let document_started = Instant::now();
@@ -250,9 +258,9 @@ pub(super) fn render_doc(
             base_url: Some(MAIL_DOCUMENT_BASE_URL.to_string()),
             net_provider: Some(provider.clone()),
             navigation_provider: Some(nav),
-            // Replaces the default value (DEFAULT_CSS only): the fixes stylesheet
-            // must come later to win at equal specificity.
-            ua_stylesheets: Some(ua_stylesheets),
+            // Replaces the default value (the default sheet only): the fixes
+            // stylesheet must come later to win at equal specificity.
+            ua_stylesheets,
             viewport: Some(Viewport::new(
                 width_phys,
                 viewport_h_phys,

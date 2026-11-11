@@ -156,7 +156,7 @@ fn collect_image_nodes(doc: &HtmlDocument, roots: &[NodeId]) -> Vec<NodeId> {
         };
         if node
             .element_data()
-            .is_some_and(|element| element.name.local.as_ref() == "img")
+            .is_some_and(|element| &*element.name.local == "img")
         {
             images.push(id);
         }

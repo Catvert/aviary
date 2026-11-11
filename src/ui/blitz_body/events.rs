@@ -396,11 +396,11 @@ pub(super) fn safe_link_from_node(
     loop {
         let node = doc.as_ref().get_node(node_id)?;
         if let Some(element) = node.element_data() {
-            if element.name.local.as_ref() == "a" {
+            if &*element.name.local == "a" {
                 let href = element
                     .attrs()
                     .iter()
-                    .find(|attribute| attribute.name.local.as_ref() == "href")?
+                    .find(|attribute| &*attribute.name.local == "href")?
                     .value
                     .as_ref();
                 return safe_link(href);

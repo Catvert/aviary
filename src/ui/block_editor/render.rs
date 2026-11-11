@@ -365,7 +365,7 @@ impl BlockEditor {
                     .w_full()
                     .min_w_0()
                     .when(image_overflows, |element| {
-                        element.on_scroll_wheel(move |event, window, cx| {
+                        element.on_scroll(move |event, window, cx| {
                             if event.modifiers.shift {
                                 let delta = event.delta.pixel_delta(window.line_height());
                                 // Some platforms already expose Shift+wheel
@@ -781,8 +781,8 @@ impl Render for BlockEditor {
             .on_action(cx.listener(Self::on_ignore_spelling))
             .on_action(cx.listener(Self::on_add_spelling_to_dictionary))
             .on_action(cx.listener(Self::on_ignore_proofreading_rule))
-            .on_scroll_wheel(
-                cx.listener(|this, event: &gpui_kit::ScrollWheelEvent, window, cx| {
+            .on_scroll(
+                cx.listener(|this, event: &gpui_kit::ScrollEvent, window, cx| {
                     if !event.modifiers.control && !event.modifiers.platform {
                         return;
                     }

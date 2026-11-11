@@ -21,7 +21,7 @@
 //! ```
 
 use gpui_kit::{
-    point, px, Context, Hsla, Pixels, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+    point, px, Context, Hsla, Pixels, ScrollDelta, ScrollEvent, ScrollHandle,
     StatefulInteractiveElement, Window,
 };
 use std::collections::{HashMap, HashSet};
@@ -272,7 +272,7 @@ impl WheelScrollMotion {
     pub fn on_wheel(
         &mut self,
         handle: &ScrollHandle,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         window: &Window,
     ) -> bool {
         let delta = match event.delta {

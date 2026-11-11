@@ -13,63 +13,37 @@ license files are retained where the published package provides them.
 
 | Crate | Base | Upstream commit | Modified files | Purpose |
 | --- | --- | --- | --- | --- |
-| `blitz-dom` | `0.3.0-beta.2` | `67edf2061121382b3e43af19977fc3472aa7e069` | `src/layout/construct.rs`, `src/layout/table.rs` | Preserve non-breaking spaces and correct email table tracks; backport used collapsed-border widths. |
-| `blitz-paint` | `0.3.0-beta.2` | `67edf2061121382b3e43af19977fc3472aa7e069` | `src/render/border.rs`, `src/text.rs` | Do not paint `border-style: none` collapsed borders and correct faux-italic skew. |
+| `blitz-dom` | `0.3.0-beta.4` | `92b11f1bd8ab7975411328b0406a95a09445b4e7` | `src/layout/table.rs` | Collapse the redundant `colspan` of tables holding one cell per row into a single column. |
+| `blitz-paint` | `0.3.0-beta.4` | `92b11f1bd8ab7975411328b0406a95a09445b4e7` | `src/text.rs` | Correct faux-italic skew. |
 | `cosmic-text` | `0.19.0` | `c24886c2471e5606587c46090cd25dbbf209186b` | `src/font/fallback/unix.rs` | Prefer the embedded color emoji font before monochrome text fallbacks on Unix. |
-| `stylo_derive` | `0.20.0` | `67faaab3ff7aa66780ec1d0f51ca47e177b812d3` | `to_css.rs` | Avoid ambiguous `?` conversions when GPUI enables `log`'s Serde key-value support. |
 
 All other source files should remain identical to the corresponding published
 crate.
 
-## Blitz beta.2 audit (2026-09-06)
+## Blitz beta.4 audit (2026-11-11)
 
-The published beta.2 sources were tested without local Blitz patches before
-reapplying fixes. The retained differences are:
+The published beta.4 sources (Stylo 0.22, Parley 0.12, Taffy 0.15, AnyRender
+0.14, Vello CPU 0.3, Fontique 0.12, html5ever 0.40) were built and tested
+without any local Blitz patch before reapplying fixes. `cargo test blitz_body`
+then failed on exactly one test, which decided what stays:
 
-- `construct.rs`: preserve NBSP runs. Parley 0.11.1 still trims Unicode
-  whitespace at span boundaries; the indentation regression test fails without
-  this fix.
-- `table.rs`: retain the maximum column count across rows and collapse redundant
-  single-cell `colspan` tracks. The wrapped-row regression test still fails
-  without the column fix.
-- **Removed** the forced `PerformLayout` pass during vertical intrinsic sizing.
-  Both nested Outlook rows and wrapped text rows now size correctly with
-  beta.2/Taffy 0.14 once the column fix is applied.
-- Collapsed borders: replace the old paint-only workaround with the upstream
-  [#791 fix](https://github.com/DioxusLabs/blitz/commit/2bc63f4b3f), including
-  zero used widths in table spacing. This is already on `main` but was merged
-  after beta.2, so the backport remains necessary until the next release.
-- `text.rs`: retain the negative faux-italic skew. The published painter still
-  supplies a positive skew, while Glifo 0.2 applies the glyph transform before
-  its font-space Y flip. The local unit test checks the resulting direction.
+| Former patch | Outcome on beta.4 |
+| --- | --- |
+| `construct.rs` NBSP runs | **Dropped.** Parley 0.12 no longer trims U+00A0 at span boundaries; `nonbreaking_spaces_preserve_outlook_style_indentation` passes unpatched. |
+| `table.rs` column count across rows | **Dropped.** Upstream (`ColumnCursor.num_columns`). |
+| `table.rs` collapsed-border used widths | **Dropped.** Upstream (#791). |
+| `border.rs` `none`/`hidden` collapsed borders | **Dropped.** Upstream (#791), so `border.rs` is unmodified. |
+| `table.rs` single-cell `colspan` collapse | **Kept**, re-applied by hand onto `ColumnCursor`: `wrapped_text_rows_expand_before_the_next_row` fails without it ("a redundant colspan created an empty text column"). The cursor now records whether any row places more than one cell or any cell spans rows; the collapse is also skipped for tables declaring `<col>` elements, which the rewritten column code keeps in step with the track list. |
+| `text.rs` faux-italic skew direction | **Kept.** beta.4 still supplies `Affine::skew(+tan, 0)` and Glifo 0.4 still composes the glyph transform with `Affine::FLIP_Y` (`glifo/src/glyph.rs`). Only the unit test inside the patched crate covers it (`cargo test -p blitz-paint synthetic_italic`). Worth reporting upstream. |
+| `stylo_derive` explicit `match` | **Dropped, directory removed.** The ambiguity came from gpui enabling `log/kv_serde`; gpui-pre 0.3.12 no longer does, and Stylo 0.22's derive compiles unmodified in Aviary's graph. If a future gpui re-enables it, the symptom is E0282/E0283 inside `derive(ToCss)` output. |
+| cosmic-text emoji fallback order | Unchanged: still 0.19.0 upstream. |
 
-Stylo's `ToCss` error-propagation patch is rebased onto 0.20.0, retaining its
-upstream change for function variants without fields. All four Blitz crates,
-AnyRender 0.13, its Vello CPU backend 0.17, Vello CPU 0.1 and Fontique 0.11 are
-aligned in the root manifest. Incremental layout is now enabled by default at
-runtime (`DocumentConfig::incremental`), replacing the removed Cargo feature.
-
-## Upstream audit (2026-09-28)
-
-No patched crate has a newer crates.io release Aviary could move to: Blitz is
-still at `0.3.0-beta.2` (pinning Stylo 0.20, Parley 0.11 and Taffy 0.14) and
-cosmic-text at `0.19.0`, so every patch stays on its base above. Upstream
-default branches were checked to know what the next releases will let us drop:
-
-| Patch | Upstream `main` | At the next release |
-| --- | --- | --- |
-| `construct.rs` NBSP runs | Blitz still calls plain `push_text`, but the root cause is fixed in Parley ([linebender/parley#734](https://github.com/linebender/parley/pull/734)), which Blitz `main` already uses (git rev after #914). | Probably droppable: run the indentation regression test without it first. |
-| `table.rs` column count across rows | Present ([DioxusLabs/blitz#852](https://github.com/DioxusLabs/blitz/pull/852), `ColumnCursor.num_columns`). | Drop. |
-| `table.rs` collapsed-border widths | Present (#791). | Drop. |
-| `table.rs` single-cell `colspan` collapse | Absent; `main` rewrote the column code around `ColumnCursor`. | Keep, re-apply by hand onto the new cursor. |
-| `border.rs` `none`/`hidden` collapsed borders | Present (#791, identical check). | Drop. |
-| `text.rs` faux-italic skew direction | Absent; still `Affine::skew(+tan, 0)`. No upstream issue yet. | Keep; worth reporting upstream. |
-| cosmic-text emoji fallback order | Absent; `main` identical to 0.19.0. Open [pop-os/cosmic-text#524](https://github.com/pop-os/cosmic-text/pull/524) covers it. | Keep until #524 ships. |
-| `stylo_derive` explicit `match` | Absent and never will be: the ambiguity only exists in Aviary's graph (gpui's `log/kv_serde`). | Keep, rebased onto Stylo **0.21**, which Blitz `main` now uses. |
-
-The next Blitz release will therefore also move Stylo to 0.21 and Parley and
-Taffy past their current releases; the Fontique pin in the root manifest has to
-follow Parley's.
+API changes absorbed in `src/ui/blitz_body/`: `DocumentConfig::ua_stylesheets`
+is a `Vec<UserAgentStylesheet>` of parsed sheets (the static ones are parsed
+once and shared), and `string_cache` atoms gained a second `AsRef` impl, so
+name comparisons deref (`&*name.local == "a"`) instead of calling `as_ref()`.
+`StyleThreading` defaults to `Sequential`, which is what one actor thread per
+document needs — do not switch it to `Parallel`.
 
 ## Updating a patched crate
 

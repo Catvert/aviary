@@ -12,7 +12,7 @@ use style::{
     data::ElementData as StyloElementData,
     shared_lock::StylesheetGuards,
     values::{
-        computed::{Content, ContentItem, Display, Float, TextTransform},
+        computed::{Content, ContentItem, Display, Float},
         specified::box_::{DisplayInside, DisplayOutside},
     },
 };
@@ -20,7 +20,9 @@ use thin_vec::ThinVec;
 
 use crate::{
     BaseDocument, ElementData, Node, NodeData,
-    layout::damage::{CONSTRUCT_BOX, CONSTRUCT_DESCENDENT, CONSTRUCT_FC},
+    layout::damage::{
+        CONSTRUCT_BOX, CONSTRUCT_DESCENDENT, CONSTRUCT_FC, sort_layout_children_by_order,
+    },
     node::{
         ListItemLayout, ListItemLayoutPosition, Marker, NodeFlags, NodeKind, SpecialElementData,
         TextBrush, TextInputData, TextLayout,
@@ -32,61 +34,12 @@ use crate::{
 use super::{
     damage::ALL_DAMAGE,
     list::{BULLET_FONT_FAMILY, collect_list_item_children},
-    replaced::is_replaced_element,
+    replaced::is_inline_box_element,
     table::build_table_context,
+    text_transform::{CaseTransform, TextTransformer},
 };
 
 const DUMMY_NAME: QualName = qual_name!("div", html);
-
-/// Push text while keeping non-breaking spaces significant in collapsing
-/// whitespace contexts.
-///
-/// Parley's collapsing builder trims Unicode whitespace at span boundaries,
-/// which includes U+00A0 even though CSS does not treat a non-breaking space
-/// as collapsible whitespace. Email clients commonly use leading `&nbsp;`
-/// runs for indentation, so commit just those runs in preserve mode while
-/// leaving ordinary source whitespace under the element's CSS mode.
-fn push_text_preserving_nbsp(
-    builder: &mut TreeBuilder<TextBrush>,
-    text: &str,
-    collapse_mode: WhiteSpaceCollapse,
-) {
-    if !matches!(collapse_mode, WhiteSpaceCollapse::Collapse) || !text.contains('\u{a0}') {
-        builder.push_text(text);
-        return;
-    }
-
-    let mut ordinary_start = 0;
-    let mut chars = text.char_indices().peekable();
-    while let Some((start, character)) = chars.next() {
-        if character != '\u{a0}' {
-            continue;
-        }
-
-        if ordinary_start < start {
-            builder.push_text(&text[ordinary_start..start]);
-        }
-
-        let mut end = start + character.len_utf8();
-        while let Some(&(next, '\u{a0}')) = chars.peek() {
-            chars.next();
-            end = next + '\u{a0}'.len_utf8();
-        }
-
-        // Opening a no-op span commits the preceding ordinary text using its
-        // collapsing mode, then lets this NBSP run be committed independently.
-        builder.push_style_modification_span(&[]);
-        builder.set_white_space_mode(WhiteSpaceCollapse::Preserve);
-        builder.push_text(&text[start..end]);
-        builder.pop_style_span();
-        builder.set_white_space_mode(collapse_mode);
-        ordinary_start = end;
-    }
-
-    if ordinary_start < text.len() {
-        builder.push_text(&text[ordinary_start..]);
-    }
-}
 
 #[derive(Clone)]
 pub(crate) struct ConstructionTask {
@@ -141,7 +94,7 @@ impl LayoutChildren {
         fn block_is_only_whitespace(doc: &BaseDocument, node_id: NodeId) -> bool {
             for child_id in doc.nodes[node_id].children.iter().copied() {
                 let child = &doc.nodes[child_id];
-                if !child.is_whitespace_node() {
+                if !child.is_collapsible_whitespace_node() {
                     return false;
                 }
             }
@@ -312,7 +265,7 @@ fn push_hoisted_children_and_pseudos(
     let children = std::mem::take(&mut doc.nodes[container_node_id].children);
     for child_id in children.iter().copied() {
         let child = &doc.nodes[child_id];
-        if child.data.kind() == NodeKind::Comment || child.is_whitespace_node() {
+        if child.data.kind() == NodeKind::Comment || child.is_collapsible_whitespace_node() {
             continue;
         }
         push_hoisted_child(doc, child_id, out, wrap);
@@ -333,15 +286,6 @@ fn push_non_whitespace_children_and_pseudos(layout_children: &mut ThinVec<NodeId
     }));
     if let Some(after) = node.after() {
         layout_children.push(after);
-    }
-}
-
-/// Convert a relative line height to an absolute one
-fn resolve_line_height(line_height: parley::LineHeight, font_size: f32) -> f32 {
-    match line_height {
-        parley::LineHeight::FontSizeRelative(relative) => relative * font_size,
-        parley::LineHeight::Absolute(absolute) => absolute,
-        parley::LineHeight::MetricsRelative(relative) => relative * font_size, //unreachable!(),
     }
 }
 
@@ -407,9 +351,7 @@ fn classify_flow_children(
         // Unwraps on Text and SVG nodes
         let style = child.primary_styles();
         let style = style.as_ref();
-        let display = style
-            .map(|s| s.clone_display())
-            .unwrap_or(Display::inline());
+        let display = child.display_style().unwrap_or(Display::inline());
         if matches!(display.inside(), DisplayInside::Contents) {
             // Transparent for box generation: the contents node casts
             // no vote itself — its children decide.
@@ -424,8 +366,8 @@ fn classify_flow_children(
                 .unwrap_or(PositionProperty::Static);
             let float = style.map(|s| s.clone_float()).unwrap_or(Float::None);
 
-            // Ignore nodes that are entirely whitespace
-            if child.is_whitespace_node() {
+            // Ignore nodes whose whitespace is entirely collapsed away
+            if child.is_collapsible_whitespace_node() {
                 continue;
             }
 
@@ -476,6 +418,11 @@ fn collect_layout_children_with_wrap(
     out: &mut LayoutChildren,
     wrap: Option<WrapContext>,
 ) {
+    // Record the `display` the box is being constructed with
+    if let Some(display) = doc.nodes[container_node_id].display_style() {
+        *doc.nodes[container_node_id].display_constructed_as_mut() = display;
+    }
+
     // Reset construction flags
     // TODO: make incremental and only remove this if the element is no longer an inline root
     doc.nodes[container_node_id]
@@ -512,14 +459,7 @@ fn collect_layout_children_with_wrap(
 
         #[cfg(feature = "svg")]
         if matches!(tag_name, "svg") {
-            let mut outer_html = doc.get_node(container_node_id).unwrap().outer_html();
-
-            // HACK: usvg fails to parse SVGs that don't have the SVG xmlns set. So inject it
-            // if the generated source doesn't have it.
-            if !outer_html.contains("xmlns") {
-                outer_html =
-                    outer_html.replace("<svg", "<svg xmlns=\"http://www.w3.org/2000/svg\"");
-            }
+            let outer_html = doc.get_node(container_node_id).unwrap().svg_source();
 
             // Remove contruction damage from subtree
             doc.iter_subtree_mut(container_node_id, |id: NodeId, doc: &mut BaseDocument| {
@@ -559,7 +499,7 @@ fn collect_layout_children_with_wrap(
                 el.attr_parsed(local_name!("reversed")).unwrap_or(false),
             )
         } else {
-            (1, false)
+            (0, false)
         };
         collect_list_item_children(doc, &mut index, reversed, container_node_id);
     }
@@ -607,19 +547,22 @@ fn collect_layout_children_with_wrap(
                 });
 
             if !has_text_node_or_contents {
-                return push_non_whitespace_children_and_pseudos(
+                push_non_whitespace_children_and_pseudos(
                     &mut out.children,
                     &doc.nodes[container_node_id],
                 );
+            } else {
+                collect_complex_layout_children(
+                    doc,
+                    container_node_id,
+                    out,
+                    true,
+                    text_item_needs_wrap,
+                );
             }
 
-            collect_complex_layout_children(
-                doc,
-                container_node_id,
-                out,
-                true,
-                text_item_needs_wrap,
-            );
+            // Flex/grid items are laid out in order-modified document order.
+            sort_layout_children_by_order(&doc.nodes, &mut out.children);
         }
 
         DisplayInside::Table => {
@@ -709,18 +652,22 @@ fn collect_layout_children_with_wrap(
 }
 
 /// Extract the text generated by a pseudo-element's `content` property
-/// (only string content items are currently supported).
-fn pe_content_text(style: &style::properties::ComputedValues) -> Option<&str> {
+/// (only string content items are currently supported; other item types
+/// are skipped).
+fn pe_content_text(style: &style::properties::ComputedValues) -> Option<String> {
     match &style.get_counters().content {
         Content::Items(item_data) => {
             let items = &item_data.items[0..item_data.alt_start];
-            match items.first() {
-                Some(ContentItem::String(owned_str)) => Some(owned_str),
-                _ => {
-                    // TODO: other types of content
-                    None
+            let mut text = String::new();
+            let mut has_string = false;
+            for item in items {
+                // TODO: other types of content
+                if let ContentItem::String(owned_str) = item {
+                    text.push_str(owned_str);
+                    has_string = true;
                 }
             }
+            has_string.then_some(text)
         }
         _ => None,
     }
@@ -734,7 +681,7 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
         let after_node_id = node.after();
 
         // Note: yes these are kinda backwards
-        let style_data = node.stylo_element_data_opt().and_then(|s| s.get());
+        let style_data = node.try_stylo_element_data().and_then(|s| s.get());
         let before_style = style_data
             .as_ref()
             .and_then(|d| d.styles.pseudos.as_array()[1].clone());
@@ -773,7 +720,6 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
             }
 
             if let Some(text) = pe_content_text(pe_style) {
-                let text = text.to_string();
                 let text_node_id = doc.create_text_node(&text);
                 doc.nodes[text_node_id].parent = Some(new_node_id);
                 doc.nodes[new_node_id].children.push(text_node_id);
@@ -803,7 +749,7 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
             // the style-pointer comparison below, as the pseudo-element's style may
             // already have been updated by `sync_pseudo_element_styles` during the
             // style traversal without the text having been updated.
-            let new_text = pe_content_text(&pe_style).map(str::to_string);
+            let new_text = pe_content_text(&pe_style);
             let existing_text_node_id = doc.nodes[pe_node_id]
                 .children
                 .first()
@@ -834,7 +780,7 @@ fn flush_pseudo_elements(doc: &mut BaseDocument, node_id: NodeId) {
             }
 
             let mut node_styles = doc.nodes[pe_node_id]
-                .stylo_element_data_opt_mut()
+                .try_stylo_element_data_mut()
                 .and_then(|s| s.get_mut());
             let node_styles = &mut node_styles.as_mut().unwrap();
             node_styles.damage.insert(ALL_DAMAGE);
@@ -913,12 +859,25 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
         .as_ref()
         .map(|s| stylo_to_parley::style(node.id, s))
         .unwrap_or_default();
+    let alignment = node
+        .primary_styles()
+        .map(|s| stylo_to_parley::text_align(s.clone_text_align()))
+        .unwrap_or(parley::layout::Alignment::Start);
+    let base_direction = node
+        .primary_styles()
+        .map(|s| stylo_to_parley::base_direction(s.clone_direction(), s.clone_unicode_bidi()))
+        .unwrap_or(parley::BaseDirection::Auto);
 
+    let initial_text = if is_multiline {
+        node.text_content()
+    } else {
+        node.attr(local_name!("value")).unwrap_or("").to_string()
+    };
     let element = &mut node.data.downcast_element_mut().unwrap();
     if !matches!(element.special_data, SpecialElementData::TextInput(_)) {
         let mut text_input_data = TextInputData::new(is_multiline);
         let editor = &mut text_input_data.editor;
-        editor.set_text(element.attr(local_name!("value")).unwrap_or(""));
+        editor.set_text(&initial_text);
         element.special_data = SpecialElementData::TextInput(text_input_data);
     }
 
@@ -932,9 +891,25 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
 
     let styles = editor.edit_styles();
     styles.retain(|_| false);
+    styles.insert(StyleProperty::FontFamily(parley_style.font_family));
     styles.insert(StyleProperty::FontSize(parley_style.font_size));
+    styles.insert(StyleProperty::FontWidth(parley_style.font_width));
+    styles.insert(StyleProperty::FontStyle(parley_style.font_style));
+    styles.insert(StyleProperty::FontWeight(parley_style.font_weight));
+    styles.insert(StyleProperty::FontVariations(parley_style.font_variations));
+    styles.insert(StyleProperty::FontFeatures(parley_style.font_features));
     styles.insert(StyleProperty::LineHeight(parley_style.line_height));
+    styles.insert(StyleProperty::WordSpacing(parley_style.word_spacing));
+    styles.insert(StyleProperty::LetterSpacing(parley_style.letter_spacing));
+    styles.insert(StyleProperty::WordBreak(parley_style.word_break));
+    styles.insert(StyleProperty::OverflowWrap(parley_style.overflow_wrap));
+    styles.insert(StyleProperty::TextWrapMode(parley_style.text_wrap_mode));
+    styles.insert(StyleProperty::WhiteSpaceCollapse(
+        parley_style.white_space_collapse,
+    ));
     styles.insert(StyleProperty::Brush(parley_style.brush));
+    editor.set_alignment(alignment);
+    editor.set_base_direction(base_direction);
 
     editor.refresh_layout(&mut doc.font_ctx.lock().unwrap(), &mut doc.layout_ctx);
 }
@@ -1026,11 +1001,7 @@ pub(crate) fn find_inline_layout_embedded_boxes(
                     (DisplayOutside::Inline, DisplayInside::Flow) => {
                         let tag_name = &element_data.name.local;
 
-                        if is_replaced_element(tag_name)
-                            || *tag_name == local_name!("input")
-                            || *tag_name == local_name!("textarea")
-                            || *tag_name == local_name!("button")
-                        {
+                        if is_inline_box_element(tag_name) {
                             layout_children.push(node_id);
                         } else if *tag_name == local_name!("br") {
                             node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
@@ -1079,25 +1050,24 @@ pub(crate) fn build_inline_layout_into(
     let parley_style = root_node_style
         .as_ref()
         .map(|s| stylo_to_parley::style(inline_context_root_node_id, s))
-        .unwrap_or_default();
-
-    let root_line_height = resolve_line_height(parley_style.line_height, parley_style.font_size);
+        .unwrap_or_else(|| parley::TextStyle {
+            white_space_collapse: WhiteSpaceCollapse::Collapse,
+            ..Default::default()
+        });
 
     // Create a parley tree builder
     let mut builder = layout_ctx.tree_builder(font_ctx, scale, true, &parley_style);
-
-    // Set whitespace collapsing mode
-    let collapse_mode = root_node_style
-        .as_ref()
-        .map(|s| s.get_inherited_text().white_space_collapse)
-        .map(stylo_to_parley::white_space_collapse)
-        .unwrap_or(WhiteSpaceCollapse::Collapse);
-    builder.set_white_space_mode(collapse_mode);
+    if let Some(style) = root_node_style.as_deref() {
+        builder.set_base_direction(stylo_to_parley::base_direction(
+            style.clone_direction(),
+            style.clone_unicode_bidi(),
+        ));
+    }
 
     let text_transform = root_node_style
-        .as_ref()
-        .map(|s| s.clone_text_transform() & TextTransform::CASE_TRANSFORMS)
-        .unwrap_or(TextTransform::NONE);
+        .as_deref()
+        .map(|s| CaseTransform::from_style(s))
+        .unwrap_or(CaseTransform::NONE);
 
     // Render position-inside list items
     if let Some(ListItemLayout {
@@ -1122,38 +1092,35 @@ pub(crate) fn build_inline_layout_into(
             Marker::String(str) => builder.push_text(str),
         }
     };
+    // The marker is a separate box, so words in the content don't continue from it.
+    let mut text_transformer = TextTransformer::default();
+    text_transformer.word_break(&builder);
 
     if let Some(before_id) = root_node.before() {
         build_inline_layout_recursive(
             &mut builder,
+            &mut text_transformer,
             nodes,
-            inline_context_root_node_id,
             before_id,
-            collapse_mode,
-            text_transform,
-            root_line_height,
+            &text_transform,
         );
     }
     for child_id in root_node.children.iter().copied() {
         build_inline_layout_recursive(
             &mut builder,
+            &mut text_transformer,
             nodes,
-            inline_context_root_node_id,
             child_id,
-            collapse_mode,
-            text_transform,
-            root_line_height,
+            &text_transform,
         );
     }
     if let Some(after_id) = root_node.after() {
         build_inline_layout_recursive(
             &mut builder,
+            &mut text_transformer,
             nodes,
-            inline_context_root_node_id,
             after_id,
-            collapse_mode,
-            text_transform,
-            root_line_height,
+            &text_transform,
         );
     }
 
@@ -1162,31 +1129,19 @@ pub(crate) fn build_inline_layout_into(
 
     fn build_inline_layout_recursive(
         builder: &mut TreeBuilder<TextBrush>,
+        text_transformer: &mut TextTransformer,
         nodes: &crate::NodeTree,
-        parent_id: NodeId,
         node_id: NodeId,
-        collapse_mode: WhiteSpaceCollapse,
-        parent_text_transform: TextTransform,
-        root_line_height: f32,
+        parent_text_transform: &CaseTransform,
     ) {
         let node = &nodes[node_id];
-
-        // Set layout_parent for node.
-        node.layout_parent.set(Some(parent_id));
 
         let style = node.primary_styles();
         let style = style.as_ref();
 
-        // Set whitespace collapsing mode
-        let collapse_mode = style
-            .map(|s| s.clone_white_space_collapse())
-            .map(stylo_to_parley::white_space_collapse)
-            .unwrap_or(collapse_mode);
-        builder.set_white_space_mode(collapse_mode);
-
         let text_transform = style
-            .map(|s| s.clone_text_transform() & TextTransform::CASE_TRANSFORMS)
-            .unwrap_or(TextTransform::NONE);
+            .map(|s| CaseTransform::from_style(s))
+            .unwrap_or(CaseTransform::NONE);
 
         match &node.data {
             NodeData::Element(element_data) | NodeData::AnonymousBlock(element_data) => {
@@ -1215,27 +1170,42 @@ pub(crate) fn build_inline_layout_into(
                         // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                     }
                     (DisplayOutside::None, DisplayInside::Contents) => {
+                        let whitespace = style.map(|s| {
+                            [
+                                parley::StyleProperty::WhiteSpaceCollapse(
+                                    stylo_to_parley::white_space_collapse(
+                                        s.clone_white_space_collapse(),
+                                    ),
+                                ),
+                                parley::StyleProperty::TextWrapMode(
+                                    stylo_to_parley::text_wrap_mode(s.clone_text_wrap_mode()),
+                                ),
+                            ]
+                        });
+                        builder.push_style_modification_span(
+                            whitespace
+                                .as_ref()
+                                .map_or(&[][..], |styles| styles.as_slice()),
+                        );
                         for child_id in node.children.iter().copied() {
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                             build_inline_layout_recursive(
                                 builder,
+                                text_transformer,
                                 nodes,
-                                parent_id,
                                 child_id,
-                                collapse_mode,
-                                text_transform,
-                                root_line_height,
+                                &text_transform,
                             );
                         }
+                        builder.pop_style_span();
                     }
                     (DisplayOutside::Inline, DisplayInside::Flow) => {
                         let tag_name = &element_data.name.local;
 
-                        if is_replaced_element(tag_name)
-                            || *tag_name == local_name!("input")
-                            || *tag_name == local_name!("textarea")
-                            || *tag_name == local_name!("button")
-                        {
+                        if is_inline_box_element(tag_name) {
+                            if box_kind == InlineBoxKind::InFlow {
+                                text_transformer.word_break(builder);
+                            }
                             builder.push_inline_box(InlineBox {
                                 id: node_id.as_u64(),
                                 kind: box_kind,
@@ -1244,70 +1214,61 @@ pub(crate) fn build_inline_layout_into(
                                 // Width and height are set during layout
                                 width: 0.0,
                                 height: 0.0,
+                                baseline: None,
+                                vertical_align: node
+                                    .primary_styles()
+                                    .map(|s| stylo_to_parley::vertical_align(&s))
+                                    .unwrap_or_default(),
                             });
                         } else if *tag_name == local_name!("br") {
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                             // TODO: update span id for br spans
-                            builder.push_style_modification_span(&[]);
-                            builder.set_white_space_mode(WhiteSpaceCollapse::Preserve);
+                            builder.push_style_modification_span(&[
+                                parley::StyleProperty::WhiteSpaceCollapse(
+                                    WhiteSpaceCollapse::Preserve,
+                                ),
+                            ]);
                             builder.push_text("\n");
                             builder.pop_style_span();
-                            builder.set_white_space_mode(collapse_mode);
+                            text_transformer.word_break(builder);
                         } else {
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
-                            let mut style = node
+                            let style = node
                                 .primary_styles()
                                 .map(|s| stylo_to_parley::style(node.id, &s))
-                                .unwrap_or_default();
-
-                            // dbg!(&style);
-
-                            let font_size = style.font_size;
-
-                            // Floor the line-height of the span by the line-height of the inline context
-                            // See https://www.w3.org/TR/CSS21/visudet.html#line-height
-                            style.line_height = parley::LineHeight::Absolute(
-                                resolve_line_height(style.line_height, font_size)
-                                    .max(root_line_height),
-                            );
-
-                            // dbg!(node_id);
-                            // dbg!(&style);
+                                .unwrap_or_else(|| parley::TextStyle {
+                                    white_space_collapse: WhiteSpaceCollapse::Collapse,
+                                    ..Default::default()
+                                });
 
                             builder.push_style_span(style);
 
                             if let Some(before_id) = node.before() {
                                 build_inline_layout_recursive(
                                     builder,
+                                    text_transformer,
                                     nodes,
-                                    node_id,
                                     before_id,
-                                    collapse_mode,
-                                    text_transform,
-                                    root_line_height,
+                                    &text_transform,
                                 );
                             }
 
                             for child_id in node.children.iter().copied() {
                                 build_inline_layout_recursive(
                                     builder,
+                                    text_transformer,
                                     nodes,
-                                    node_id,
                                     child_id,
-                                    collapse_mode,
-                                    text_transform,
-                                    root_line_height,
+                                    &text_transform,
                                 );
                             }
                             if let Some(after_id) = node.after() {
                                 build_inline_layout_recursive(
                                     builder,
+                                    text_transformer,
                                     nodes,
-                                    node_id,
                                     after_id,
-                                    collapse_mode,
-                                    text_transform,
-                                    root_line_height,
+                                    &text_transform,
                                 );
                             }
 
@@ -1316,6 +1277,9 @@ pub(crate) fn build_inline_layout_into(
                     }
                     // Inline box
                     (_, _) => {
+                        if box_kind == InlineBoxKind::InFlow {
+                            text_transformer.word_break(builder);
+                        }
                         builder.push_inline_box(InlineBox {
                             id: node_id.as_u64(),
                             kind: box_kind,
@@ -1324,6 +1288,11 @@ pub(crate) fn build_inline_layout_into(
                             // Width and height are set during layout
                             width: 0.0,
                             height: 0.0,
+                            baseline: None,
+                            vertical_align: node
+                                .primary_styles()
+                                .map(|s| stylo_to_parley::vertical_align(&s))
+                                .unwrap_or_default(),
                         });
                     }
                 };
@@ -1332,26 +1301,9 @@ pub(crate) fn build_inline_layout_into(
                 // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                 // dbg!(&data.content);
 
-                // TODO: optimize case transforms to be non-allocating
-                match parent_text_transform {
-                    TextTransform::UPPERCASE => {
-                        push_text_preserving_nbsp(
-                            builder,
-                            &data.content.to_uppercase(),
-                            collapse_mode,
-                        );
-                    }
-                    TextTransform::LOWERCASE => {
-                        push_text_preserving_nbsp(
-                            builder,
-                            &data.content.to_lowercase(),
-                            collapse_mode,
-                        );
-                    }
-                    _ => {
-                        push_text_preserving_nbsp(builder, &data.content, collapse_mode);
-                    }
-                }
+                let text =
+                    text_transformer.transform(&data.content, parent_text_transform, builder);
+                builder.push_text(text);
             }
             NodeData::Comment { .. } => {
                 // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);

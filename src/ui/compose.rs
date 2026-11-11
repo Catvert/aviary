@@ -1967,16 +1967,16 @@ impl ComposeView {
                 .when(!panel, |element| element.size_full())
                 .overflow_y_scroll()
                 .track_scroll(&editor_scroll_handle)
-                .on_scroll_wheel(cx.listener(
-                    move |this, event: &gpui_kit::ScrollWheelEvent, window, cx| {
+                .on_scroll(
+                    cx.listener(move |this, event: &gpui_kit::ScrollEvent, window, cx| {
                         if this
                             .editor_scroll_motion
                             .on_wheel(&scroll_handle, event, window)
                         {
                             cx.notify();
                         }
-                    },
-                ))
+                    }),
+                )
                 .p_3()
                 .child(preview)
                 .into_any_element()
@@ -2001,16 +2001,16 @@ impl ComposeView {
                         .p_1()
                 })
                 .track_scroll(&editor_scroll_handle)
-                .on_scroll_wheel(cx.listener(
-                    move |this, event: &gpui_kit::ScrollWheelEvent, window, cx| {
+                .on_scroll(
+                    cx.listener(move |this, event: &gpui_kit::ScrollEvent, window, cx| {
                         if this
                             .editor_scroll_motion
                             .on_wheel(&scroll_handle, event, window)
                         {
                             cx.notify();
                         }
-                    },
-                ))
+                    }),
+                )
                 .child(self.editor.clone())
                 .into_any_element()
         };

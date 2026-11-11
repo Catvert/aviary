@@ -15,7 +15,7 @@ use gpui_kit::component::{
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     v_flex, v_virtual_list, ActiveTheme, IconName, Sizable, StyledExt, WindowExt,
 };
-use gpui_kit::{div, prelude::*, px, App, Context, ScrollWheelEvent, Window};
+use gpui_kit::{div, prelude::*, px, App, Context, ScrollEvent, Window};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
@@ -453,9 +453,9 @@ impl AviaryApp {
                     .id("folders-scroll")
                     .flex_1()
                     .min_h_0()
-                    .on_scroll_wheel(cx.listener({
+                    .on_scroll(cx.listener({
                         let handle = scroll_handle;
-                        move |this, event: &ScrollWheelEvent, window, cx| {
+                        move |this, event: &ScrollEvent, window, cx| {
                             if this.scrolls.folders.motion.on_wheel(&handle, event, window) {
                                 cx.notify();
                             }

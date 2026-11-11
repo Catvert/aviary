@@ -62,7 +62,7 @@ pub(crate) fn draw_inline_backgrounds<'a>(
                 continue;
             }
 
-            let metrics = glyph_run.run().metrics();
+            let metrics = glyph_run.run().font_metrics();
             let x = glyph_run.offset() as f64;
             let w = glyph_run.advance() as f64;
             let baseline = glyph_run.baseline() as f64;
@@ -142,6 +142,8 @@ struct ResolvedDecoration {
     underline_offset: Option<LengthPercentage>,
     /// Whether `text-underline-position: under` is in effect.
     underline_under: bool,
+    /// Whether `text-underline-position: from-font` is in effect.
+    underline_from_font: bool,
     /// `text-decoration-inset`. Resolved per run.
     inset: GenericTextDecorationInset<LengthPercentage>,
 }
@@ -197,6 +199,9 @@ fn resolve_decoration_entry(doc: &BaseDocument, node_id: NodeId) -> DecorationSt
             underline_under: itext
                 .text_underline_position
                 .contains(TextUnderlinePosition::UNDER),
+            underline_from_font: itext
+                .text_underline_position
+                .contains(TextUnderlinePosition::FROM_FONT),
             inset: text.text_decoration_inset.clone(),
         }
     });
@@ -214,7 +219,8 @@ fn resolve_decoration_entry(doc: &BaseDocument, node_id: NodeId) -> DecorationSt
 /// decorating box (its own text), falling back to the first run it covers.
 #[derive(Clone)]
 struct DecorationRunGeometry {
-    /// The line's baseline (shared by every run on the line).
+    /// The baseline the decoration is positioned from (the run's own, `vertical-align`
+    /// shifted, baseline).
     baseline: f32,
     ascent: f32,
     descent: f32,
@@ -399,15 +405,29 @@ fn flush_line_decorations(
     scale: f64,
     deco_boxes: &[LineDecoration],
     win_ascent_ratios: &mut WinAscentCache,
+    inline_root_id: NodeId,
+    line_baseline: f32,
 ) {
     // Draw innermost boxes first so ancestors' decorations paint on top, matching the
     // per-run drawing order this replaced (`stack.iter().rev()`).
     for acc in deco_boxes.iter().rev() {
         let deco = &acc.deco;
         // Prefer the decorating box's own font; fall back to the first run it covers.
-        let Some(geom) = acc.own.as_ref().or(acc.first.as_ref()) else {
-            continue;
+        let geom = match (&acc.own, &acc.first) {
+            (Some(own), _) => own.clone(),
+            (None, Some(first)) => {
+                let mut geom = first.clone();
+                // A descendant run's baseline may be shifted by `vertical-align`, but the
+                // decoration is positioned from the decorating box's own baseline. For the
+                // inline root that is the line's baseline.
+                if acc.node_id == inline_root_id {
+                    geom.baseline = line_baseline;
+                }
+                geom
+            }
+            (None, None) => continue,
         };
+        let geom = &geom;
         let width = acc.max_x - acc.min_x;
         if width <= 0.0 {
             continue;
@@ -451,8 +471,12 @@ fn flush_line_decorations(
             // (below descenders) rather than at the font's suggested position near the
             // alphabetic baseline. We anchor the top of the line at the descent so it clears
             // descending glyphs like "gqy".
+            // An explicit offset under `auto` is taken from the alphabetic
+            // baseline, as CSS and Chrome have it, not from the auto gap.
             let base_offset = if deco.underline_under {
                 -geom.descent
+            } else if deco.underline_offset.is_some() && !deco.underline_from_font {
+                0.0
             } else {
                 geom.underline_offset
             };
@@ -584,7 +608,7 @@ pub(crate) fn stroke_text<'a>(
                 let run = glyph_run.run();
                 let font = run.font();
                 let font_size = run.font_size();
-                let metrics = run.metrics();
+                let metrics = run.font_metrics();
                 let style = glyph_run.style();
                 let synthesis = run.synthesis();
                 let glyph_xform = synthesis
@@ -628,11 +652,12 @@ pub(crate) fn stroke_text<'a>(
                     kurbo::Vec2::default()
                 };
 
+                let normalized_coords: &[i16] = bytemuck::cast_slice(run.normalized_coords());
                 scene.draw_glyphs(
                     font,
                     font_size,
                     !FONT_EMBOLDEN_ENABLED, // hint
-                    run.normalized_coords(),
+                    normalized_coords,
                     embolden,
                     Fill::NonZero,
                     &anyrender::Paint::from(text_color),
@@ -698,7 +723,15 @@ pub(crate) fn stroke_text<'a>(
             }
         }
 
-        flush_line_decorations(scene, transform, scale, deco_boxes, win_ascent_ratios);
+        flush_line_decorations(
+            scene,
+            transform,
+            scale,
+            deco_boxes,
+            win_ascent_ratios,
+            inline_root_id,
+            line.metrics().baseline,
+        );
     }
 }
 

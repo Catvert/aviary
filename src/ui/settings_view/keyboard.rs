@@ -101,7 +101,8 @@ impl AviaryApp {
                 );
             }
             for stroke in binding.split_whitespace() {
-                let stroke = Keystroke::parse(stroke).expect("valid built-in shortcut");
+                let stroke = Keystroke::parse_with_os(stroke, cx.platform_info().os)
+                    .expect("valid built-in shortcut");
                 keys = keys.child(Kbd::new(stroke));
             }
         }

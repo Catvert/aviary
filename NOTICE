@@ -28,7 +28,6 @@ Vendored crates (patches/)
 
   blitz-dom, blitz-paint  — Apache-2.0 OR MIT
   cosmic-text             — Apache-2.0 OR MIT (LICENSE-APACHE, LICENSE-MIT)
-  stylo_derive            — MPL-2.0
 
 Aviary links against gpui (Apache-2.0), gpui-component (Apache-2.0) and the
 Stylo/Blitz rendering stack (MPL-2.0 and Apache-2.0 OR MIT). The MPL-2.0

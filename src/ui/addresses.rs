@@ -8,6 +8,7 @@
 
 use crate::model::Contact;
 use crate::runtime::RecipientUsage;
+use crate::ui::shortcuts::key_binding;
 use gpui_kit::component::{
     avatar::Avatar,
     button::{Button, ButtonVariants},
@@ -16,8 +17,8 @@ use gpui_kit::component::{
     v_flex, ActiveTheme, Sizable, StyledExt,
 };
 use gpui_kit::{
-    actions, div, prelude::*, px, App, Context, ElementId, Entity, Focusable as _, KeyBinding,
-    MouseButton, Pixels, WeakEntity, Window,
+    actions, div, prelude::*, px, App, Context, ElementId, Entity, Focusable as _, MouseButton,
+    Pixels, WeakEntity, Window,
 };
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -35,7 +36,8 @@ actions!(recipient_input, [ShowAddressCompletions]);
 
 /// Registers the explicit contact-picker shortcut once at application startup.
 pub(crate) fn init(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new(
+    cx.bind_keys([key_binding(
+        cx,
         "ctrl-space",
         ShowAddressCompletions,
         Some("RecipientInput > Input"),

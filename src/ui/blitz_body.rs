@@ -107,7 +107,7 @@ use gpui_kit::component::{
 use gpui_kit::{
     anchored, canvas, deferred, div, img, point, prelude::*, px, Anchor, App, CursorStyle,
     EntityId, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, Pixels, Point, RenderImage, ScrollDelta, ScrollWheelEvent, WeakEntity, Window,
+    ObjectFit, Pixels, Point, RenderImage, ScrollDelta, ScrollEvent, WeakEntity, Window,
 };
 use peniko::{kurbo::Rect, Fill};
 use smallvec::SmallVec;

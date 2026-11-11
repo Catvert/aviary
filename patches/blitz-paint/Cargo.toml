@@ -11,9 +11,9 @@
 
 [package]
 edition = "2024"
-rust-version = "1.89.0"
+rust-version = "1.91.0"
 name = "blitz-paint"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.4"
 build = false
 autolib = false
 autobins = false
@@ -47,19 +47,22 @@ name = "blitz_paint"
 path = "src/lib.rs"
 
 [dependencies.anyrender]
-version = "0.13.0"
+version = "0.14.0"
 
 [dependencies.anyrender_svg]
-version = "0.14.0"
+version = "0.15.0"
 optional = true
 
 [dependencies.blitz-dom]
-version = "=0.3.0-beta.2"
+version = "=0.3.0-beta.4"
 default-features = false
 
 [dependencies.blitz-traits]
-version = "=0.3.0-beta.2"
+version = "=0.3.0-beta.4"
 default-features = false
+
+[dependencies.bytemuck]
+version = "1"
 
 [dependencies.color]
 version = "0.3"
@@ -71,8 +74,11 @@ version = "0.22"
 version = "0.13.1"
 
 [dependencies.parley]
-version = "0.11.1"
-features = ["std"]
+version = "0.12"
+features = [
+    "std",
+    "bytemuck",
+]
 default-features = false
 
 [dependencies.peniko]
@@ -87,14 +93,15 @@ default-features = false
 version = "1"
 
 [dependencies.style]
-version = "0.20.0"
+version = "0.22.0"
 package = "stylo"
 
 [dependencies.taffy]
-version = "0.14.0"
+version = "0.15"
 features = [
     "std",
     "flexbox",
+    "flexbox_balance",
     "grid",
     "block_layout",
     "content_size",

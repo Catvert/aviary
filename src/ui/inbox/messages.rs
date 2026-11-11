@@ -22,7 +22,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     div, prelude::*, px, relative, rems, App, AvailableSpace, Context, FontWeight, HighlightStyle,
-    MouseButton, ScrollStrategy, ScrollWheelEvent, StyledText, Window,
+    MouseButton, ScrollEvent, ScrollStrategy, StyledText, Window,
 };
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1938,7 +1938,7 @@ impl AviaryApp {
                             cx.notify();
                             return;
                         }
-                        if bulk_selectable && modifiers.secondary() {
+                        if bulk_selectable && modifiers.secondary(cx) {
                             let checked = !this.mailbox.selected_messages.contains(&reference);
                             this.toggle_message_selection(reference.clone(), checked);
                             cx.notify();
@@ -2891,9 +2891,9 @@ impl AviaryApp {
             .id("messages-scroll")
             .flex_1()
             .min_h_0()
-            .on_scroll_wheel(cx.listener({
+            .on_scroll(cx.listener({
                 let handle = base_handle;
-                move |this, event: &ScrollWheelEvent, window, cx| {
+                move |this, event: &ScrollEvent, window, cx| {
                     // Pixel deltas (touchpads) do not use the
                     // wheel tween, but still need a fresh render
                     // when the floating shortcut crosses its

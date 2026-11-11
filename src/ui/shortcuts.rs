@@ -10,7 +10,10 @@ use super::app::AviaryApp;
 use super::compose::ComposeInit;
 use super::state::{AuthState, MainView};
 use crate::model::{MessageHeader, MessageRef};
-use gpui_kit::{actions, App, Context, KeyBinding, KeyContext, Window};
+use gpui_kit::{
+    actions, Action, App, Context, KeyBinding, KeyBindingContextPredicate, KeyContext, Window,
+};
+use std::rc::Rc;
 
 actions!(
     aviary_shortcuts,
@@ -55,73 +58,92 @@ const VIM_SAFE: &str = "Aviary && vim_mode == enabled && !Input && !BlockEditor 
 
 /// Registers the keymap once. Context predicates decide at
 /// each frame whether Vim commands are actually available.
+/// Builds one of Aviary's built-in bindings. **Every binding goes through
+/// here, never through `KeyBinding::new`**: since gpui 0.3.12 `new` parses
+/// with explicit modifiers only and panics on the `secondary-` alias, which
+/// needs the host OS to mean Cmd on macOS and Ctrl elsewhere. `load` resolves
+/// it against the running platform.
+pub(crate) fn key_binding<A: Action>(
+    cx: &App,
+    keystrokes: &'static str,
+    action: A,
+    context: Option<&str>,
+) -> KeyBinding {
+    let context = context.map(|context| {
+        Rc::new(KeyBindingContextPredicate::parse(context).expect("valid built-in key context"))
+    });
+    KeyBinding::load(keystrokes, Box::new(action), context, false, None, cx)
+        .expect("valid built-in shortcut")
+}
+
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
         // Global commands, independent of Vim mode.
-        KeyBinding::new("secondary-n", NewMessage, Some(SAFE)),
-        KeyBinding::new("f5", Refresh, Some(SAFE)),
-        KeyBinding::new("secondary-f", FocusSearch, Some(SAFE)),
-        KeyBinding::new("secondary-1", ShowMail, Some(SAFE)),
-        KeyBinding::new("secondary-2", ShowCalendar, Some(SAFE)),
-        KeyBinding::new("secondary-3", ShowKanban, Some(SAFE)),
-        KeyBinding::new("secondary-4", ShowContacts, Some(SAFE)),
-        KeyBinding::new("secondary-5", ShowSettings, Some(SAFE)),
-        KeyBinding::new("secondary-,", ShowSettings, Some(SAFE)),
-        KeyBinding::new("secondary-w", CloseCurrent, Some(SAFE)),
-        KeyBinding::new("secondary-r", ReplyMessage, Some(MAIL_SAFE)),
-        KeyBinding::new("secondary-shift-r", ReplyAll, Some(MAIL_SAFE)),
-        KeyBinding::new("secondary-shift-f", ForwardMessage, Some(MAIL_SAFE)),
-        KeyBinding::new("secondary-p", PrintMessage, Some(MAIL_SAFE)),
-        KeyBinding::new("up", PreviousItem, Some(LIST_SAFE)),
-        KeyBinding::new("down", NextItem, Some(LIST_SAFE)),
-        KeyBinding::new("home", FirstItem, Some(LIST_SAFE)),
-        KeyBinding::new("end", LastItem, Some(LIST_SAFE)),
-        KeyBinding::new("secondary-a", SelectAllMessages, Some(LIST_SAFE)),
-        KeyBinding::new("escape", ClearMessageSelection, Some(LIST_SAFE)),
+        key_binding(cx, "secondary-n", NewMessage, Some(SAFE)),
+        key_binding(cx, "f5", Refresh, Some(SAFE)),
+        key_binding(cx, "secondary-f", FocusSearch, Some(SAFE)),
+        key_binding(cx, "secondary-1", ShowMail, Some(SAFE)),
+        key_binding(cx, "secondary-2", ShowCalendar, Some(SAFE)),
+        key_binding(cx, "secondary-3", ShowKanban, Some(SAFE)),
+        key_binding(cx, "secondary-4", ShowContacts, Some(SAFE)),
+        key_binding(cx, "secondary-5", ShowSettings, Some(SAFE)),
+        key_binding(cx, "secondary-,", ShowSettings, Some(SAFE)),
+        key_binding(cx, "secondary-w", CloseCurrent, Some(SAFE)),
+        key_binding(cx, "secondary-r", ReplyMessage, Some(MAIL_SAFE)),
+        key_binding(cx, "secondary-shift-r", ReplyAll, Some(MAIL_SAFE)),
+        key_binding(cx, "secondary-shift-f", ForwardMessage, Some(MAIL_SAFE)),
+        key_binding(cx, "secondary-p", PrintMessage, Some(MAIL_SAFE)),
+        key_binding(cx, "up", PreviousItem, Some(LIST_SAFE)),
+        key_binding(cx, "down", NextItem, Some(LIST_SAFE)),
+        key_binding(cx, "home", FirstItem, Some(LIST_SAFE)),
+        key_binding(cx, "end", LastItem, Some(LIST_SAFE)),
+        key_binding(cx, "secondary-a", SelectAllMessages, Some(LIST_SAFE)),
+        key_binding(cx, "escape", ClearMessageSelection, Some(LIST_SAFE)),
         // Archiving removes the message from the current view like deleting
         // does, so it follows `delete`'s context rather than the reply/print
         // one: never while a text field or the block editor has focus.
-        KeyBinding::new("secondary-e", ArchiveMessage, Some(LIST_SAFE)),
-        KeyBinding::new("delete", DeleteMessage, Some(LIST_SAFE)),
+        key_binding(cx, "secondary-e", ArchiveMessage, Some(LIST_SAFE)),
+        key_binding(cx, "delete", DeleteMessage, Some(LIST_SAFE)),
         // Escape returns control to command mode after a keyboard search.
         // These rules, added after the Input rule, return control to command
         // mode from Mail and Contacts search fields.
-        KeyBinding::new("escape", BlurSearch, Some("MailSearch > Input")),
-        KeyBinding::new("escape", BlurSearch, Some("ContactsSearch > Input")),
+        key_binding(cx, "escape", BlurSearch, Some("MailSearch > Input")),
+        key_binding(cx, "escape", BlurSearch, Some("ContactsSearch > Input")),
         // Optional Vim commands. `g ...` sequences can coexist:
         // gpui waits for the second key before choosing the action.
-        KeyBinding::new("j", NextItem, Some(VIM_SAFE)),
-        KeyBinding::new("k", PreviousItem, Some(VIM_SAFE)),
-        KeyBinding::new("g g", FirstItem, Some(VIM_SAFE)),
-        KeyBinding::new("shift-g", LastItem, Some(VIM_SAFE)),
-        KeyBinding::new("h", PreviousView, Some(VIM_SAFE)),
-        KeyBinding::new("l", NextView, Some(VIM_SAFE)),
-        KeyBinding::new("g m", ShowMail, Some(VIM_SAFE)),
-        KeyBinding::new("g c", ShowCalendar, Some(VIM_SAFE)),
-        KeyBinding::new("g k", ShowKanban, Some(VIM_SAFE)),
-        KeyBinding::new("g a", ShowContacts, Some(VIM_SAFE)),
-        KeyBinding::new("g p", ShowSettings, Some(VIM_SAFE)),
-        KeyBinding::new("c", NewMessage, Some(VIM_SAFE)),
-        KeyBinding::new("/", FocusSearch, Some(VIM_SAFE)),
-        KeyBinding::new("r", ReplyMessage, Some(VIM_SAFE)),
-        KeyBinding::new("shift-r", ReplyAll, Some(VIM_SAFE)),
-        KeyBinding::new("f", ForwardMessage, Some(VIM_SAFE)),
-        KeyBinding::new("a", OpenQuickActions, Some(VIM_SAFE)),
-        KeyBinding::new("e", ArchiveMessage, Some(VIM_SAFE)),
-        KeyBinding::new("d", DeleteMessage, Some(VIM_SAFE)),
-        KeyBinding::new("s", ToggleFlag, Some(VIM_SAFE)),
-        KeyBinding::new("u", MarkUnread, Some(VIM_SAFE)),
-        KeyBinding::new("q", CloseCurrent, Some(VIM_SAFE)),
+        key_binding(cx, "j", NextItem, Some(VIM_SAFE)),
+        key_binding(cx, "k", PreviousItem, Some(VIM_SAFE)),
+        key_binding(cx, "g g", FirstItem, Some(VIM_SAFE)),
+        key_binding(cx, "shift-g", LastItem, Some(VIM_SAFE)),
+        key_binding(cx, "h", PreviousView, Some(VIM_SAFE)),
+        key_binding(cx, "l", NextView, Some(VIM_SAFE)),
+        key_binding(cx, "g m", ShowMail, Some(VIM_SAFE)),
+        key_binding(cx, "g c", ShowCalendar, Some(VIM_SAFE)),
+        key_binding(cx, "g k", ShowKanban, Some(VIM_SAFE)),
+        key_binding(cx, "g a", ShowContacts, Some(VIM_SAFE)),
+        key_binding(cx, "g p", ShowSettings, Some(VIM_SAFE)),
+        key_binding(cx, "c", NewMessage, Some(VIM_SAFE)),
+        key_binding(cx, "/", FocusSearch, Some(VIM_SAFE)),
+        key_binding(cx, "r", ReplyMessage, Some(VIM_SAFE)),
+        key_binding(cx, "shift-r", ReplyAll, Some(VIM_SAFE)),
+        key_binding(cx, "f", ForwardMessage, Some(VIM_SAFE)),
+        key_binding(cx, "a", OpenQuickActions, Some(VIM_SAFE)),
+        key_binding(cx, "e", ArchiveMessage, Some(VIM_SAFE)),
+        key_binding(cx, "d", DeleteMessage, Some(VIM_SAFE)),
+        key_binding(cx, "s", ToggleFlag, Some(VIM_SAFE)),
+        key_binding(cx, "u", MarkUnread, Some(VIM_SAFE)),
+        key_binding(cx, "q", CloseCurrent, Some(VIM_SAFE)),
         // Composer and inline reply: descendant variants take precedence over
         // `Input` so Ctrl/Cmd+Enter does not insert a line.
-        KeyBinding::new("secondary-enter", SendCompose, Some("Compose")),
-        KeyBinding::new(
+        key_binding(cx, "secondary-enter", SendCompose, Some("Compose")),
+        key_binding(
+            cx,
             "secondary-enter",
             SendCompose,
             Some("Compose > BlockEditor"),
         ),
-        KeyBinding::new("secondary-enter", SendCompose, Some("Compose > Input")),
-        KeyBinding::new("secondary-s", SaveDraft, Some("Compose")),
+        key_binding(cx, "secondary-enter", SendCompose, Some("Compose > Input")),
+        key_binding(cx, "secondary-s", SaveDraft, Some("Compose")),
     ]);
 }
 
@@ -649,7 +671,8 @@ mod tests {
             "/",
             "shift-g",
         ] {
-            Keystroke::parse(keystroke).expect("valid built-in keystroke");
+            Keystroke::parse_with_os(keystroke, gpui_kit::OperatingSystem::Linux)
+                .expect("valid built-in keystroke");
         }
         for context in [
             SAFE,

@@ -6,6 +6,7 @@
 
 use super::display_map::{DisplayMap, FoldableRange};
 use super::overlay_popover::{OverlayPopover, OverlayPopoverScroll};
+use crate::ui::shortcuts::key_binding;
 use gpui_kit::component::{
     menu::{ContextMenuExt as _, PopupMenuItem},
     ActiveTheme, StyledExt as _,
@@ -14,9 +15,9 @@ use gpui_kit::{
     actions, combine_highlights, div, fill, point, prelude::*, px, size, App, Bounds,
     ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity, EntityId,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, HighlightStyle,
-    InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce, SharedString,
-    StyleRefinement, Styled, StyledText, Subscription, TextLayout, UTF16Selection, Window,
+    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce, SharedString, StyleRefinement,
+    Styled, StyledText, Subscription, TextLayout, UTF16Selection, Window,
 };
 use std::{ops::Range, rc::Rc};
 
@@ -79,77 +80,97 @@ actions!(
 
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("backspace", Backspace, Some(INPUT_CONTEXT)),
-        KeyBinding::new("delete", Delete, Some(INPUT_CONTEXT)),
-        KeyBinding::new("enter", Enter, Some(INPUT_CONTEXT)),
-        KeyBinding::new("secondary-enter", Enter, Some(INPUT_CONTEXT)),
-        KeyBinding::new("escape", Escape, Some(INPUT_CONTEXT)),
-        KeyBinding::new("up", MoveUp, Some(INPUT_CONTEXT)),
-        KeyBinding::new("down", MoveDown, Some(INPUT_CONTEXT)),
-        KeyBinding::new("left", MoveLeft, Some(INPUT_CONTEXT)),
-        KeyBinding::new("right", MoveRight, Some(INPUT_CONTEXT)),
-        KeyBinding::new("shift-up", SelectUp, Some(INPUT_CONTEXT)),
-        KeyBinding::new("shift-down", SelectDown, Some(INPUT_CONTEXT)),
-        KeyBinding::new("shift-left", SelectLeft, Some(INPUT_CONTEXT)),
-        KeyBinding::new("shift-right", SelectRight, Some(INPUT_CONTEXT)),
-        KeyBinding::new("home", MoveHome, Some(INPUT_CONTEXT)),
-        KeyBinding::new("end", MoveEnd, Some(INPUT_CONTEXT)),
-        KeyBinding::new("shift-home", SelectToStartOfLine, Some(INPUT_CONTEXT)),
-        KeyBinding::new("shift-end", SelectToEndOfLine, Some(INPUT_CONTEXT)),
-        KeyBinding::new("secondary-up", MoveToStart, Some(INPUT_CONTEXT)),
-        KeyBinding::new("secondary-down", MoveToEnd, Some(INPUT_CONTEXT)),
-        KeyBinding::new("secondary-shift-up", SelectToStart, Some(INPUT_CONTEXT)),
-        KeyBinding::new("secondary-shift-down", SelectToEnd, Some(INPUT_CONTEXT)),
-        KeyBinding::new("secondary-a", SelectAll, Some(INPUT_CONTEXT)),
-        KeyBinding::new("secondary-c", Copy, Some(INPUT_CONTEXT)),
-        KeyBinding::new("secondary-x", Cut, Some(INPUT_CONTEXT)),
-        KeyBinding::new("secondary-v", Paste, Some(INPUT_CONTEXT)),
-        KeyBinding::new("secondary-z", Undo, Some(INPUT_CONTEXT)),
-        KeyBinding::new("secondary-shift-z", Redo, Some(INPUT_CONTEXT)),
-        KeyBinding::new("tab", IndentInline, Some(INPUT_CONTEXT)),
-        KeyBinding::new("shift-tab", OutdentInline, Some(INPUT_CONTEXT)),
+        key_binding(cx, "backspace", Backspace, Some(INPUT_CONTEXT)),
+        key_binding(cx, "delete", Delete, Some(INPUT_CONTEXT)),
+        key_binding(cx, "enter", Enter, Some(INPUT_CONTEXT)),
+        key_binding(cx, "secondary-enter", Enter, Some(INPUT_CONTEXT)),
+        key_binding(cx, "escape", Escape, Some(INPUT_CONTEXT)),
+        key_binding(cx, "up", MoveUp, Some(INPUT_CONTEXT)),
+        key_binding(cx, "down", MoveDown, Some(INPUT_CONTEXT)),
+        key_binding(cx, "left", MoveLeft, Some(INPUT_CONTEXT)),
+        key_binding(cx, "right", MoveRight, Some(INPUT_CONTEXT)),
+        key_binding(cx, "shift-up", SelectUp, Some(INPUT_CONTEXT)),
+        key_binding(cx, "shift-down", SelectDown, Some(INPUT_CONTEXT)),
+        key_binding(cx, "shift-left", SelectLeft, Some(INPUT_CONTEXT)),
+        key_binding(cx, "shift-right", SelectRight, Some(INPUT_CONTEXT)),
+        key_binding(cx, "home", MoveHome, Some(INPUT_CONTEXT)),
+        key_binding(cx, "end", MoveEnd, Some(INPUT_CONTEXT)),
+        key_binding(cx, "shift-home", SelectToStartOfLine, Some(INPUT_CONTEXT)),
+        key_binding(cx, "shift-end", SelectToEndOfLine, Some(INPUT_CONTEXT)),
+        key_binding(cx, "secondary-up", MoveToStart, Some(INPUT_CONTEXT)),
+        key_binding(cx, "secondary-down", MoveToEnd, Some(INPUT_CONTEXT)),
+        key_binding(cx, "secondary-shift-up", SelectToStart, Some(INPUT_CONTEXT)),
+        key_binding(cx, "secondary-shift-down", SelectToEnd, Some(INPUT_CONTEXT)),
+        key_binding(cx, "secondary-a", SelectAll, Some(INPUT_CONTEXT)),
+        key_binding(cx, "secondary-c", Copy, Some(INPUT_CONTEXT)),
+        key_binding(cx, "secondary-x", Cut, Some(INPUT_CONTEXT)),
+        key_binding(cx, "secondary-v", Paste, Some(INPUT_CONTEXT)),
+        key_binding(cx, "secondary-z", Undo, Some(INPUT_CONTEXT)),
+        key_binding(cx, "secondary-shift-z", Redo, Some(INPUT_CONTEXT)),
+        key_binding(cx, "tab", IndentInline, Some(INPUT_CONTEXT)),
+        key_binding(cx, "shift-tab", OutdentInline, Some(INPUT_CONTEXT)),
     ]);
     #[cfg(target_os = "macos")]
     cx.bind_keys([
-        KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some(INPUT_CONTEXT)),
-        KeyBinding::new(
+        key_binding(
+            cx,
+            "ctrl-cmd-space",
+            ShowCharacterPalette,
+            Some(INPUT_CONTEXT),
+        ),
+        key_binding(
+            cx,
             "cmd-backspace",
             DeleteToBeginningOfLine,
             Some(INPUT_CONTEXT),
         ),
-        KeyBinding::new("cmd-delete", DeleteToEndOfLine, Some(INPUT_CONTEXT)),
-        KeyBinding::new(
+        key_binding(cx, "cmd-delete", DeleteToEndOfLine, Some(INPUT_CONTEXT)),
+        key_binding(
+            cx,
             "alt-backspace",
             DeleteToPreviousWordStart,
             Some(INPUT_CONTEXT),
         ),
-        KeyBinding::new("alt-delete", DeleteToNextWordEnd, Some(INPUT_CONTEXT)),
-        KeyBinding::new("alt-left", MoveToPreviousWord, Some(INPUT_CONTEXT)),
-        KeyBinding::new("alt-right", MoveToNextWord, Some(INPUT_CONTEXT)),
-        KeyBinding::new(
+        key_binding(cx, "alt-delete", DeleteToNextWordEnd, Some(INPUT_CONTEXT)),
+        key_binding(cx, "alt-left", MoveToPreviousWord, Some(INPUT_CONTEXT)),
+        key_binding(cx, "alt-right", MoveToNextWord, Some(INPUT_CONTEXT)),
+        key_binding(
+            cx,
             "alt-shift-left",
             SelectToPreviousWordStart,
             Some(INPUT_CONTEXT),
         ),
-        KeyBinding::new("alt-shift-right", SelectToNextWordEnd, Some(INPUT_CONTEXT)),
+        key_binding(
+            cx,
+            "alt-shift-right",
+            SelectToNextWordEnd,
+            Some(INPUT_CONTEXT),
+        ),
     ]);
     #[cfg(not(target_os = "macos"))]
     cx.bind_keys([
-        KeyBinding::new("ctrl-space", ShowCharacterPalette, Some(INPUT_CONTEXT)),
-        KeyBinding::new(
+        key_binding(cx, "ctrl-space", ShowCharacterPalette, Some(INPUT_CONTEXT)),
+        key_binding(
+            cx,
             "ctrl-backspace",
             DeleteToPreviousWordStart,
             Some(INPUT_CONTEXT),
         ),
-        KeyBinding::new("ctrl-delete", DeleteToNextWordEnd, Some(INPUT_CONTEXT)),
-        KeyBinding::new("ctrl-left", MoveToPreviousWord, Some(INPUT_CONTEXT)),
-        KeyBinding::new("ctrl-right", MoveToNextWord, Some(INPUT_CONTEXT)),
-        KeyBinding::new(
+        key_binding(cx, "ctrl-delete", DeleteToNextWordEnd, Some(INPUT_CONTEXT)),
+        key_binding(cx, "ctrl-left", MoveToPreviousWord, Some(INPUT_CONTEXT)),
+        key_binding(cx, "ctrl-right", MoveToNextWord, Some(INPUT_CONTEXT)),
+        key_binding(
+            cx,
             "ctrl-shift-left",
             SelectToPreviousWordStart,
             Some(INPUT_CONTEXT),
         ),
-        KeyBinding::new("ctrl-shift-right", SelectToNextWordEnd, Some(INPUT_CONTEXT)),
+        key_binding(
+            cx,
+            "ctrl-shift-right",
+            SelectToNextWordEnd,
+            Some(INPUT_CONTEXT),
+        ),
     ]);
 }
 

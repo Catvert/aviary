@@ -844,8 +844,8 @@ impl AviaryApp {
                     // On the same div, GPUI's internal scroll handler runs
                     // before this listener; wheel motion then undoes and
                     // animates its line-sized jump.
-                    .on_scroll_wheel(cx.listener(
-                        move |this, event: &gpui_kit::ScrollWheelEvent, window, cx| {
+                    .on_scroll(cx.listener(
+                        move |this, event: &gpui_kit::ScrollEvent, window, cx| {
                             if this.scrolls.viewer.motion.on_wheel(&handle, event, window) {
                                 cx.notify();
                             }

@@ -72,7 +72,7 @@ over a `mailto:` link.
 - **Every user-visible string goes through `tr!`**, with both catalogs updated
   in the same commit. That includes error messages, placeholders and generated
   reply text.
-- **`patches/` is not where you develop.** Those four crates are minimal
+- **`patches/` is not where you develop.** Those three crates are minimal
   buildable copies of published ones, pinned through `[patch.crates-io]`;
   `patches/README.md` lists the exact versions and the modified files. Bumping
   one means re-copying upstream and re-applying those changes.

@@ -426,9 +426,9 @@ pub(super) fn render_element(
     }
 
     if zoomable {
-        wrapper = wrapper.on_scroll_wheel({
+        wrapper = wrapper.on_scroll({
             let key = key.clone();
-            move |event: &ScrollWheelEvent, window, cx| {
+            move |event: &ScrollEvent, window, cx| {
                 if !event.modifiers.control && !event.modifiers.platform {
                     return;
                 }
@@ -668,7 +668,7 @@ pub(super) fn dispatch_pending_mailto(key: &str, window: &mut Window, cx: &mut A
     }
 }
 
-pub(super) fn wheel_zoom_delta(event: &ScrollWheelEvent, window: &Window) -> f32 {
+pub(super) fn wheel_zoom_delta(event: &ScrollEvent, window: &Window) -> f32 {
     match event.delta {
         ScrollDelta::Lines(delta) => {
             let axis = if delta.y == 0.0 { delta.x } else { delta.y };
