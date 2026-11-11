@@ -300,6 +300,26 @@ mod platform {
     /// The socket path is a parameter so the handover can be exercised end to
     /// end in a test directory instead of the session's real runtime dir.
     pub(super) fn acquire_at(path: PathBuf, request: ExternalRequest) -> Acquisition {
+        // Connect, remove the stale file and bind are three steps, and two
+        // processes started together (two `mailto:` links clicked while Aviary
+        // is closed) could interleave them: both fail to connect, the first
+        // binds, the second removes the socket the first just bound and binds
+        // its own — two primaries writing the same session and databases,
+        // which is the very thing this module exists to prevent. An exclusive
+        // lock on a sibling file serializes the sequence; it is released when
+        // this function returns, the bound socket then speaking for itself.
+        // Failing to take it only gives the old behaviour back.
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path.with_extension("lock"))
+            .and_then(|file| file.lock().map(|()| file));
+        if let Err(error) = &lock {
+            log::warn!("single-instance start-up lock unavailable: {error}");
+        }
+        let _lock = lock.ok();
+
         if send_to_running_instance(&path, &request) {
             log::info!("another Aviary instance is running; handed the request over");
             return Acquisition::HandedOver;
@@ -336,7 +356,16 @@ mod platform {
 
         std::thread::Builder::new()
             .name("aviary-single-instance".into())
-            .spawn(move || serve_incoming(listener.incoming(), tx))
+            .spawn(move || {
+                // A peer that connects and says nothing must not park the
+                // listener: every later `mailto:` would hang behind it.
+                let incoming = listener.incoming().map(|stream| {
+                    stream.inspect(|stream| {
+                        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    })
+                });
+                serve_incoming(incoming, tx)
+            })
             .expect("failed to spawn the single-instance listener");
 
         acquisition

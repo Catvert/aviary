@@ -12,9 +12,37 @@ on:
 permissions:
   contents: write
 
+env:
+  # The tag being built. On a manual run `github.ref_name` is the branch the
+  # workflow was launched from, so archives named after it came out as
+  # `aviary-main-…` attached to the release of another tag.
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
 jobs:
+  # A tag pushed on a red commit used to publish all the same: nothing tied
+  # the release to the checks ci.yml runs. The three builds below wait for it.
+  verify:
+    name: fmt, clippy and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      # Same steps as the `check` job of ci.yml, so a release is held to
+      # exactly what a push to main is.
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nix-shell
+      - run: nix-shell --quiet --run "cargo fmt --check"
+      - run: nix-shell --quiet --run "cargo clippy --all-targets -- -D warnings"
+      - run: nix-shell --quiet --run "cargo test"
+
   linux:
     name: Linux x86_64 tarball
+    needs: verify
     # Deliberately *not* built through nix-shell, unlike ci.yml. A binary linked
     # against nixpkgs' glibc carries an ELF interpreter under /nix/store and will
     # not start on an ordinary distribution — exactly the user a downloadable
@@ -57,7 +85,7 @@ jobs:
 
       - name: Assemble the tarball
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           staging="aviary-${version}-x86_64-linux"
           mkdir -p "$staging"
           cp target/release/aviary "$staging/"
@@ -90,6 +118,7 @@ jobs:
   # since Linux is what a tag promises today.
   macos:
     name: macOS ${{ matrix.arch }} bundle
+    needs: verify
     continue-on-error: true
     strategy:
       fail-fast: false
@@ -122,7 +151,7 @@ jobs:
       # notifications) and registers it as a `mailto:` handler.
       - name: Assemble Aviary.app
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           packaging/macos/bundle.sh target/macos
           staging="aviary-${version}-${{ matrix.arch }}-macos"
           mkdir -p "$staging"
@@ -141,6 +170,7 @@ jobs:
 
   windows:
     name: Windows x86_64 archive
+    needs: verify
     continue-on-error: true
     runs-on: windows-latest
 
@@ -161,7 +191,7 @@ jobs:
       - name: Assemble the archive
         shell: pwsh
         run: |
-          $version = "${env:GITHUB_REF_NAME}" -replace '^v', ''
+          $version = "${env:RELEASE_TAG}" -replace '^v', ''
           $staging = "aviary-$version-x86_64-windows"
           New-Item -ItemType Directory -Path $staging | Out-Null
           Copy-Item target/release/aviary.exe $staging/
