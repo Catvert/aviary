@@ -543,7 +543,13 @@ impl MailSerializer {
     fn attributes(&self, element: &scraper::node::Element, out: &mut String) {
         for (name, value) in &element.attrs {
             let local = &*name.local;
-            if local.len() > 2 && local[..2].eq_ignore_ascii_case("on") {
+            // `get`, not a slice: html5ever accepts non-ASCII attribute names,
+            // and byte 2 of one is not necessarily a character boundary.
+            if local.len() > 2
+                && local
+                    .get(..2)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("on"))
+            {
                 continue;
             }
             if local.eq_ignore_ascii_case("srcdoc") || is_script_url(value) {
@@ -724,6 +730,14 @@ mod tests {
         assert_csp_leads_the_head(&output);
         assert!(output.contains(r#"<p title="<head>">x</p>"#), "{output}");
         assert!(!output.contains("<script"), "{output}");
+    }
+
+    #[test]
+    fn a_non_ascii_attribute_name_does_not_panic() {
+        // Byte 2 of `a中` falls inside the second character.
+        let output = preview("<p a中=\"1\" 中文=\"2\">x</p>", false);
+
+        assert!(output.contains(">x</p>"), "{output}");
     }
 
     #[test]

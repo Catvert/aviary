@@ -255,6 +255,18 @@ impl AviaryApp {
                     | Evt::QuickActionMessageState { .. }
                     | Evt::TagApplyError { .. }
                     | Evt::TagListing { .. } => self.account(aid).is_some(),
+                    // Mail arriving on an account that is not on screen still
+                    // has to notify and to go through the block list:
+                    // `on_new_messages` filters the *insertion* itself.
+                    Evt::NewMessages { .. } => self.account(aid).is_some(),
+                    // These two close a bulk batch (`BulkCompletions`) and
+                    // carry the pin bookkeeping. Dropping them because the
+                    // user switched account inside the undo window left the
+                    // batch open, its failures untoasted and its pins stale.
+                    // Both reducers are keyed by account.
+                    Evt::MessageMoved { .. } | Evt::MessageDeleted { .. } => {
+                        self.account(aid).is_some()
+                    }
                     Evt::MessageOpened { message, .. }
                     | Evt::CachedMessageOpened { message, .. } => {
                         self.event_relevant(aid)

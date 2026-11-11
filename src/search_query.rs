@@ -299,7 +299,9 @@ fn parse_date(value: &str) -> Option<NaiveDate> {
         .or_else(|| folded.strip_suffix('d'))
         .and_then(|digits| digits.parse::<i64>().ok())
     {
-        return today.checked_sub_signed(chrono::Duration::days(days));
+        // `try_days`: `Duration::days` panics on a count that overflows its
+        // millisecond representation, and this is typed text.
+        return today.checked_sub_signed(chrono::Duration::try_days(days)?);
     }
     for format in ["%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d", "%d-%m-%Y", "%d.%m.%Y"] {
         if let Ok(date) = NaiveDate::parse_from_str(value, format) {
@@ -334,6 +336,13 @@ mod tests {
             conversation_id: None,
             internet_message_id: None,
         }
+    }
+
+    #[test]
+    fn an_absurd_relative_date_is_not_a_date() {
+        // Used to panic inside `Duration::days`.
+        assert_eq!(parse_date("999999999999j"), None);
+        assert_eq!(parse_date("999999999999999999d"), None);
     }
 
     #[test]
