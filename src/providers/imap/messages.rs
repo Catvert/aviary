@@ -171,11 +171,11 @@ fn merge_special_folders(
     *existing = merged;
 }
 
-fn make_id(folder: &str, uid: u32) -> String {
+pub(super) fn make_id(folder: &str, uid: u32) -> String {
     format!("{}:{}", urlencoding::encode(folder), uid)
 }
 
-fn parse_id(id: &str) -> Result<(String, u32)> {
+pub(super) fn parse_id(id: &str) -> Result<(String, u32)> {
     let (f, u) = id
         .rsplit_once(':')
         .ok_or_else(|| anyhow!("identifiant message invalide : {id}"))?;
@@ -814,10 +814,18 @@ pub async fn delete_message(auth: &ImapAuth<'_>, id: &str) -> Result<()> {
         // Resolve the trash before touching the message: without one there is
         // nowhere safe to put it, and deleting would mean destroying.
         let trash = guess_trash_name(session).ok_or_else(|| anyhow!(tr!("imap-error-no-trash")))?;
+        // An account can hold several trash mailboxes — `Trash` next to a
+        // localized `Corbeille` left by another client — which the folder
+        // list merges into one row. Deleting from the one that is not the
+        // preferred trash used to *move* the message to the other: it came
+        // back in the same view under a new id, and took a second delete.
+        let in_a_trash = trash == folder
+            || mailboxes_for_alias(session, "deleteditems")
+                .is_ok_and(|trashes| trashes.contains(&folder));
         session.select(&folder).with_context(
             || tr!("technical-operation-failed", { operation: format!("SELECT {folder}") }),
         )?;
-        if trash == folder {
+        if in_a_trash {
             // Deleting from the trash itself is the one deliberate purge.
             // Still scoped to this UID: a bare EXPUNGE would also erase what
             // other clients merely flagged `\Deleted`.
@@ -1427,6 +1435,137 @@ fn first_message_id(value: &mail_parser::HeaderValue<'_>) -> Option<String> {
     .map(str::trim)
     .filter(|id| !id.is_empty())
     .map(str::to_string)
+}
+
+/// Every id of a `References`/`In-Reply-To` style header, in order.
+fn all_message_ids(value: &mail_parser::HeaderValue<'_>) -> Vec<String> {
+    let ids: Vec<&str> = match value {
+        mail_parser::HeaderValue::Text(text) => vec![text.as_ref()],
+        mail_parser::HeaderValue::TextList(list) => list.iter().map(|id| id.as_ref()).collect(),
+        _ => Vec::new(),
+    };
+    ids.into_iter()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The `In-Reply-To` and `References` headers a reply to `original` must
+/// carry (RFC 5322 §3.6.4): the original's own id, appended to the chain it
+/// already holds. Without them the reply opens a new thread at the
+/// recipient's — and in Aviary itself, whose IMAP conversations are derived
+/// from exactly these headers ([`derived_conversation_id`]).
+fn reply_thread_headers(original: &mail_parser::Message<'_>) -> Vec<(&'static str, String)> {
+    let Some(id) = original.message_id().filter(|id| !id.is_empty()) else {
+        return Vec::new();
+    };
+    let mut chain = all_message_ids(original.references());
+    if chain.is_empty() {
+        chain = all_message_ids(original.in_reply_to());
+    }
+    chain.retain(|known| known != id);
+    chain.push(id.to_string());
+    let bracketed = |id: &String| format!("<{id}>");
+    vec![
+        ("In-Reply-To", format!("<{id}>")),
+        (
+            "References",
+            chain.iter().map(bracketed).collect::<Vec<_>>().join(" "),
+        ),
+    ]
+}
+
+/// Reads the threading headers for a reply to the message `id`.
+pub(super) fn fetch_reply_headers(
+    session: &mut ImapSession,
+    id: &str,
+) -> Result<Vec<(&'static str, String)>> {
+    let (folder, uid) = parse_id(id)?;
+    session.select(&folder).with_context(
+        || tr!("technical-operation-failed", { operation: format!("SELECT {folder}") }),
+    )?;
+    let fetches = session
+        .uid_fetch(
+            uid.to_string(),
+            "BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)]",
+        )
+        .context(tr!("technical-operation-failed", { operation: "UID FETCH (reply headers)" }))?;
+    Ok(fetches
+        .iter()
+        .find_map(|fetch| fetch.header())
+        .and_then(|bytes| MessageParser::default().parse_headers(bytes))
+        .map(|parsed| reply_thread_headers(&parsed))
+        .unwrap_or_default())
+}
+
+/// Selectable mailboxes of the account that carry a well-known alias, the
+/// server's own designation (RFC 6154) before name conventions.
+pub(super) fn mailboxes_for_alias(session: &mut ImapSession, alias: &str) -> Result<Vec<String>> {
+    let names = session
+        .list(Some(""), Some("*"))
+        .context(tr!("technical-operation-failed", { operation: "LIST IMAP" }))?;
+    let mut found: Vec<(u8, String)> = names
+        .iter()
+        .filter_map(|entry| {
+            let attrs: Vec<String> = entry
+                .attributes()
+                .iter()
+                .map(|attr| format!("{attr:?}").to_ascii_lowercase())
+                .collect();
+            if attrs.iter().any(|attr| attr.contains("noselect")) {
+                return None;
+            }
+            let known = well_known_for(entry.name(), entry.delimiter(), &attrs)?;
+            (known.alias == alias).then(|| (known.priority, entry.name().to_string()))
+        })
+        .collect();
+    found.sort_by_key(|(priority, _)| std::cmp::Reverse(*priority));
+    Ok(found.into_iter().map(|(_, name)| name).collect())
+}
+
+/// UID of the newest message of `folder` whose `Message-ID` is
+/// `internet_message_id` (given without angle brackets).
+pub(super) fn find_uid_by_message_id(
+    session: &mut ImapSession,
+    folder: &str,
+    internet_message_id: &str,
+) -> Result<Option<u32>> {
+    session.select(folder).with_context(
+        || tr!("technical-operation-failed", { operation: format!("SELECT {folder}") }),
+    )?;
+    let keys = search_command(&[
+        search_key("HEADER MESSAGE-ID", internet_message_id),
+        NOT_DELETED.to_string(),
+    ]);
+    let uids = session
+        .uid_search(&keys)
+        .context(tr!("technical-operation-failed", { operation: "UID SEARCH (Message-ID)" }))?;
+    Ok(uids.into_iter().max())
+}
+
+/// Provider id of the Sent copy carrying this `Message-ID`, if the server
+/// has one.
+pub async fn find_sent_message(
+    auth: &ImapAuth<'_>,
+    internet_message_id: &str,
+) -> Result<Option<String>> {
+    let internet_message_id = internet_message_id
+        .trim()
+        .trim_matches(['<', '>'])
+        .to_string();
+    if internet_message_id.is_empty() {
+        return Ok(None);
+    }
+    with_session(auth, move |session| {
+        for folder in mailboxes_for_alias(session, "sentitems")? {
+            if let Some(uid) = find_uid_by_message_id(session, &folder, &internet_message_id)? {
+                return Ok(Some(make_id(&folder, uid)));
+            }
+        }
+        Ok(None)
+    })
+    .await
 }
 
 /// Thread identifier for a protocol that has none.
@@ -2535,5 +2674,67 @@ mod tests {
         assert_eq!(pick_trash_mailbox(&entries), None);
         let entries = vec![entry("Trash", &["NoSelect"])];
         assert_eq!(pick_trash_mailbox(&entries), None);
+    }
+}
+
+#[cfg(test)]
+mod reply_header_tests {
+    use super::{reply_thread_headers, MessageParser};
+
+    fn headers_for(raw: &str) -> Vec<(&'static str, String)> {
+        let parsed = MessageParser::default()
+            .parse_headers(raw.as_bytes())
+            .expect("synthetic headers parse");
+        reply_thread_headers(&parsed)
+    }
+
+    #[test]
+    fn a_reply_extends_the_chain_of_its_original() {
+        let headers = headers_for(
+            "Message-ID: <third@example.test>\r\n\
+             References: <root@example.test> <second@example.test>\r\n\r\n",
+        );
+        assert_eq!(
+            headers,
+            vec![
+                ("In-Reply-To", "<third@example.test>".to_string()),
+                (
+                    "References",
+                    "<root@example.test> <second@example.test> <third@example.test>".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reply_to_a_root_message_starts_the_chain() {
+        let headers = headers_for("Message-ID: <root@example.test>\r\n\r\n");
+        assert_eq!(
+            headers,
+            vec![
+                ("In-Reply-To", "<root@example.test>".to_string()),
+                ("References", "<root@example.test>".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn in_reply_to_stands_in_for_missing_references() {
+        let headers = headers_for(
+            "Message-ID: <second@example.test>\r\n\
+             In-Reply-To: <root@example.test>\r\n\r\n",
+        );
+        assert_eq!(
+            headers[1],
+            (
+                "References",
+                "<root@example.test> <second@example.test>".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn an_original_without_message_id_yields_no_headers() {
+        assert!(headers_for("Subject: Sujet de test\r\n\r\n").is_empty());
     }
 }

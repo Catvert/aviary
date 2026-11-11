@@ -365,13 +365,51 @@ pub(super) fn refresh_inbox(
     Box::pin(refresh_inbox_inner(account, folder_id, limit))
 }
 
+/// Cached IMAP ids that the server's fresh page proves gone.
+///
+/// IMAP has no change feed here: the incremental sync only learns of *new*
+/// UIDs, so a message deleted or moved from another client stayed in the
+/// cache for good — repainted at every folder open before the server's page
+/// replaced it, and found by local search though it could no longer be
+/// opened. An IMAP id is `<folder>:<uid>` and a page is a contiguous run of
+/// the highest UIDs of its folder, which is what makes the absence provable:
+/// a cached id of the same folder, at or above the page's lowest UID, that
+/// the page does not contain, no longer exists. When the page is the whole
+/// folder (`complete`), anything it lacks is gone.
+fn stale_imap_ids(cached: &[String], fresh: &[String], complete: bool) -> Vec<String> {
+    fn split(id: &str) -> Option<(&str, u32)> {
+        let (folder, uid) = id.rsplit_once(':')?;
+        Some((folder, uid.parse().ok()?))
+    }
+    let fresh_ids: std::collections::HashSet<&str> = fresh.iter().map(String::as_str).collect();
+    let mut lowest: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+    for (folder, uid) in fresh.iter().filter_map(|id| split(id)) {
+        lowest
+            .entry(folder)
+            .and_modify(|low| *low = (*low).min(uid))
+            .or_insert(uid);
+    }
+    cached
+        .iter()
+        .filter(|id| !fresh_ids.contains(id.as_str()))
+        .filter(|id| {
+            complete
+                || split(id)
+                    .is_some_and(|(folder, uid)| lowest.get(folder).is_some_and(|low| uid >= *low))
+        })
+        .cloned()
+        .collect()
+}
+
 async fn refresh_inbox_inner(account: Arc<BgAccount>, folder_id: Option<String>, limit: usize) {
+    let mut cached_ids: Vec<String> = Vec::new();
     if let Ok(cached) = account
         .global
         .cache
         .load_headers(account.id.clone(), folder_id.clone(), limit, 0)
         .await
     {
+        cached_ids = cached.iter().map(|header| header.id.clone()).collect();
         if !cached.is_empty() {
             account.emit(Evt::CachedMessages {
                 account_id: account.id.clone(),
@@ -441,6 +479,12 @@ async fn refresh_inbox_inner(account: Arc<BgAccount>, folder_id: Option<String>,
             if folder_id.is_none() {
                 let mut seen = account.seen_ids.lock().await;
                 *seen = msgs.iter().map(|h| h.id.clone()).collect();
+            }
+            if account.provider == Provider::Imap {
+                let fresh: Vec<String> = msgs.iter().map(|header| header.id.clone()).collect();
+                for id in stale_imap_ids(&cached_ids, &fresh, msgs.len() < limit) {
+                    account.global.cache.remove_message(account.id.clone(), id);
+                }
             }
             account
                 .global
@@ -1277,13 +1321,27 @@ pub(super) async fn perform_move(
         .move_message(&message_id, source_folder_id.as_deref(), &target_folder_id)
         .await?;
     account.seen_ids.lock().await.remove(&message_id);
-    account.global.cache.move_message(
-        account.id.clone(),
-        message_id.clone(),
-        source_folder_id.clone(),
-        target_folder_id.clone(),
-        new_id.clone(),
-    );
+    if new_id.is_none() && account.provider == Provider::Imap {
+        // An IMAP id *is* its position (`<folder>:<uid>`), and a move without
+        // UIDPLUS does not say where the message landed. Keeping the row
+        // under the target folder, as for Gmail whose ids are stable, filed a
+        // dead id there: a ghost row in the cached page and in local search,
+        // "UID not found" when opened, and a double of the real message once
+        // the folder was listed. The next listing of the target brings the
+        // message back under its real id.
+        account
+            .global
+            .cache
+            .remove_message(account.id.clone(), message_id.clone());
+    } else {
+        account.global.cache.move_message(
+            account.id.clone(),
+            message_id.clone(),
+            source_folder_id.clone(),
+            target_folder_id.clone(),
+            new_id.clone(),
+        );
+    }
     account.emit(Evt::MessageMoved {
         account_id: account.id.clone(),
         message_id,
@@ -1292,4 +1350,39 @@ pub(super) async fn perform_move(
         new_id,
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod stale_imap_tests {
+    use super::stale_imap_ids;
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn a_cached_id_inside_the_page_window_but_absent_from_it_is_gone() {
+        let cached = ids(&["INBOX:50", "INBOX:49", "INBOX:48", "INBOX:12"]);
+        let fresh = ids(&["INBOX:51", "INBOX:50", "INBOX:48"]);
+        // 49 sits inside 48..=51 and is missing; 12 is older than the page
+        // and simply was not listed.
+        assert_eq!(stale_imap_ids(&cached, &fresh, false), ids(&["INBOX:49"]));
+    }
+
+    #[test]
+    fn a_complete_listing_condemns_everything_it_lacks() {
+        let cached = ids(&["INBOX:50", "INBOX:12"]);
+        let fresh = ids(&["INBOX:50"]);
+        assert_eq!(stale_imap_ids(&cached, &fresh, true), ids(&["INBOX:12"]));
+        assert_eq!(stale_imap_ids(&cached, &[], true), cached);
+    }
+
+    #[test]
+    fn folders_are_judged_separately() {
+        // A merged virtual folder lists two mailboxes; a high UID in one
+        // says nothing about the other.
+        let cached = ids(&["Trash:5", "Corbeille:900"]);
+        let fresh = ids(&["Trash:7", "Trash:6"]);
+        assert!(stale_imap_ids(&cached, &fresh, false).is_empty());
+    }
 }

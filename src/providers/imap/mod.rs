@@ -31,10 +31,10 @@ pub(crate) use messages::{
 };
 
 pub use messages::{
-    create_folder, delete_folder, delete_message, fetch_attachment, fetch_messages_page, get_me,
-    get_message, list_folder_messages, list_folder_messages_page, list_folders, list_from_sender,
-    list_thread, mark_read, move_message, note_last_action, rename_folder, search, set_flag,
-    sync_folder_messages,
+    create_folder, delete_folder, delete_message, fetch_attachment, fetch_messages_page,
+    find_sent_message, get_me, get_message, list_folder_messages, list_folder_messages_page,
+    list_folders, list_from_sender, list_thread, mark_read, move_message, note_last_action,
+    rename_folder, search, set_flag, sync_folder_messages,
 };
 pub use send::{delete_draft, save_draft, send_mail, send_reply};
 pub use tags::{

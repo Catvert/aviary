@@ -818,9 +818,7 @@ impl Session<'_> {
                 }
             }
             Session::Gmail { client, token } => gmail::send_mail(client, token, msg).await,
-            Session::Imap(imap) => imap::send_mail(imap, msg)
-                .await
-                .map(|()| SentIds::default()),
+            Session::Imap(imap) => imap::send_mail(imap, msg).await,
         }
     }
 
@@ -837,9 +835,7 @@ impl Session<'_> {
             Session::Gmail { client, token } => {
                 gmail::send_reply(client, token, reply_to_id, msg).await
             }
-            Session::Imap(imap) => imap::send_reply(imap, reply_to_id, msg)
-                .await
-                .map(|()| SentIds::default()),
+            Session::Imap(imap) => imap::send_reply(imap, reply_to_id, msg).await,
         }
     }
 
@@ -852,8 +848,9 @@ impl Session<'_> {
                 graph::find_sent_copy_id(client, internet_message_id).await
             }
             // Gmail replies already carry the sent copy's id from
-            // `messages.send`; IMAP has no server-side lookup.
-            Session::Gmail { .. } | Session::Imap(_) => Ok(None),
+            // `messages.send`.
+            Session::Gmail { .. } => Ok(None),
+            Session::Imap(imap) => imap::find_sent_message(imap, internet_message_id).await,
         }
     }
 

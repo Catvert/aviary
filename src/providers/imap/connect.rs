@@ -11,13 +11,32 @@ use crate::auth::NetSecurity;
 use crate::model::AccountId;
 use crate::providers::ImapAuth;
 use anyhow::{Context, Result};
+use imap::extensions::idle::SetReadTimeout as _;
 use imap::{ClientBuilder, Connection, ConnectionMode, Session, TlsKind};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 pub type ImapSession = Session<Connection>;
-type SessionSlot = Arc<Mutex<Option<ImapSession>>>;
+/// A pooled session and when it last served a call.
+type SessionSlot = Arc<Mutex<Option<(ImapSession, Instant)>>>;
+
+/// Longest silence tolerated from the server inside one command. Without it a
+/// socket that died quietly — the machine slept, the network changed — parks
+/// the blocking thread until TCP gives up, a quarter of an hour during which
+/// it holds the account's session, a mailbox permit and, for a mutation, the
+/// outbox drain: listing, opening and sending all freeze with no error. A
+/// read timeout applies to each read, not to the whole command, so a large
+/// FETCH that keeps flowing is unaffected.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A pooled session idle for longer than this is not probed but replaced. A
+/// `NOOP` on a dead socket costs the whole [`READ_TIMEOUT`] before the
+/// reconnection that was needed anyway; reconnecting outright costs half a
+/// second. Servers drop idle connections after 30 minutes at the latest
+/// (RFC 3501 §5.4), and a laptop that slept has usually lost them sooner.
+const MAX_POOLED_IDLE: Duration = Duration::from_secs(5 * 60);
 
 static SESSION_POOL: OnceLock<Mutex<HashMap<String, SessionSlot>>> = OnceLock::new();
 
@@ -57,6 +76,21 @@ pub fn open_session(auth: &ImapAuth<'_>) -> Result<ImapSession> {
                 port: auth.imap_port
             })
         })?;
+    // The builder hands back a connected client with no way to reach its
+    // socket, but the connection itself can be told its read timeout: take it
+    // out, set it, and wrap it again. The greeting has been read by then and
+    // nothing is buffered, so the round trip loses no byte.
+    let mut connection = client.into_inner().with_context(|| {
+        tr!("imap-error-connect", {
+            host: auth.imap_host,
+            port: auth.imap_port
+        })
+    })?;
+    if let Err(error) = connection.set_read_timeout(Some(READ_TIMEOUT)) {
+        log::warn!("IMAP read timeout could not be set: {error}");
+    }
+    let mut client = imap::Client::new(connection);
+    client.greeting_read = true;
     let session = client
         .login(auth.imap_username, auth.password)
         .map_err(|(e, _client)| login_error(e))?;
@@ -107,19 +141,18 @@ where
         let mut guard = slot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut session = match guard.take() {
-            Some(mut session) => {
-                if session.noop().is_ok() {
-                    session
-                } else {
-                    open_session_with_keyring_refresh(&mut owned)?
-                }
-            }
+        let pooled = guard.take().and_then(|(mut session, last_used)| {
+            (last_used.elapsed() <= MAX_POOLED_IDLE && session.noop().is_ok()).then_some(session)
+        });
+        let mut session = match pooled {
+            Some(session) => session,
             None => open_session_with_keyring_refresh(&mut owned)?,
         };
         let result = f(&mut session);
-        if session.noop().is_ok() {
-            *guard = Some(session);
+        // A call that succeeded has just proved the session works; only a
+        // failure needs the probe to tell a refused command from a dead link.
+        if result.is_ok() || session.noop().is_ok() {
+            *guard = Some((session, Instant::now()));
         }
         result
     });
@@ -141,7 +174,7 @@ pub async fn close_session(auth: &ImapAuth<'_>) -> Result<()> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        if let Some(mut session) = session {
+        if let Some((mut session, _)) = session {
             let _ = session.logout();
         }
     })
